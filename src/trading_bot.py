@@ -7,21 +7,21 @@ Supports both live trading and paper trading modes.
 
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, date
-from typing import Optional, Dict, Any, List
 from enum import Enum
+from typing import Any, Dict, Optional
 
-from .smart_strategy import SmartStrategy, StrategyConfig, Signal, TodaySignal
-from .etrade_client import ETradeClient, ETradeAPIError, ETradeAuthError
-from .notifications import NotificationManager, NotificationType, NotificationConfig
 from .database import Database, get_database
-from .utils import get_et_now, format_currency
+from .etrade_client import ETradeAPIError, ETradeAuthError, ETradeClient
+from .notifications import NotificationConfig, NotificationManager, NotificationType
+from .smart_strategy import Signal, SmartStrategy, StrategyConfig, TodaySignal
+from .utils import get_et_now
 
 logger = logging.getLogger(__name__)
 
 
 class TradingMode(Enum):
     """Trading mode."""
+
     LIVE = "live"
     PAPER = "paper"
 
@@ -29,6 +29,7 @@ class TradingMode(Enum):
 @dataclass
 class TradeResult:
     """Result of a trade execution."""
+
     success: bool
     signal: Signal
     etf: str
@@ -44,6 +45,7 @@ class TradeResult:
 @dataclass
 class BotConfig:
     """Configuration for the trading bot."""
+
     # Strategy settings
     strategy: StrategyConfig = field(default_factory=StrategyConfig)
 
@@ -75,7 +77,7 @@ class TradingBot:
         config: BotConfig,
         client: Optional[ETradeClient] = None,
         notifications: Optional[NotificationManager] = None,
-        db: Optional[Database] = None
+        db: Optional[Database] = None,
     ):
         self.config = config
         self.client = client
@@ -130,10 +132,10 @@ class TradingBot:
         all_data = quote.get("All", {})
 
         return {
-            'current_price': float(all_data.get("lastTrade", 0)),
-            'open_price': float(all_data.get("open", 0)),
-            'bid': float(all_data.get("bid", 0)),
-            'ask': float(all_data.get("ask", 0)),
+            "current_price": float(all_data.get("lastTrade", 0)),
+            "open_price": float(all_data.get("open", 0)),
+            "bid": float(all_data.get("bid", 0)),
+            "ask": float(all_data.get("ask", 0)),
         }
 
     def execute_signal(self, signal: Optional[TodaySignal] = None) -> TradeResult:
@@ -157,7 +159,7 @@ class TradingBot:
                 signal=signal.signal,
                 etf="CASH",
                 action="NONE",
-                is_paper=self.is_paper_mode
+                is_paper=self.is_paper_mode,
             )
 
         etf = signal.etf
@@ -165,7 +167,7 @@ class TradingBot:
         try:
             # Get quote
             quote = self.get_quote(etf)
-            price = quote['current_price']
+            price = quote["current_price"]
 
             if price <= 0:
                 raise ValueError(f"Invalid price for {etf}: {price}")
@@ -179,7 +181,7 @@ class TradingBot:
                     signal=signal.signal,
                     etf=etf,
                     action="BUY",
-                    error="Insufficient capital for trade"
+                    error="Insufficient capital for trade",
                 )
 
             # Execute trade
@@ -208,15 +210,11 @@ class TradingBot:
                 etf=etf,
                 action="BUY",
                 error=str(e),
-                is_paper=self.is_paper_mode
+                is_paper=self.is_paper_mode,
             )
 
     def _execute_paper_trade(
-        self,
-        etf: str,
-        shares: int,
-        price: float,
-        signal: TodaySignal
+        self, etf: str, shares: int, price: float, signal: TodaySignal
     ) -> TradeResult:
         """Execute a paper trade."""
         total_value = shares * price
@@ -226,10 +224,10 @@ class TradingBot:
 
         # Track position
         self._paper_positions[etf] = {
-            'shares': shares,
-            'entry_price': price,
-            'entry_time': get_et_now(),
-            'signal': signal.signal.value
+            "shares": shares,
+            "entry_price": price,
+            "entry_time": get_et_now(),
+            "signal": signal.signal.value,
         }
 
         logger.info(f"[PAPER] Bought {shares} {etf} @ ${price:.2f} = ${total_value:.2f}")
@@ -243,15 +241,10 @@ class TradingBot:
             price=price,
             total_value=total_value,
             order_id=f"PAPER-{get_et_now().strftime('%Y%m%d%H%M%S')}",
-            is_paper=True
+            is_paper=True,
         )
 
-    def _execute_live_trade(
-        self,
-        etf: str,
-        shares: int,
-        signal: TodaySignal
-    ) -> TradeResult:
+    def _execute_live_trade(self, etf: str, shares: int, signal: TodaySignal) -> TradeResult:
         """Execute a live trade via E*TRADE."""
         if not self.client or not self.client.is_authenticated():
             raise ETradeAuthError("E*TRADE client not authenticated")
@@ -263,7 +256,7 @@ class TradingBot:
                 symbol=etf,
                 action="BUY",
                 quantity=shares,
-                order_type="MARKET"
+                order_type="MARKET",
             )
 
             # Get estimated price from preview
@@ -276,7 +269,7 @@ class TradingBot:
                 action="BUY",
                 quantity=shares,
                 order_type="MARKET",
-                preview_ids=preview.get("PreviewIds", [])
+                preview_ids=preview.get("PreviewIds", []),
             )
 
             order_id = str(order_response.get("OrderId", ""))
@@ -295,7 +288,7 @@ class TradingBot:
                 price=fill_price,
                 total_value=estimated_value,
                 order_id=order_id,
-                is_paper=False
+                is_paper=False,
             )
 
         except ETradeAPIError as e:
@@ -306,7 +299,7 @@ class TradingBot:
                 etf=etf,
                 action="BUY",
                 error=str(e),
-                is_paper=False
+                is_paper=False,
             )
 
     def close_position(self, etf: str) -> TradeResult:
@@ -325,21 +318,21 @@ class TradingBot:
                 etf=etf,
                 action="SELL",
                 error=f"No open position in {etf}",
-                is_paper=True
+                is_paper=True,
             )
 
         position = self._paper_positions[etf]
-        shares = position['shares']
-        entry_price = position['entry_price']
+        shares = position["shares"]
+        entry_price = position["entry_price"]
 
         # Get current price
         quote = self.get_quote(etf)
-        exit_price = quote['current_price']
+        exit_price = quote["current_price"]
         total_value = shares * exit_price
 
         # Calculate P&L
         pnl = (exit_price - entry_price) * shares
-        pnl_pct = ((exit_price - entry_price) / entry_price) * 100
+        _pnl_pct = ((exit_price - entry_price) / entry_price) * 100  # noqa: F841
 
         # Update capital
         self._paper_capital += total_value
@@ -347,7 +340,9 @@ class TradingBot:
         # Remove position
         del self._paper_positions[etf]
 
-        logger.info(f"[PAPER] Sold {shares} {etf} @ ${exit_price:.2f} = ${total_value:.2f} (P&L: ${pnl:+.2f})")
+        logger.info(
+            f"[PAPER] Sold {shares} {etf} @ ${exit_price:.2f} = ${total_value:.2f} (P&L: ${pnl:+.2f})"
+        )
 
         return TradeResult(
             success=True,
@@ -358,7 +353,7 @@ class TradingBot:
             price=exit_price,
             total_value=total_value,
             order_id=f"PAPER-SELL-{get_et_now().strftime('%Y%m%d%H%M%S')}",
-            is_paper=True
+            is_paper=True,
         )
 
     def _close_live_position(self, etf: str) -> TradeResult:
@@ -383,7 +378,7 @@ class TradingBot:
                 etf=etf,
                 action="SELL",
                 error=f"No position found in {etf}",
-                is_paper=False
+                is_paper=False,
             )
 
         shares = int(etf_position.get("quantity", 0))
@@ -395,7 +390,7 @@ class TradingBot:
                 symbol=etf,
                 action="SELL",
                 quantity=shares,
-                order_type="MARKET"
+                order_type="MARKET",
             )
 
             order_id = str(order_response.get("OrderId", ""))
@@ -409,7 +404,7 @@ class TradingBot:
                 action="SELL",
                 shares=shares,
                 order_id=order_id,
-                is_paper=False
+                is_paper=False,
             )
 
         except ETradeAPIError as e:
@@ -419,7 +414,7 @@ class TradingBot:
                 etf=etf,
                 action="SELL",
                 error=str(e),
-                is_paper=False
+                is_paper=False,
             )
 
     def _notify_trade(self, result: TradeResult, signal: TodaySignal):
@@ -444,11 +439,7 @@ class TradingBot:
         if not self.notifications:
             return
 
-        self.notifications.send(
-            "Trading Bot Error",
-            error,
-            NotificationType.ERROR
-        )
+        self.notifications.send("Trading Bot Error", error, NotificationType.ERROR)
 
     def _log_trade(self, result: TradeResult, signal: TodaySignal):
         """Log trade to database."""
@@ -456,16 +447,16 @@ class TradingBot:
             event_type="TRADE" if result.success else "TRADE_FAILED",
             message=f"{result.action} {result.shares} {result.etf}",
             data={
-                'signal': signal.signal.value,
-                'etf': result.etf,
-                'shares': result.shares,
-                'price': result.price,
-                'total_value': result.total_value,
-                'order_id': result.order_id,
-                'is_paper': result.is_paper,
-                'error': result.error,
-                'reason': signal.reason
-            }
+                "signal": signal.signal.value,
+                "etf": result.etf,
+                "shares": result.shares,
+                "price": result.price,
+                "total_value": result.total_value,
+                "order_id": result.order_id,
+                "is_paper": result.is_paper,
+                "error": result.error,
+                "reason": signal.reason,
+            },
         )
 
     def get_status(self) -> Dict[str, Any]:
@@ -473,26 +464,26 @@ class TradingBot:
         signal = self.get_today_signal()
 
         status = {
-            'mode': self.config.mode.value,
-            'today_signal': signal.signal.value,
-            'signal_etf': signal.etf,
-            'signal_reason': signal.reason,
-            'timestamp': get_et_now().isoformat()
+            "mode": self.config.mode.value,
+            "today_signal": signal.signal.value,
+            "signal_etf": signal.etf,
+            "signal_reason": signal.reason,
+            "timestamp": get_et_now().isoformat(),
         }
 
         if self.is_paper_mode:
-            status['paper_capital'] = self._paper_capital
-            status['paper_positions'] = self._paper_positions
+            status["paper_capital"] = self._paper_capital
+            status["paper_positions"] = self._paper_positions
         else:
             if self.client and self.client.is_authenticated():
                 try:
-                    status['cash_available'] = self.get_available_capital()
-                    status['authenticated'] = True
+                    status["cash_available"] = self.get_available_capital()
+                    status["authenticated"] = True
                 except Exception as e:
-                    status['authenticated'] = False
-                    status['auth_error'] = str(e)
+                    status["authenticated"] = False
+                    status["auth_error"] = str(e)
             else:
-                status['authenticated'] = False
+                status["authenticated"] = False
 
         return status
 
@@ -503,7 +494,7 @@ def create_trading_bot(
     account_id_key: str = "",
     mean_reversion_threshold: float = -2.0,
     mean_reversion_enabled: bool = True,
-    short_thursday_enabled: bool = True
+    short_thursday_enabled: bool = True,
 ) -> TradingBot:
     """
     Factory function to create a configured TradingBot.
@@ -522,16 +513,13 @@ def create_trading_bot(
     strategy_config = StrategyConfig(
         mean_reversion_enabled=mean_reversion_enabled,
         mean_reversion_threshold=mean_reversion_threshold,
-        short_thursday_enabled=short_thursday_enabled
+        short_thursday_enabled=short_thursday_enabled,
     )
 
     bot_config = BotConfig(
         strategy=strategy_config,
         mode=TradingMode.LIVE if mode == "live" else TradingMode.PAPER,
-        account_id_key=account_id_key
+        account_id_key=account_id_key,
     )
 
-    return TradingBot(
-        config=bot_config,
-        client=etrade_client
-    )
+    return TradingBot(config=bot_config, client=etrade_client)

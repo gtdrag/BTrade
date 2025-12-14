@@ -5,15 +5,14 @@ Validates strategy performance using historical IBIT data.
 
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, date, timedelta
-from typing import Optional, List, Dict, Any, Tuple
+from datetime import date, timedelta
 from pathlib import Path
+from typing import Dict, List, Optional, Tuple
 
-import pandas as pd
 import numpy as np
+import pandas as pd
 
-from .utils import is_market_holiday, ET
-
+from .utils import is_market_holiday
 
 logger = logging.getLogger(__name__)
 
@@ -21,14 +20,15 @@ logger = logging.getLogger(__name__)
 @dataclass
 class BacktestConfig:
     """Configuration for backtesting."""
+
     # Date range
     start_date: date = None
     end_date: date = None
 
     # Strategy parameters
     regular_threshold: float = 0.6  # Default dip threshold
-    monday_threshold: float = 1.0   # Monday threshold (if enabled)
-    monday_enabled: bool = False    # Trade on Mondays
+    monday_threshold: float = 1.0  # Monday threshold (if enabled)
+    monday_enabled: bool = False  # Trade on Mondays
 
     # Capital
     initial_capital: float = 10000.0
@@ -48,11 +48,12 @@ class BacktestConfig:
 @dataclass
 class BacktestTrade:
     """Record of a single backtest trade."""
+
     date: date
     day_of_week: str
     open_price: float
     entry_price: float  # Price at ~10:30 AM
-    exit_price: float   # Price at close
+    exit_price: float  # Price at close
     dip_percentage: float
     shares: int
     dollar_pnl: float
@@ -63,6 +64,7 @@ class BacktestTrade:
 @dataclass
 class BacktestResult:
     """Results from a backtest run."""
+
     config: BacktestConfig
     trades: List[BacktestTrade]
 
@@ -100,11 +102,17 @@ class BacktestResult:
         self.total_trades = len(self.trades)
         self.winning_trades = sum(1 for t in self.trades if t.percentage_pnl > 0)
         self.losing_trades = self.total_trades - self.winning_trades
-        self.win_rate = (self.winning_trades / self.total_trades * 100) if self.total_trades > 0 else 0
+        self.win_rate = (
+            (self.winning_trades / self.total_trades * 100) if self.total_trades > 0 else 0
+        )
 
         # Returns
         self.total_return = sum(t.dollar_pnl for t in self.trades)
-        self.total_return_pct = (self.total_return / self.config.initial_capital * 100) if self.config.initial_capital > 0 else 0
+        self.total_return_pct = (
+            (self.total_return / self.config.initial_capital * 100)
+            if self.config.initial_capital > 0
+            else 0
+        )
         self.avg_return_pct = np.mean([t.percentage_pnl for t in self.trades]) if self.trades else 0
 
         # Best/worst
@@ -135,7 +143,9 @@ class BacktestResult:
         for value in cumulative:
             if value > peak:
                 peak = value
-            drawdown = (peak - value) / (self.config.initial_capital + peak) * 100 if peak > 0 else 0
+            drawdown = (
+                (peak - value) / (self.config.initial_capital + peak) * 100 if peak > 0 else 0
+            )
             max_dd = max(max_dd, drawdown)
 
         return max_dd
@@ -145,18 +155,23 @@ class BacktestResult:
         if not self.trades:
             return pd.DataFrame()
 
-        return pd.DataFrame([{
-            'date': t.date,
-            'day_of_week': t.day_of_week,
-            'open_price': t.open_price,
-            'entry_price': t.entry_price,
-            'exit_price': t.exit_price,
-            'dip_pct': t.dip_percentage,
-            'shares': t.shares,
-            'dollar_pnl': t.dollar_pnl,
-            'pct_pnl': t.percentage_pnl,
-            'cumulative_pnl': t.cumulative_pnl
-        } for t in self.trades])
+        return pd.DataFrame(
+            [
+                {
+                    "date": t.date,
+                    "day_of_week": t.day_of_week,
+                    "open_price": t.open_price,
+                    "entry_price": t.entry_price,
+                    "exit_price": t.exit_price,
+                    "dip_pct": t.dip_percentage,
+                    "shares": t.shares,
+                    "dollar_pnl": t.dollar_pnl,
+                    "pct_pnl": t.percentage_pnl,
+                    "cumulative_pnl": t.cumulative_pnl,
+                }
+                for t in self.trades
+            ]
+        )
 
     def summary(self) -> str:
         """Generate text summary of results."""
@@ -223,7 +238,7 @@ class Backtester:
             df = ticker.history(
                 start=self.config.start_date,
                 end=self.config.end_date + timedelta(days=1),
-                interval="1d"
+                interval="1d",
             )
 
             if df.empty:
@@ -231,13 +246,15 @@ class Backtester:
 
             df = df.reset_index()
             df.columns = [c.lower() for c in df.columns]
-            df['date'] = pd.to_datetime(df['date']).dt.date
+            df["date"] = pd.to_datetime(df["date"]).dt.date
 
             logger.info(f"Loaded {len(df)} days of data from Yahoo Finance")
             return df
 
         except ImportError:
-            raise ImportError("yfinance required for Yahoo data. Install with: pip install yfinance")
+            raise ImportError(
+                "yfinance required for Yahoo data. Install with: pip install yfinance"
+            )
 
     def _load_csv_data(self, path: str) -> pd.DataFrame:
         """Load data from CSV file."""
@@ -245,13 +262,13 @@ class Backtester:
         df.columns = [c.lower() for c in df.columns]
 
         # Parse date column
-        if 'date' in df.columns:
-            df['date'] = pd.to_datetime(df['date']).dt.date
-        elif 'datetime' in df.columns:
-            df['date'] = pd.to_datetime(df['datetime']).dt.date
+        if "date" in df.columns:
+            df["date"] = pd.to_datetime(df["date"]).dt.date
+        elif "datetime" in df.columns:
+            df["date"] = pd.to_datetime(df["datetime"]).dt.date
 
         # Filter to date range
-        df = df[(df['date'] >= self.config.start_date) & (df['date'] <= self.config.end_date)]
+        df = df[(df["date"] >= self.config.start_date) & (df["date"] <= self.config.end_date)]
 
         logger.info(f"Loaded {len(df)} days of data from {path}")
         return df
@@ -280,16 +297,16 @@ class Backtester:
         last_price = None
 
         for _, row in self._data.iterrows():
-            trade_date = row['date']
+            trade_date = row["date"]
 
             # Skip weekends and holidays
             if trade_date.weekday() >= 5 or is_market_holiday(trade_date):
                 continue
 
-            open_price = row['open']
-            high_price = row['high']
-            low_price = row['low']
-            close_price = row['close']
+            open_price = row["open"]
+            _high_price = row["high"]  # noqa: F841 - reserved for future use
+            low_price = row["low"]
+            close_price = row["close"]
 
             # Track first/last for buy & hold
             if first_price is None:
@@ -297,7 +314,7 @@ class Backtester:
             last_price = close_price
 
             # Determine day of week
-            day_of_week = trade_date.strftime('%A')
+            day_of_week = trade_date.strftime("%A")
             is_monday = trade_date.weekday() == 0
 
             # Skip Monday if disabled
@@ -355,7 +372,7 @@ class Backtester:
                 shares=shares,
                 dollar_pnl=dollar_pnl,
                 percentage_pnl=pct_pnl,
-                cumulative_pnl=cumulative_pnl
+                cumulative_pnl=cumulative_pnl,
             )
             trades.append(trade)
 
@@ -364,20 +381,17 @@ class Backtester:
         if first_price and last_price and first_price > 0:
             buy_hold_return_pct = ((last_price - first_price) / first_price) * 100
 
-        result = BacktestResult(
-            config=self.config,
-            trades=trades
-        )
+        result = BacktestResult(config=self.config, trades=trades)
         result.buy_hold_return_pct = buy_hold_return_pct
 
-        logger.info(f"Backtest complete: {len(trades)} trades, {result.total_return_pct:+.1f}% return")
+        logger.info(
+            f"Backtest complete: {len(trades)} trades, {result.total_return_pct:+.1f}% return"
+        )
 
         return result
 
     def optimize_threshold(
-        self,
-        thresholds: List[float] = None,
-        metric: str = "return"
+        self, thresholds: List[float] = None, metric: str = "return"
     ) -> Tuple[float, Dict[float, BacktestResult]]:
         """
         Find optimal threshold by testing multiple values.
@@ -399,8 +413,10 @@ class Backtester:
             self.config.regular_threshold = threshold
             result = self.run()
             results[threshold] = result
-            logger.info(f"Threshold {threshold}%: {result.total_trades} trades, "
-                       f"{result.win_rate:.1f}% win rate, {result.total_return_pct:+.1f}% return")
+            logger.info(
+                f"Threshold {threshold}%: {result.total_trades} trades, "
+                f"{result.win_rate:.1f}% win rate, {result.total_return_pct:+.1f}% return"
+            )
 
         # Restore original
         self.config.regular_threshold = original_threshold
@@ -418,10 +434,7 @@ class Backtester:
         logger.info(f"Optimal threshold ({metric}): {optimal}%")
         return optimal, results
 
-    def compare_configurations(
-        self,
-        configs: List[BacktestConfig]
-    ) -> List[BacktestResult]:
+    def compare_configurations(self, configs: List[BacktestConfig]) -> List[BacktestResult]:
         """
         Compare multiple strategy configurations.
 
@@ -445,7 +458,7 @@ def run_default_backtest(
     end_date: Optional[date] = None,
     threshold: float = 0.6,
     monday_enabled: bool = False,
-    initial_capital: float = 10000.0
+    initial_capital: float = 10000.0,
 ) -> BacktestResult:
     """
     Convenience function to run a backtest with default settings.
@@ -470,7 +483,7 @@ def run_default_backtest(
         end_date=end_date,
         regular_threshold=threshold,
         monday_enabled=monday_enabled,
-        initial_capital=initial_capital
+        initial_capital=initial_capital,
     )
 
     backtester = Backtester(config)

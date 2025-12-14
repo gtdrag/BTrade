@@ -11,20 +11,16 @@ Backtests all identified profitable strategies:
 
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, date, timedelta
-from typing import Optional, List, Dict, Any, Tuple
-from enum import Enum
+from datetime import date, timedelta
+from typing import Any, Dict, List, Optional, Tuple
 
-import pandas as pd
 import numpy as np
+import pandas as pd
 
 from .strategies import (
-    StrategyType, SignalDirection, DailyData,
-    MeanReversionStrategy, ShortThursdayStrategy,
-    IntradayBounceStrategy, TrendFollowingStrategy,
-    CombinedStrategy, StrategyManager, create_default_manager
+    DailyData,
+    StrategyType,
 )
-from .utils import is_market_holiday
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +28,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class BacktestTrade:
     """Record of a single backtest trade."""
+
     date: date
     direction: str  # "long" or "short"
     strategy: str
@@ -47,6 +44,7 @@ class BacktestTrade:
 @dataclass
 class BacktestResults:
     """Results from backtesting a strategy."""
+
     strategy_name: str
     strategy_type: StrategyType
     start_date: date
@@ -84,11 +82,15 @@ class BacktestResults:
         self.winning_trades = sum(1 for t in self.trades if t.percentage_pnl > 0)
         self.losing_trades = self.total_trades - self.winning_trades
 
-        self.win_rate = (self.winning_trades / self.total_trades * 100) if self.total_trades > 0 else 0
+        self.win_rate = (
+            (self.winning_trades / self.total_trades * 100) if self.total_trades > 0 else 0
+        )
 
         # Returns
         self.total_return = sum(t.dollar_pnl for t in self.trades)
-        self.total_return_pct = (self.total_return / self.initial_capital * 100) if self.initial_capital > 0 else 0
+        self.total_return_pct = (
+            (self.total_return / self.initial_capital * 100) if self.initial_capital > 0 else 0
+        )
 
         returns = [t.percentage_pnl for t in self.trades]
         self.avg_return_pct = np.mean(returns) if returns else 0
@@ -125,17 +127,22 @@ class BacktestResults:
         if not self.trades:
             return pd.DataFrame()
 
-        return pd.DataFrame([{
-            'date': t.date,
-            'direction': t.direction,
-            'strategy': t.strategy,
-            'entry_price': t.entry_price,
-            'exit_price': t.exit_price,
-            'shares': t.shares,
-            'dollar_pnl': t.dollar_pnl,
-            'pct_pnl': t.percentage_pnl,
-            'reason': t.reason
-        } for t in self.trades])
+        return pd.DataFrame(
+            [
+                {
+                    "date": t.date,
+                    "direction": t.direction,
+                    "strategy": t.strategy,
+                    "entry_price": t.entry_price,
+                    "exit_price": t.exit_price,
+                    "shares": t.shares,
+                    "dollar_pnl": t.dollar_pnl,
+                    "pct_pnl": t.percentage_pnl,
+                    "reason": t.reason,
+                }
+                for t in self.trades
+            ]
+        )
 
     def summary(self) -> str:
         """Generate text summary."""
@@ -166,10 +173,7 @@ class MultiStrategyBacktester:
     """
 
     def __init__(
-        self,
-        initial_capital: float = 10000.0,
-        commission: float = 0.0,
-        slippage_pct: float = 0.01
+        self, initial_capital: float = 10000.0, commission: float = 0.0, slippage_pct: float = 0.01
     ):
         self.initial_capital = initial_capital
         self.commission = commission
@@ -182,11 +186,7 @@ class MultiStrategyBacktester:
             import yfinance as yf
 
             ticker = yf.Ticker("IBIT")
-            df = ticker.history(
-                start=start_date,
-                end=end_date + timedelta(days=1),
-                interval="1d"
-            )
+            df = ticker.history(start=start_date, end=end_date + timedelta(days=1), interval="1d")
 
             if df.empty:
                 raise ValueError("No data returned")
@@ -195,10 +195,10 @@ class MultiStrategyBacktester:
             df.columns = [c.lower() for c in df.columns]
 
             # Normalize date column
-            if 'date' in df.columns:
-                df['date'] = pd.to_datetime(df['date']).dt.date
-            elif 'datetime' in df.columns:
-                df['date'] = pd.to_datetime(df['datetime']).dt.date
+            if "date" in df.columns:
+                df["date"] = pd.to_datetime(df["date"]).dt.date
+            elif "datetime" in df.columns:
+                df["date"] = pd.to_datetime(df["datetime"]).dt.date
 
             self._data = df
             logger.info(f"Loaded {len(df)} days of data")
@@ -214,14 +214,16 @@ class MultiStrategyBacktester:
 
         daily_data = []
         for _, row in self._data.iterrows():
-            daily_data.append(DailyData(
-                date=row['date'],
-                open=row['open'],
-                high=row['high'],
-                low=row['low'],
-                close=row['close'],
-                volume=int(row.get('volume', 0))
-            ))
+            daily_data.append(
+                DailyData(
+                    date=row["date"],
+                    open=row["open"],
+                    high=row["high"],
+                    low=row["low"],
+                    close=row["close"],
+                    volume=int(row.get("volume", 0)),
+                )
+            )
 
         return daily_data
 
@@ -230,7 +232,7 @@ class MultiStrategyBacktester:
         threshold: float = -3.0,
         skip_thursday: bool = True,
         start_date: Optional[date] = None,
-        end_date: Optional[date] = None
+        end_date: Optional[date] = None,
     ) -> BacktestResults:
         """
         Backtest Mean Reversion strategy.
@@ -245,34 +247,34 @@ class MultiStrategyBacktester:
                 raise ValueError("No data loaded")
 
         df = self._data.copy()
-        df['daily_return'] = (df['close'] - df['open']) / df['open'] * 100
-        df['prev_return'] = df['daily_return'].shift(1)
-        df['weekday'] = pd.to_datetime(df['date']).apply(lambda x: x.weekday())
+        df["daily_return"] = (df["close"] - df["open"]) / df["open"] * 100
+        df["prev_return"] = df["daily_return"].shift(1)
+        df["weekday"] = pd.to_datetime(df["date"]).apply(lambda x: x.weekday())
 
         results = BacktestResults(
             strategy_name=f"Mean Reversion ({threshold}%)",
             strategy_type=StrategyType.MEAN_REVERSION,
-            start_date=df['date'].iloc[0],
-            end_date=df['date'].iloc[-1],
-            initial_capital=self.initial_capital
+            start_date=df["date"].iloc[0],
+            end_date=df["date"].iloc[-1],
+            initial_capital=self.initial_capital,
         )
 
         capital = self.initial_capital
 
         for i, row in df.iterrows():
-            if pd.isna(row['prev_return']):
+            if pd.isna(row["prev_return"]):
                 continue
 
             # Check signal conditions
-            if row['prev_return'] >= threshold:
+            if row["prev_return"] >= threshold:
                 continue  # Previous day not down enough
 
-            if skip_thursday and row['weekday'] == 3:
+            if skip_thursday and row["weekday"] == 3:
                 continue  # Skip Thursday
 
             # Execute trade
-            entry_price = row['open'] * (1 + self.slippage_pct / 100)
-            exit_price = row['close'] * (1 - self.slippage_pct / 100)
+            entry_price = row["open"] * (1 + self.slippage_pct / 100)
+            exit_price = row["close"] * (1 - self.slippage_pct / 100)
 
             shares = int(capital // entry_price)
             if shares <= 0:
@@ -282,7 +284,7 @@ class MultiStrategyBacktester:
             pct_pnl = (exit_price - entry_price) / entry_price * 100
 
             trade = BacktestTrade(
-                date=row['date'],
+                date=row["date"],
                 direction="long",
                 strategy="mean_reversion",
                 entry_price=entry_price,
@@ -291,22 +293,20 @@ class MultiStrategyBacktester:
                 dollar_pnl=dollar_pnl,
                 percentage_pnl=pct_pnl,
                 reason=f"Prev day: {row['prev_return']:.2f}%",
-                metadata={"threshold": threshold, "prev_return": row['prev_return']}
+                metadata={"threshold": threshold, "prev_return": row["prev_return"]},
             )
             results.trades.append(trade)
 
         # Calculate buy & hold
-        first_price = df['open'].iloc[0]
-        last_price = df['close'].iloc[-1]
+        first_price = df["open"].iloc[0]
+        last_price = df["close"].iloc[-1]
         results.buy_hold_return_pct = (last_price - first_price) / first_price * 100
 
         results.calculate_metrics()
         return results
 
     def backtest_short_thursday(
-        self,
-        start_date: Optional[date] = None,
-        end_date: Optional[date] = None
+        self, start_date: Optional[date] = None, end_date: Optional[date] = None
     ) -> BacktestResults:
         """
         Backtest Short Thursday strategy.
@@ -320,26 +320,26 @@ class MultiStrategyBacktester:
                 raise ValueError("No data loaded")
 
         df = self._data.copy()
-        df['weekday'] = pd.to_datetime(df['date']).apply(lambda x: x.weekday())
+        df["weekday"] = pd.to_datetime(df["date"]).apply(lambda x: x.weekday())
 
         results = BacktestResults(
             strategy_name="Short Thursday",
             strategy_type=StrategyType.SHORT_THURSDAY,
-            start_date=df['date'].iloc[0],
-            end_date=df['date'].iloc[-1],
-            initial_capital=self.initial_capital
+            start_date=df["date"].iloc[0],
+            end_date=df["date"].iloc[-1],
+            initial_capital=self.initial_capital,
         )
 
         capital = self.initial_capital
 
         for i, row in df.iterrows():
             # Only trade Thursdays
-            if row['weekday'] != 3:
+            if row["weekday"] != 3:
                 continue
 
             # Execute short trade
-            entry_price = row['open'] * (1 - self.slippage_pct / 100)  # Short entry
-            exit_price = row['close'] * (1 + self.slippage_pct / 100)  # Cover
+            entry_price = row["open"] * (1 - self.slippage_pct / 100)  # Short entry
+            exit_price = row["close"] * (1 + self.slippage_pct / 100)  # Cover
 
             shares = int(capital // entry_price)
             if shares <= 0:
@@ -350,7 +350,7 @@ class MultiStrategyBacktester:
             pct_pnl = (entry_price - exit_price) / entry_price * 100
 
             trade = BacktestTrade(
-                date=row['date'],
+                date=row["date"],
                 direction="short",
                 strategy="short_thursday",
                 entry_price=entry_price,
@@ -359,13 +359,13 @@ class MultiStrategyBacktester:
                 dollar_pnl=dollar_pnl,
                 percentage_pnl=pct_pnl,
                 reason="Thursday short",
-                metadata={"day": "Thursday"}
+                metadata={"day": "Thursday"},
             )
             results.trades.append(trade)
 
         # Calculate buy & hold
-        first_price = df['open'].iloc[0]
-        last_price = df['close'].iloc[-1]
+        first_price = df["open"].iloc[0]
+        last_price = df["close"].iloc[-1]
         results.buy_hold_return_pct = (last_price - first_price) / first_price * 100
 
         results.calculate_metrics()
@@ -376,7 +376,7 @@ class MultiStrategyBacktester:
         mean_reversion_threshold: float = -2.0,
         enable_short_thursday: bool = True,
         start_date: Optional[date] = None,
-        end_date: Optional[date] = None
+        end_date: Optional[date] = None,
     ) -> BacktestResults:
         """
         Backtest Combined strategy.
@@ -392,16 +392,16 @@ class MultiStrategyBacktester:
                 raise ValueError("No data loaded")
 
         df = self._data.copy()
-        df['daily_return'] = (df['close'] - df['open']) / df['open'] * 100
-        df['prev_return'] = df['daily_return'].shift(1)
-        df['weekday'] = pd.to_datetime(df['date']).apply(lambda x: x.weekday())
+        df["daily_return"] = (df["close"] - df["open"]) / df["open"] * 100
+        df["prev_return"] = df["daily_return"].shift(1)
+        df["weekday"] = pd.to_datetime(df["date"]).apply(lambda x: x.weekday())
 
         results = BacktestResults(
             strategy_name=f"Combined (MR: {mean_reversion_threshold}%, Short Thu: {enable_short_thursday})",
             strategy_type=StrategyType.COMBINED,
-            start_date=df['date'].iloc[0],
-            end_date=df['date'].iloc[-1],
-            initial_capital=self.initial_capital
+            start_date=df["date"].iloc[0],
+            end_date=df["date"].iloc[-1],
+            initial_capital=self.initial_capital,
         )
 
         capital = self.initial_capital
@@ -410,10 +410,10 @@ class MultiStrategyBacktester:
             trade = None
 
             # Check mean reversion signal first (takes priority)
-            if not pd.isna(row['prev_return']) and row['prev_return'] < mean_reversion_threshold:
+            if not pd.isna(row["prev_return"]) and row["prev_return"] < mean_reversion_threshold:
                 # Long signal
-                entry_price = row['open'] * (1 + self.slippage_pct / 100)
-                exit_price = row['close'] * (1 - self.slippage_pct / 100)
+                entry_price = row["open"] * (1 + self.slippage_pct / 100)
+                exit_price = row["close"] * (1 - self.slippage_pct / 100)
 
                 shares = int(capital // entry_price)
                 if shares > 0:
@@ -421,7 +421,7 @@ class MultiStrategyBacktester:
                     pct_pnl = (exit_price - entry_price) / entry_price * 100
 
                     trade = BacktestTrade(
-                        date=row['date'],
+                        date=row["date"],
                         direction="long",
                         strategy="combined_mean_reversion",
                         entry_price=entry_price,
@@ -430,13 +430,13 @@ class MultiStrategyBacktester:
                         dollar_pnl=dollar_pnl,
                         percentage_pnl=pct_pnl,
                         reason=f"Mean reversion: prev {row['prev_return']:.2f}%",
-                        metadata={"trigger": "mean_reversion", "prev_return": row['prev_return']}
+                        metadata={"trigger": "mean_reversion", "prev_return": row["prev_return"]},
                     )
 
             # If no mean reversion, check short Thursday
-            elif enable_short_thursday and row['weekday'] == 3:
-                entry_price = row['open'] * (1 - self.slippage_pct / 100)
-                exit_price = row['close'] * (1 + self.slippage_pct / 100)
+            elif enable_short_thursday and row["weekday"] == 3:
+                entry_price = row["open"] * (1 - self.slippage_pct / 100)
+                exit_price = row["close"] * (1 + self.slippage_pct / 100)
 
                 shares = int(capital // entry_price)
                 if shares > 0:
@@ -444,7 +444,7 @@ class MultiStrategyBacktester:
                     pct_pnl = (entry_price - exit_price) / entry_price * 100
 
                     trade = BacktestTrade(
-                        date=row['date'],
+                        date=row["date"],
                         direction="short",
                         strategy="combined_short_thursday",
                         entry_price=entry_price,
@@ -453,24 +453,22 @@ class MultiStrategyBacktester:
                         dollar_pnl=dollar_pnl,
                         percentage_pnl=pct_pnl,
                         reason="Short Thursday",
-                        metadata={"trigger": "short_thursday"}
+                        metadata={"trigger": "short_thursday"},
                     )
 
             if trade:
                 results.trades.append(trade)
 
         # Calculate buy & hold
-        first_price = df['open'].iloc[0]
-        last_price = df['close'].iloc[-1]
+        first_price = df["open"].iloc[0]
+        last_price = df["close"].iloc[-1]
         results.buy_hold_return_pct = (last_price - first_price) / first_price * 100
 
         results.calculate_metrics()
         return results
 
     def backtest_all_strategies(
-        self,
-        start_date: Optional[date] = None,
-        end_date: Optional[date] = None
+        self, start_date: Optional[date] = None, end_date: Optional[date] = None
     ) -> Dict[str, BacktestResults]:
         """Run backtests on all strategies."""
         if self._data is None:
@@ -501,17 +499,19 @@ class MultiStrategyBacktester:
         comparison = []
 
         for name, result in results.items():
-            comparison.append({
-                'Strategy': name,
-                'Trades': result.total_trades,
-                'Win Rate': f"{result.win_rate:.1f}%",
-                'Total Return': f"{result.total_return_pct:+.1f}%",
-                'Avg Return': f"{result.avg_return_pct:+.2f}%",
-                'Best Trade': f"{result.best_trade_pct:+.2f}%",
-                'Worst Trade': f"{result.worst_trade_pct:+.2f}%",
-                'Sharpe': f"{result.sharpe_ratio:.2f}",
-                'vs B&H': f"{result.total_return_pct - result.buy_hold_return_pct:+.1f}%"
-            })
+            comparison.append(
+                {
+                    "Strategy": name,
+                    "Trades": result.total_trades,
+                    "Win Rate": f"{result.win_rate:.1f}%",
+                    "Total Return": f"{result.total_return_pct:+.1f}%",
+                    "Avg Return": f"{result.avg_return_pct:+.2f}%",
+                    "Best Trade": f"{result.best_trade_pct:+.2f}%",
+                    "Worst Trade": f"{result.worst_trade_pct:+.2f}%",
+                    "Sharpe": f"{result.sharpe_ratio:.2f}",
+                    "vs B&H": f"{result.total_return_pct - result.buy_hold_return_pct:+.1f}%",
+                }
+            )
 
         return pd.DataFrame(comparison)
 
@@ -519,7 +519,7 @@ class MultiStrategyBacktester:
 def run_comprehensive_backtest(
     start_date: Optional[date] = None,
     end_date: Optional[date] = None,
-    initial_capital: float = 10000.0
+    initial_capital: float = 10000.0,
 ) -> Tuple[Dict[str, BacktestResults], pd.DataFrame]:
     """
     Run comprehensive backtest of all strategies.

@@ -2,10 +2,11 @@
 Unit tests for IBIT Dip Bot database module.
 """
 
-import pytest
-from datetime import date, datetime
 import sys
+from datetime import date, datetime
 from pathlib import Path
+
+import pytest
 
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -39,7 +40,7 @@ class TestDatabase:
             dip_percentage=1.0,
             shares=100,
             is_dry_run=True,
-            notes="Test trade"
+            notes="Test trade",
         )
 
         assert trade_id > 0
@@ -60,15 +61,12 @@ class TestDatabase:
             open_price=50.0,
             entry_price=49.5,
             dip_percentage=1.0,
-            shares=100
+            shares=100,
         )
 
         # Then record exit
         db.record_trade_exit(
-            trade_id=trade_id,
-            exit_price=50.5,
-            dollar_pnl=100.0,
-            percentage_pnl=2.02
+            trade_id=trade_id, exit_price=50.5, dollar_pnl=100.0, percentage_pnl=2.02
         )
 
         # Verify no open trade
@@ -91,7 +89,7 @@ class TestDatabase:
                 open_price=50.0,
                 entry_price=49.5,
                 dip_percentage=1.0,
-                shares=100
+                shares=100,
             )
 
             # Alternate wins and losses
@@ -102,7 +100,7 @@ class TestDatabase:
                 trade_id=trade_id,
                 exit_price=50.0 + (pnl / 100),
                 dollar_pnl=pnl,
-                percentage_pnl=pct_pnl
+                percentage_pnl=pct_pnl,
             )
 
         stats = db.get_trade_statistics()
@@ -190,7 +188,7 @@ class TestDatabase:
                 open_price=50.0,
                 entry_price=49.5,
                 dip_percentage=1.0,
-                shares=100
+                shares=100,
             )
 
             pnl = 50.0 * (i + 1)  # Increasing P&L
@@ -200,7 +198,7 @@ class TestDatabase:
                 trade_id=trade_id,
                 exit_price=50.0 + (pnl / 100),
                 dollar_pnl=pnl,
-                percentage_pnl=pnl / 49.5
+                percentage_pnl=pnl / 49.5,
             )
 
         curve = db.get_equity_curve()

@@ -2,20 +2,19 @@
 Unit tests for IBIT Dip Bot strategy logic.
 """
 
-import pytest
-from datetime import datetime, date, timedelta
-from unittest.mock import Mock, patch, MagicMock
 import sys
+from datetime import date, datetime
 from pathlib import Path
+from unittest.mock import patch
+
+import pytest
 
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.strategy import (
-    IBITDipStrategy, StrategyConfig, StrategyState, TradeAction, TradeSignal
-)
-from src.etrade_client import MockETradeClient
 from src.database import Database
+from src.etrade_client import MockETradeClient
+from src.strategy import IBITDipStrategy, StrategyConfig, StrategyState, TradeAction, TradeSignal
 from src.utils import ET
 
 
@@ -35,10 +34,7 @@ class TestStrategyConfig:
     def test_custom_config(self):
         """Test custom configuration values."""
         config = StrategyConfig(
-            regular_threshold=0.8,
-            monday_enabled=True,
-            monday_threshold=1.5,
-            max_position_usd=5000
+            regular_threshold=0.8, monday_enabled=True, monday_threshold=1.5, max_position_usd=5000
         )
 
         assert config.regular_threshold == 0.8
@@ -68,10 +64,7 @@ class TestIBITDipStrategy:
         """Create strategy instance for testing."""
         config = StrategyConfig(dry_run=True)
         return IBITDipStrategy(
-            client=mock_client,
-            config=config,
-            db=mock_db,
-            account_id_key="mock_key_001"
+            client=mock_client, config=config, db=mock_db, account_id_key="mock_key_001"
         )
 
     def test_strategy_initialization(self, strategy):
@@ -88,8 +81,8 @@ class TestIBITDipStrategy:
         assert state.has_position is False
         assert state.is_paused is False
 
-    @patch('src.strategy.get_et_now')
-    @patch('src.strategy.is_trading_day')
+    @patch("src.strategy.get_et_now")
+    @patch("src.strategy.is_trading_day")
     def test_analyze_no_trading_day(self, mock_trading_day, mock_now, strategy):
         """Test analysis on non-trading day."""
         mock_trading_day.return_value = False
@@ -100,9 +93,9 @@ class TestIBITDipStrategy:
         assert signal.action == TradeAction.HOLD
         assert "Not a trading day" in signal.reason
 
-    @patch('src.strategy.get_et_now')
-    @patch('src.strategy.is_trading_day')
-    @patch('src.strategy.is_monday')
+    @patch("src.strategy.get_et_now")
+    @patch("src.strategy.is_trading_day")
+    @patch("src.strategy.is_monday")
     def test_analyze_monday_disabled(self, mock_monday, mock_trading_day, mock_now, strategy):
         """Test that Monday trading is disabled by default."""
         mock_trading_day.return_value = True
@@ -117,11 +110,13 @@ class TestIBITDipStrategy:
         assert signal.action == TradeAction.HOLD
         assert "Monday trading disabled" in signal.reason
 
-    @patch('src.strategy.get_et_now')
-    @patch('src.strategy.is_trading_day')
-    @patch('src.strategy.is_monday')
-    @patch('src.strategy.is_in_dip_window')
-    def test_analyze_dip_below_threshold(self, mock_dip_window, mock_monday, mock_trading_day, mock_now, strategy):
+    @patch("src.strategy.get_et_now")
+    @patch("src.strategy.is_trading_day")
+    @patch("src.strategy.is_monday")
+    @patch("src.strategy.is_in_dip_window")
+    def test_analyze_dip_below_threshold(
+        self, mock_dip_window, mock_monday, mock_trading_day, mock_now, strategy
+    ):
         """Test analysis when dip is below threshold."""
         mock_trading_day.return_value = True
         mock_monday.return_value = False
@@ -139,8 +134,8 @@ class TestIBITDipStrategy:
 
     def test_capture_open_price(self, strategy):
         """Test capturing open price."""
-        with patch('src.strategy.is_trading_day', return_value=True):
-            with patch('src.strategy.get_et_now') as mock_now:
+        with patch("src.strategy.is_trading_day", return_value=True):
+            with patch("src.strategy.get_et_now") as mock_now:
                 mock_now.return_value = datetime(2025, 12, 16, 9, 30, tzinfo=ET)
 
                 price = strategy.capture_open_price()
@@ -180,10 +175,7 @@ class TestTradeSignal:
 
     def test_hold_signal(self):
         """Test creating a hold signal."""
-        signal = TradeSignal(
-            action=TradeAction.HOLD,
-            reason="No dip detected"
-        )
+        signal = TradeSignal(action=TradeAction.HOLD, reason="No dip detected")
 
         assert signal.action == TradeAction.HOLD
         assert signal.shares == 0
@@ -196,7 +188,7 @@ class TestTradeSignal:
             dip_percentage=0.8,
             shares=100,
             price=49.5,
-            threshold_used=0.6
+            threshold_used=0.6,
         )
 
         assert signal.action == TradeAction.BUY
@@ -205,12 +197,7 @@ class TestTradeSignal:
 
     def test_sell_signal(self):
         """Test creating a sell signal."""
-        signal = TradeSignal(
-            action=TradeAction.SELL,
-            reason="Market close",
-            shares=100,
-            price=50.5
-        )
+        signal = TradeSignal(action=TradeAction.SELL, reason="Market close", shares=100, price=50.5)
 
         assert signal.action == TradeAction.SELL
         assert signal.shares == 100

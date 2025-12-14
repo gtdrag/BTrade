@@ -11,36 +11,34 @@ Features:
 - Manual trading controls
 """
 
-import streamlit as st
+import time
+from datetime import date
+
 import pandas as pd
 import plotly.graph_objects as go
-import plotly.express as px
-from datetime import datetime, date, timedelta
-import time
-import threading
+import streamlit as st
+
+from src.backtester import run_default_backtest
+from src.config import load_config, save_config
+from src.database import get_database
+from src.etrade_client import create_etrade_client
+from src.multi_strategy_backtester import MultiStrategyBacktester, run_comprehensive_backtest
+from src.strategy import IBITDipStrategy
 
 # Import bot modules
 from src.utils import (
-    get_et_now, get_market_times, is_trading_day, is_market_open,
-    is_in_dip_window, is_monday, is_friday, format_currency,
-    format_percentage, format_timedelta, time_until, get_day_of_week, ET
+    format_currency,
+    format_timedelta,
+    get_et_now,
+    get_market_times,
+    is_friday,
+    is_market_open,
+    time_until,
 )
-from src.database import get_database, Database
-from src.etrade_client import create_etrade_client, MockETradeClient
-from src.strategy import IBITDipStrategy, StrategyConfig, TradeAction
-from src.scheduler import TradingScheduler, BotStatus
-from src.notifications import create_notification_manager, NotificationConfig
-from src.backtester import Backtester, BacktestConfig, run_default_backtest
-from src.multi_strategy_backtester import MultiStrategyBacktester, run_comprehensive_backtest
-from src.config import load_config, save_config, AppConfig, setup_logging
-
 
 # Page configuration
 st.set_page_config(
-    page_title="IBIT Dip Bot",
-    page_icon="📈",
-    layout="wide",
-    initial_sidebar_state="expanded"
+    page_title="IBIT Dip Bot", page_icon="📈", layout="wide", initial_sidebar_state="expanded"
 )
 
 
@@ -69,7 +67,7 @@ def get_client():
             consumer_key=config.etrade.consumer_key,
             consumer_secret=config.etrade.consumer_secret,
             sandbox=config.etrade.sandbox,
-            dry_run=config.dry_run
+            dry_run=config.dry_run,
         )
     return st.session_state.client
 
@@ -83,7 +81,7 @@ def get_strategy():
             client=client,
             config=config.strategy,
             db=st.session_state.db,
-            account_id_key=config.etrade.account_id_key
+            account_id_key=config.etrade.account_id_key,
         )
     return st.session_state.strategy
 
@@ -94,7 +92,8 @@ def apply_custom_css():
     theme = st.session_state.config.theme
 
     if theme == "dark":
-        st.markdown("""
+        st.markdown(
+            """
         <style>
         .metric-card {
             background: linear-gradient(135deg, #1e1e2e 0%, #2d2d44 100%);
@@ -119,9 +118,12 @@ def apply_custom_css():
         .status-stopped { color: #f44336; }
         .status-paused { color: #ff9800; }
         </style>
-        """, unsafe_allow_html=True)
+        """,
+            unsafe_allow_html=True,
+        )
     else:
-        st.markdown("""
+        st.markdown(
+            """
         <style>
         .metric-card {
             background: linear-gradient(135deg, #f5f5f5 0%, #e0e0e0 100%);
@@ -143,7 +145,9 @@ def apply_custom_css():
             color: #6200ea;
         }
         </style>
-        """, unsafe_allow_html=True)
+        """,
+            unsafe_allow_html=True,
+        )
 
 
 # Sidebar Configuration Panel
@@ -155,9 +159,7 @@ def render_sidebar():
 
     # Theme toggle
     theme = st.sidebar.selectbox(
-        "Theme",
-        ["dark", "light"],
-        index=0 if config.theme == "dark" else 1
+        "Theme", ["dark", "light"], index=0 if config.theme == "dark" else 1
     )
     if theme != config.theme:
         config.theme = theme
@@ -180,14 +182,16 @@ def render_sidebar():
         "combined": "Combined (Recommended)",
         "mean_reversion": "Mean Reversion",
         "short_thursday": "Short Thursday",
-        "original_dip": "Original 10AM Dip (Not Recommended)"
+        "original_dip": "Original 10AM Dip (Not Recommended)",
     }
     strategy_type = st.sidebar.selectbox(
         "Strategy Type",
         options=list(strategy_options.keys()),
         format_func=lambda x: strategy_options[x],
-        index=list(strategy_options.keys()).index(config.strategy.strategy_type) if config.strategy.strategy_type in strategy_options else 0,
-        help="Select trading strategy"
+        index=list(strategy_options.keys()).index(config.strategy.strategy_type)
+        if config.strategy.strategy_type in strategy_options
+        else 0,
+        help="Select trading strategy",
     )
     config.strategy.strategy_type = strategy_type
 
@@ -199,7 +203,7 @@ def render_sidebar():
             max_value=-1.0,
             value=config.strategy.mean_reversion_threshold,
             step=0.5,
-            help="Buy after day drops below this threshold"
+            help="Buy after day drops below this threshold",
         )
         config.strategy.mean_reversion_threshold = mean_rev_threshold
 
@@ -207,18 +211,20 @@ def render_sidebar():
         enable_short_thu = st.sidebar.toggle(
             "Enable Short Thursday",
             value=config.strategy.enable_short_thursday,
-            help="Short IBIT on Thursdays"
+            help="Short IBIT on Thursdays",
         )
         config.strategy.enable_short_thursday = enable_short_thu
 
     if strategy_type == "original_dip":
-        st.sidebar.warning("Original strategy has poor backtested performance. Consider using Combined strategy.")
+        st.sidebar.warning(
+            "Original strategy has poor backtested performance. Consider using Combined strategy."
+        )
 
         # Monday trading
         monday_enabled = st.sidebar.toggle(
             "Enable Monday Trading",
             value=config.strategy.monday_enabled,
-            help="Monday historically has weaker performance"
+            help="Monday historically has weaker performance",
         )
         config.strategy.monday_enabled = monday_enabled
 
@@ -229,7 +235,7 @@ def render_sidebar():
                 max_value=2.0,
                 value=config.strategy.monday_threshold,
                 step=0.1,
-                help="Dip threshold for Monday trades"
+                help="Dip threshold for Monday trades",
             )
             config.strategy.monday_threshold = monday_threshold
 
@@ -240,7 +246,7 @@ def render_sidebar():
             max_value=1.5,
             value=config.strategy.regular_threshold,
             step=0.1,
-            help="Dip threshold for Tue-Fri trades"
+            help="Dip threshold for Tue-Fri trades",
         )
         config.strategy.regular_threshold = regular_threshold
 
@@ -250,7 +256,7 @@ def render_sidebar():
     max_position_type = st.sidebar.radio(
         "Max Position",
         ["Percentage of Cash", "Fixed Dollar Amount"],
-        index=0 if config.strategy.max_position_usd is None else 1
+        index=0 if config.strategy.max_position_usd is None else 1,
     )
 
     if max_position_type == "Percentage of Cash":
@@ -259,7 +265,7 @@ def render_sidebar():
             min_value=10,
             max_value=100,
             value=int(config.strategy.max_position_pct),
-            step=10
+            step=10,
         )
         config.strategy.max_position_pct = float(max_pct)
         config.strategy.max_position_usd = None
@@ -269,7 +275,7 @@ def render_sidebar():
             min_value=100,
             max_value=1000000,
             value=int(config.strategy.max_position_usd or 10000),
-            step=1000
+            step=1000,
         )
         config.strategy.max_position_usd = float(max_usd)
 
@@ -278,14 +284,12 @@ def render_sidebar():
     # Notifications
     st.sidebar.subheader("Notifications")
     desktop_notify = st.sidebar.toggle(
-        "Desktop Notifications",
-        value=config.notifications.desktop_enabled
+        "Desktop Notifications", value=config.notifications.desktop_enabled
     )
     config.notifications.desktop_enabled = desktop_notify
 
     email_notify = st.sidebar.toggle(
-        "Email Notifications",
-        value=config.notifications.email_enabled
+        "Email Notifications", value=config.notifications.email_enabled
     )
     config.notifications.email_enabled = email_notify
 
@@ -398,17 +402,11 @@ def render_dip_gauge():
         col1, col2, col3 = st.columns(3)
 
         with col1:
-            st.metric(
-                "Open Price",
-                f"${open_price:.2f}",
-                help="IBIT price at market open"
-            )
+            st.metric("Open Price", f"${open_price:.2f}", help="IBIT price at market open")
 
         with col2:
             st.metric(
-                "Current Price",
-                f"${current_price:.2f}",
-                delta=f"{quote.get('change_pct', 0):.2f}%"
+                "Current Price", f"${current_price:.2f}", delta=f"{quote.get('change_pct', 0):.2f}%"
             )
 
         with col3:
@@ -418,40 +416,42 @@ def render_dip_gauge():
                 "Dip from Open",
                 f"{dip_pct:.2f}%",
                 delta=f"Threshold: {threshold}%",
-                delta_color=color
+                delta_color=color,
             )
 
         # Visual gauge using Plotly
-        fig = go.Figure(go.Indicator(
-            mode="gauge+number+delta",
-            value=dip_pct,
-            domain={'x': [0, 1], 'y': [0, 1]},
-            title={'text': "Dip Percentage", 'font': {'size': 20}},
-            delta={'reference': threshold, 'increasing': {'color': "green"}},
-            gauge={
-                'axis': {'range': [-2, 3], 'tickwidth': 1},
-                'bar': {'color': "darkblue"},
-                'bgcolor': "white",
-                'borderwidth': 2,
-                'bordercolor': "gray",
-                'steps': [
-                    {'range': [-2, 0], 'color': 'lightgray'},
-                    {'range': [0, threshold], 'color': 'lightyellow'},
-                    {'range': [threshold, 3], 'color': 'lightgreen'}
-                ],
-                'threshold': {
-                    'line': {'color': "red", 'width': 4},
-                    'thickness': 0.75,
-                    'value': threshold
-                }
-            }
-        ))
+        fig = go.Figure(
+            go.Indicator(
+                mode="gauge+number+delta",
+                value=dip_pct,
+                domain={"x": [0, 1], "y": [0, 1]},
+                title={"text": "Dip Percentage", "font": {"size": 20}},
+                delta={"reference": threshold, "increasing": {"color": "green"}},
+                gauge={
+                    "axis": {"range": [-2, 3], "tickwidth": 1},
+                    "bar": {"color": "darkblue"},
+                    "bgcolor": "white",
+                    "borderwidth": 2,
+                    "bordercolor": "gray",
+                    "steps": [
+                        {"range": [-2, 0], "color": "lightgray"},
+                        {"range": [0, threshold], "color": "lightyellow"},
+                        {"range": [threshold, 3], "color": "lightgreen"},
+                    ],
+                    "threshold": {
+                        "line": {"color": "red", "width": 4},
+                        "thickness": 0.75,
+                        "value": threshold,
+                    },
+                },
+            )
+        )
 
         fig.update_layout(
             height=300,
             margin=dict(l=20, r=20, t=40, b=20),
-            paper_bgcolor='rgba(0,0,0,0)',
-            font={'color': 'white' if st.session_state.config.theme == 'dark' else 'black'}
+            paper_bgcolor="rgba(0,0,0,0)",
+            font={"color": "white" if st.session_state.config.theme == "dark" else "black"},
         )
 
         st.plotly_chart(fig, use_container_width=True)
@@ -501,7 +501,11 @@ def render_quick_controls():
     col1, col2 = st.columns(2)
 
     with col1:
-        if st.button("🟢 Force Buy", use_container_width=True, disabled=st.session_state.config.dry_run is False):
+        if st.button(
+            "🟢 Force Buy",
+            use_container_width=True,
+            disabled=st.session_state.config.dry_run is False,
+        ):
             strategy = get_strategy()
             result = strategy.force_buy()
             if result.get("success"):
@@ -515,7 +519,11 @@ def render_quick_controls():
             st.info("Bot paused until Tuesday")
 
     with col2:
-        if st.button("🔴 Force Sell", use_container_width=True, disabled=st.session_state.config.dry_run is False):
+        if st.button(
+            "🔴 Force Sell",
+            use_container_width=True,
+            disabled=st.session_state.config.dry_run is False,
+        ):
             strategy = get_strategy()
             result = strategy.force_sell()
             if result.get("success"):
@@ -547,7 +555,9 @@ def render_position_status():
             quote = client.get_ibit_quote()
             current = quote.get("last_price", open_trade["entry_price"])
             unrealized = (current - open_trade["entry_price"]) * open_trade["shares"]
-            unrealized_pct = ((current - open_trade["entry_price"]) / open_trade["entry_price"]) * 100
+            unrealized_pct = (
+                (current - open_trade["entry_price"]) / open_trade["entry_price"]
+            ) * 100
             st.metric("Unrealized P&L", f"{format_currency(unrealized)} ({unrealized_pct:+.2f}%)")
         except:
             pass
@@ -567,20 +577,22 @@ def render_equity_curve():
         return
 
     df = pd.DataFrame(curve_data)
-    df['date'] = pd.to_datetime(df['date'])
+    df["date"] = pd.to_datetime(df["date"])
 
     # Create figure
     fig = go.Figure()
 
     # Equity curve
-    fig.add_trace(go.Scatter(
-        x=df['date'],
-        y=df['cumulative_pnl'],
-        mode='lines+markers',
-        name='Strategy P&L',
-        line=dict(color='#4caf50', width=2),
-        marker=dict(size=8)
-    ))
+    fig.add_trace(
+        go.Scatter(
+            x=df["date"],
+            y=df["cumulative_pnl"],
+            mode="lines+markers",
+            name="Strategy P&L",
+            line=dict(color="#4caf50", width=2),
+            marker=dict(size=8),
+        )
+    )
 
     # Zero line
     fig.add_hline(y=0, line_dash="dash", line_color="gray")
@@ -591,9 +603,9 @@ def render_equity_curve():
         yaxis_title="P&L ($)",
         height=400,
         showlegend=True,
-        paper_bgcolor='rgba(0,0,0,0)',
-        plot_bgcolor='rgba(0,0,0,0)',
-        font={'color': 'white' if st.session_state.config.theme == 'dark' else 'black'}
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font={"color": "white" if st.session_state.config.theme == "dark" else "black"},
     )
 
     st.plotly_chart(fig, use_container_width=True)
@@ -614,24 +626,27 @@ def render_trade_history():
     df = pd.DataFrame(trades)
 
     # Format columns
-    df['date'] = pd.to_datetime(df['date']).dt.strftime('%Y-%m-%d')
-    df['entry_price'] = df['entry_price'].apply(lambda x: f"${x:.2f}")
-    df['exit_price'] = df['exit_price'].apply(lambda x: f"${x:.2f}" if x else "-")
-    df['dip_percentage'] = df['dip_percentage'].apply(lambda x: f"{x:.2f}%")
-    df['dollar_pnl'] = df['dollar_pnl'].apply(lambda x: f"${x:+.2f}" if x else "-")
-    df['percentage_pnl'] = df['percentage_pnl'].apply(lambda x: f"{x:+.2f}%" if x else "-")
+    df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
+    df["entry_price"] = df["entry_price"].apply(lambda x: f"${x:.2f}")
+    df["exit_price"] = df["exit_price"].apply(lambda x: f"${x:.2f}" if x else "-")
+    df["dip_percentage"] = df["dip_percentage"].apply(lambda x: f"{x:.2f}%")
+    df["dollar_pnl"] = df["dollar_pnl"].apply(lambda x: f"${x:+.2f}" if x else "-")
+    df["percentage_pnl"] = df["percentage_pnl"].apply(lambda x: f"{x:+.2f}%" if x else "-")
 
     # Select columns to display
     display_cols = [
-        'date', 'day_of_week', 'dip_percentage', 'entry_price',
-        'exit_price', 'shares', 'dollar_pnl', 'percentage_pnl', 'status'
+        "date",
+        "day_of_week",
+        "dip_percentage",
+        "entry_price",
+        "exit_price",
+        "shares",
+        "dollar_pnl",
+        "percentage_pnl",
+        "status",
     ]
 
-    st.dataframe(
-        df[display_cols],
-        use_container_width=True,
-        hide_index=True
-    )
+    st.dataframe(df[display_cols], use_container_width=True, hide_index=True)
 
     # Statistics
     st.divider()
@@ -678,20 +693,16 @@ def render_single_strategy_backtest():
             "Strategy",
             ["Mean Reversion", "Short Thursday", "Combined", "Original Dip"],
             index=2,
-            help="Select strategy to backtest"
+            help="Select strategy to backtest",
         )
 
         # Date range
         start_date = st.date_input(
             "Start Date",
             value=date(2024, 1, 15),  # IBIT launch
-            key="single_start"
+            key="single_start",
         )
-        end_date = st.date_input(
-            "End Date",
-            value=date.today(),
-            key="single_end"
-        )
+        end_date = st.date_input("End Date", value=date.today(), key="single_end")
 
         # Strategy-specific parameters
         if strategy_choice in ["Mean Reversion", "Combined"]:
@@ -701,17 +712,13 @@ def render_single_strategy_backtest():
                 max_value=-1.0,
                 value=-3.0,
                 step=0.5,
-                help="Buy after day drops this much"
+                help="Buy after day drops this much",
             )
 
         if strategy_choice == "Original Dip":
             st.warning("Original strategy shows poor backtested performance!")
             threshold = st.slider(
-                "Dip Threshold (%)",
-                min_value=0.3,
-                max_value=2.0,
-                value=0.6,
-                step=0.1
+                "Dip Threshold (%)", min_value=0.3, max_value=2.0, value=0.6, step=0.1
             )
             monday_enabled = st.checkbox("Enable Monday Trading", value=False)
 
@@ -722,7 +729,7 @@ def render_single_strategy_backtest():
             max_value=1000000,
             value=10000,
             step=1000,
-            key="single_capital"
+            key="single_capital",
         )
 
         # Run button
@@ -748,7 +755,7 @@ def render_single_strategy_backtest():
                             end_date=end_date,
                             threshold=threshold,
                             monday_enabled=monday_enabled,
-                            initial_capital=initial_capital
+                            initial_capital=initial_capital,
                         )
 
                     # Display results
@@ -779,22 +786,30 @@ def render_single_strategy_backtest():
                     # Equity curve
                     if result.trades:
                         df = result.to_dataframe()
-                        df['cumulative'] = df['dollar_pnl'].cumsum() if 'dollar_pnl' in df.columns else df['cumulative_pnl']
+                        df["cumulative"] = (
+                            df["dollar_pnl"].cumsum()
+                            if "dollar_pnl" in df.columns
+                            else df["cumulative_pnl"]
+                        )
 
                         fig = go.Figure()
-                        fig.add_trace(go.Scatter(
-                            x=df['date'],
-                            y=df['cumulative'] if 'cumulative' in df.columns else df.get('cumulative_pnl', []),
-                            mode='lines+markers',
-                            name='Strategy',
-                            line=dict(color='#4caf50')
-                        ))
+                        fig.add_trace(
+                            go.Scatter(
+                                x=df["date"],
+                                y=df["cumulative"]
+                                if "cumulative" in df.columns
+                                else df.get("cumulative_pnl", []),
+                                mode="lines+markers",
+                                name="Strategy",
+                                line=dict(color="#4caf50"),
+                            )
+                        )
 
                         fig.update_layout(
                             title="Backtest Equity Curve",
                             xaxis_title="Date",
                             yaxis_title="Cumulative P&L ($)",
-                            height=400
+                            height=400,
                         )
 
                         st.plotly_chart(fig, use_container_width=True)
@@ -806,6 +821,7 @@ def render_single_strategy_backtest():
                 except Exception as e:
                     st.error(f"Backtest failed: {e}")
                     import traceback
+
                     st.code(traceback.format_exc())
 
 
@@ -817,16 +833,8 @@ def render_multi_strategy_backtest():
 
     with col1:
         # Date range
-        start_date = st.date_input(
-            "Start Date",
-            value=date(2024, 1, 15),
-            key="multi_start"
-        )
-        end_date = st.date_input(
-            "End Date",
-            value=date.today(),
-            key="multi_end"
-        )
+        start_date = st.date_input("Start Date", value=date(2024, 1, 15), key="multi_start")
+        end_date = st.date_input("End Date", value=date.today(), key="multi_end")
 
         initial_capital = st.number_input(
             "Initial Capital ($)",
@@ -834,7 +842,7 @@ def render_multi_strategy_backtest():
             max_value=1000000,
             value=10000,
             step=1000,
-            key="multi_capital"
+            key="multi_capital",
         )
 
         run_comparison = st.button("🚀 Compare Strategies", use_container_width=True)
@@ -844,9 +852,7 @@ def render_multi_strategy_backtest():
             with st.spinner("Running all backtests..."):
                 try:
                     results, comparison_df = run_comprehensive_backtest(
-                        start_date=start_date,
-                        end_date=end_date,
-                        initial_capital=initial_capital
+                        start_date=start_date, end_date=end_date, initial_capital=initial_capital
                     )
 
                     st.subheader("Strategy Comparison")
@@ -854,25 +860,29 @@ def render_multi_strategy_backtest():
 
                     # Best strategy highlight
                     best_strategy = max(results.items(), key=lambda x: x[1].total_return_pct)
-                    st.success(f"Best Strategy: **{best_strategy[0]}** with {best_strategy[1].total_return_pct:+.1f}% return")
+                    st.success(
+                        f"Best Strategy: **{best_strategy[0]}** with {best_strategy[1].total_return_pct:+.1f}% return"
+                    )
 
                     # Equity curves comparison
                     st.subheader("Equity Curves")
 
                     fig = go.Figure()
-                    colors = ['#4caf50', '#2196f3', '#ff9800', '#e91e63', '#9c27b0', '#00bcd4']
+                    colors = ["#4caf50", "#2196f3", "#ff9800", "#e91e63", "#9c27b0", "#00bcd4"]
 
                     for i, (name, result) in enumerate(results.items()):
                         if result.trades:
                             df = result.to_dataframe()
-                            df['cumulative'] = df['dollar_pnl'].cumsum()
-                            fig.add_trace(go.Scatter(
-                                x=df['date'],
-                                y=df['cumulative'],
-                                mode='lines',
-                                name=name,
-                                line=dict(color=colors[i % len(colors)])
-                            ))
+                            df["cumulative"] = df["dollar_pnl"].cumsum()
+                            fig.add_trace(
+                                go.Scatter(
+                                    x=df["date"],
+                                    y=df["cumulative"],
+                                    mode="lines",
+                                    name=name,
+                                    line=dict(color=colors[i % len(colors)]),
+                                )
+                            )
 
                     fig.add_hline(y=0, line_dash="dash", line_color="gray")
 
@@ -881,7 +891,7 @@ def render_multi_strategy_backtest():
                         xaxis_title="Date",
                         yaxis_title="Cumulative P&L ($)",
                         height=500,
-                        showlegend=True
+                        showlegend=True,
                     )
 
                     st.plotly_chart(fig, use_container_width=True)
@@ -895,6 +905,7 @@ def render_multi_strategy_backtest():
                 except Exception as e:
                     st.error(f"Comparison failed: {e}")
                     import traceback
+
                     st.code(traceback.format_exc())
 
 
@@ -929,7 +940,8 @@ def render_settings():
         else:
             st.warning("Not authenticated with E*TRADE")
 
-            st.markdown("""
+            st.markdown(
+                """
             ### Setup Instructions
 
             1. **Get API Keys**: Apply for API access at [E*TRADE Developer Portal](https://developer.etrade.com)
@@ -940,12 +952,15 @@ def render_settings():
             export ETRADE_ACCOUNT_ID="your_account_id"
             ```
             3. **Authenticate**: Click the button below to start OAuth flow
-            """)
+            """
+            )
 
             if st.button("🔐 Authenticate with E*TRADE"):
                 try:
                     if not config.etrade.consumer_key:
-                        st.error("Consumer key not configured. Set ETRADE_CONSUMER_KEY environment variable.")
+                        st.error(
+                            "Consumer key not configured. Set ETRADE_CONSUMER_KEY environment variable."
+                        )
                     else:
                         st.info("Check your terminal for the authentication URL...")
                         client.authenticate()
@@ -957,7 +972,8 @@ def render_settings():
     with tab2:
         st.subheader("Notification Settings")
 
-        st.markdown("""
+        st.markdown(
+            """
         Configure notifications in the sidebar or set these environment variables:
         ```bash
         export SMTP_SERVER="smtp.gmail.com"
@@ -967,12 +983,14 @@ def render_settings():
         ```
 
         **Note**: For Gmail, use an [App Password](https://support.google.com/accounts/answer/185833)
-        """)
+        """
+        )
 
     with tab3:
         st.subheader("About IBIT Dip Bot")
 
-        st.markdown("""
+        st.markdown(
+            """
         ### Strategy Overview
 
         The IBIT Dip Bot implements an intraday strategy that:
@@ -1000,7 +1018,8 @@ def render_settings():
 
         **Disclaimer**: Past performance does not guarantee future results.
         This software is for educational purposes. Trade at your own risk.
-        """)
+        """
+        )
 
 
 # Main App
@@ -1010,12 +1029,9 @@ def main():
     render_sidebar()
 
     # Navigation
-    tab1, tab2, tab3, tab4 = st.tabs([
-        "📊 Dashboard",
-        "📋 Trade History",
-        "🔬 Backtest",
-        "⚙️ Settings"
-    ])
+    tab1, tab2, tab3, tab4 = st.tabs(
+        ["📊 Dashboard", "📋 Trade History", "🔬 Backtest", "⚙️ Settings"]
+    )
 
     with tab1:
         render_dashboard()

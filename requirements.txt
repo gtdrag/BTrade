@@ -31,3 +31,20 @@ python-dotenv>=1.0.0  # For .env file support
 
 # Type hints (Python 3.8 compatibility)
 typing-extensions>=4.8.0
+
+# === NEW: Reliability Layer Dependencies (Epic 1) ===
+# Secure credential storage (macOS Keychain, Windows Credential Manager)
+keyring>=24.0.0
+
+# Structured JSON logging with correlation IDs
+structlog>=23.0.0
+
+# Retry logic with exponential backoff
+tenacity>=8.2.0
+
+# SMS notifications for critical alerts
+twilio>=8.0.0
+
+# Code quality and pre-commit hooks
+ruff>=0.1.6
+pre-commit>=3.5.0

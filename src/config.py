@@ -3,16 +3,15 @@ Configuration management for IBIT Dip Bot.
 Handles loading, saving, and validating configuration.
 """
 
-import os
 import json
 import logging
-from dataclasses import dataclass, asdict, field
+import os
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Optional, List, Dict, Any
+from typing import Any, Dict, List, Optional
 
-from .strategy import StrategyConfig
 from .notifications import NotificationConfig
-
+from .strategy import StrategyConfig
 
 logger = logging.getLogger(__name__)
 
@@ -24,15 +23,17 @@ DEFAULT_CONFIG_PATH = Path(__file__).parent.parent / "config.json"
 @dataclass
 class ETradeConfig:
     """E*TRADE API configuration."""
+
     consumer_key: str = ""
     consumer_secret: str = ""
     account_id_key: str = ""  # The specific account to trade in
-    sandbox: bool = False     # Use sandbox environment
+    sandbox: bool = False  # Use sandbox environment
 
 
 @dataclass
 class AppConfig:
     """Main application configuration."""
+
     # E*TRADE settings
     etrade: ETradeConfig = field(default_factory=ETradeConfig)
 
@@ -56,19 +57,42 @@ class AppConfig:
 
         # Filter strategy_data to only include valid StrategyConfig fields
         valid_strategy_fields = {
-            'strategy_type', 'regular_threshold', 'monday_threshold', 'monday_enabled',
-            'mean_reversion_threshold', 'skip_thursday_for_mr', 'enable_short_thursday',
-            'max_position_usd', 'max_position_pct', 'use_limit_orders', 'limit_offset_pct', 'dry_run'
+            "strategy_type",
+            "regular_threshold",
+            "monday_threshold",
+            "monday_enabled",
+            "mean_reversion_threshold",
+            "skip_thursday_for_mr",
+            "enable_short_thursday",
+            "max_position_usd",
+            "max_position_pct",
+            "use_limit_orders",
+            "limit_offset_pct",
+            "dry_run",
         }
-        filtered_strategy_data = {k: v for k, v in strategy_data.items() if k in valid_strategy_fields}
+        filtered_strategy_data = {
+            k: v for k, v in strategy_data.items() if k in valid_strategy_fields
+        }
 
         # Filter notification_data to only include valid NotificationConfig fields
         valid_notification_fields = {
-            'email_enabled', 'smtp_server', 'smtp_port', 'smtp_username', 'smtp_password',
-            'email_from', 'email_to', 'desktop_enabled', 'sms_enabled', 'sms_to',
-            'notify_on_trade', 'notify_on_error', 'notify_on_daily_summary'
+            "email_enabled",
+            "smtp_server",
+            "smtp_port",
+            "smtp_username",
+            "smtp_password",
+            "email_from",
+            "email_to",
+            "desktop_enabled",
+            "sms_enabled",
+            "sms_to",
+            "notify_on_trade",
+            "notify_on_error",
+            "notify_on_daily_summary",
         }
-        filtered_notifications_data = {k: v for k, v in notifications_data.items() if k in valid_notification_fields}
+        filtered_notifications_data = {
+            k: v for k, v in notifications_data.items() if k in valid_notification_fields
+        }
 
         return cls(
             etrade=ETradeConfig(**etrade_data),
@@ -76,7 +100,7 @@ class AppConfig:
             notifications=NotificationConfig(**filtered_notifications_data),
             dry_run=data.get("dry_run", True),
             log_level=data.get("log_level", "INFO"),
-            theme=data.get("theme", "dark")
+            theme=data.get("theme", "dark"),
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -87,7 +111,7 @@ class AppConfig:
             "notifications": asdict(self.notifications),
             "dry_run": self.dry_run,
             "log_level": self.log_level,
-            "theme": self.theme
+            "theme": self.theme,
         }
 
     def validate(self) -> List[str]:
@@ -145,7 +169,7 @@ def load_config(path: Optional[Path] = None) -> AppConfig:
 
     if config_path.exists():
         try:
-            with open(config_path, 'r') as f:
+            with open(config_path) as f:
                 data = json.load(f)
             logger.info(f"Loaded config from {config_path}")
             config = AppConfig.from_dict(data)
@@ -210,7 +234,7 @@ def save_config(config: AppConfig, path: Optional[Path] = None):
     data["etrade"]["consumer_secret"] = ""
     data["notifications"]["smtp_password"] = ""
 
-    with open(config_path, 'w') as f:
+    with open(config_path, "w") as f:
         json.dump(data, f, indent=2, default=str)
 
     logger.info(f"Saved config to {config_path}")
@@ -245,11 +269,8 @@ def setup_logging(level: str = "INFO"):
         datefmt=date_format,
         handlers=[
             logging.StreamHandler(),
-            logging.FileHandler(
-                Path(__file__).parent.parent / "ibit_bot.log",
-                mode='a'
-            )
-        ]
+            logging.FileHandler(Path(__file__).parent.parent / "ibit_bot.log", mode="a"),
+        ],
     )
 
     # Reduce noise from third-party libraries

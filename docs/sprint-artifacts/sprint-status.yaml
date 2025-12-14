@@ -1,0 +1,96 @@
+# generated: 2025-12-14
+# project: BTrade
+# project_key: ibit
+# tracking_system: file-system
+# story_location: docs/sprint-artifacts
+
+# STATUS DEFINITIONS:
+# ==================
+# Epic Status:
+#   - backlog: Epic not yet started
+#   - in-progress: Epic actively being worked on
+#   - done: All stories in epic completed
+#
+# Epic Status Transitions:
+#   - backlog → in-progress: Automatically when first story is created (via create-story)
+#   - in-progress → done: Manually when all stories reach 'done' status
+#
+# Story Status:
+#   - backlog: Story only exists in epic file
+#   - drafted: Story file created in stories folder
+#   - ready-for-dev: Draft approved and story context created
+#   - in-progress: Developer actively working on implementation
+#   - review: Ready for code review (via Dev's code-review workflow)
+#   - done: Story completed
+#
+# Retrospective Status:
+#   - optional: Can be completed but not required
+#   - completed: Retrospective has been done
+#
+# WORKFLOW NOTES:
+# ===============
+# - Epic transitions to 'in-progress' automatically when first story is created
+# - Stories can be worked in parallel if team capacity allows
+# - SM typically drafts next story after previous one is 'done' to incorporate learnings
+# - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
+
+generated: 2025-12-14
+project: BTrade
+project_key: ibit
+tracking_system: file-system
+story_location: docs/sprint-artifacts
+
+development_status:
+  # Epic 1: Reliability Foundation
+  epic-1: in-progress
+  1-1-add-core-dependencies-and-project-configuration: done
+  1-2-implement-error-taxonomy: backlog
+  1-3-configure-structured-logging: backlog
+  1-4-create-reliability-database-schema: backlog
+  1-5-implement-state-manager-core: backlog
+  1-6-integrate-state-persistence-into-trading-bot: backlog
+  epic-1-retrospective: optional
+
+  # Epic 2: Position Safety
+  epic-2: backlog
+  2-1-implement-position-reconciliation-core: backlog
+  2-2-integrate-pre-trade-reconciliation-check: backlog
+  2-3-implement-mismatch-halt-and-acknowledgment: backlog
+  2-4-add-twilio-sms-integration: backlog
+  2-5-implement-notification-routing-by-severity: backlog
+  2-6-implement-trade-event-notifications: backlog
+  2-7-implement-daily-summary-notification: backlog
+  epic-2-retrospective: optional
+
+  # Epic 3: Visibility & Tracking
+  epic-3: backlog
+  3-1-create-3-second-status-dashboard-component: backlog
+  3-2-implement-status-dashboard-logic: backlog
+  3-3-migrate-paper-trades-to-persistent-database: backlog
+  3-4-implement-paper-trading-history-view: backlog
+  3-5-add-paper-trading-days-until-live-counter: backlog
+  3-6-integrate-status-dashboard-into-main-app: backlog
+  epic-3-retrospective: optional
+
+  # Epic 4: Risk Controls
+  epic-4: backlog
+  4-1-implement-configuration-module: backlog
+  4-2-add-position-sizing-configuration: backlog
+  4-3-display-max-loss-estimate-before-trade: backlog
+  4-4-implement-kill-switch-core: backlog
+  4-5-implement-position-closing-on-kill-switch: backlog
+  4-6-implement-kill-switch-resume: backlog
+  epic-4-retrospective: optional
+
+  # Epic 5: Onboarding & Compliance
+  epic-5: backlog
+  5-1-implement-secure-credential-storage: backlog
+  5-2-create-first-run-setup-wizard-api-keys: backlog
+  5-3-create-first-run-setup-wizard-oauth-connection: backlog
+  5-4-create-first-run-setup-wizard-test-connection: backlog
+  5-5-create-first-run-setup-wizard-completion: backlog
+  5-6-implement-tax-export-csv-generation: backlog
+  5-7-implement-tax-export-fifo-cost-basis: backlog
+  5-8-implement-tax-export-annual-summary: backlog
+  5-9-add-export-to-dashboard: backlog
+  epic-5-retrospective: optional

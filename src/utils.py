@@ -5,6 +5,7 @@ Handles timezone conversions, calculations, and common helpers.
 
 import datetime
 from typing import Optional, Tuple
+
 from zoneinfo import ZoneInfo
 
 # Eastern timezone for US markets
@@ -103,7 +104,9 @@ def calculate_dip_percentage(open_price: float, current_price: float) -> float:
     return ((open_price - current_price) / open_price) * 100
 
 
-def calculate_shares(available_cash: float, price: float, max_position: Optional[float] = None) -> int:
+def calculate_shares(
+    available_cash: float, price: float, max_position: Optional[float] = None
+) -> int:
     """
     Calculate number of whole shares to buy.
 
@@ -179,38 +182,38 @@ def format_timedelta(td: datetime.timedelta) -> str:
 # US Market Holidays (2024-2026) - Update as needed
 MARKET_HOLIDAYS = {
     # 2024
-    datetime.date(2024, 1, 1),   # New Year's Day
+    datetime.date(2024, 1, 1),  # New Year's Day
     datetime.date(2024, 1, 15),  # MLK Day
     datetime.date(2024, 2, 19),  # Presidents Day
     datetime.date(2024, 3, 29),  # Good Friday
     datetime.date(2024, 5, 27),  # Memorial Day
     datetime.date(2024, 6, 19),  # Juneteenth
-    datetime.date(2024, 7, 4),   # Independence Day
-    datetime.date(2024, 9, 2),   # Labor Day
-    datetime.date(2024, 11, 28), # Thanksgiving
-    datetime.date(2024, 12, 25), # Christmas
+    datetime.date(2024, 7, 4),  # Independence Day
+    datetime.date(2024, 9, 2),  # Labor Day
+    datetime.date(2024, 11, 28),  # Thanksgiving
+    datetime.date(2024, 12, 25),  # Christmas
     # 2025
-    datetime.date(2025, 1, 1),   # New Year's Day
+    datetime.date(2025, 1, 1),  # New Year's Day
     datetime.date(2025, 1, 20),  # MLK Day
     datetime.date(2025, 2, 17),  # Presidents Day
     datetime.date(2025, 4, 18),  # Good Friday
     datetime.date(2025, 5, 26),  # Memorial Day
     datetime.date(2025, 6, 19),  # Juneteenth
-    datetime.date(2025, 7, 4),   # Independence Day
-    datetime.date(2025, 9, 1),   # Labor Day
-    datetime.date(2025, 11, 27), # Thanksgiving
-    datetime.date(2025, 12, 25), # Christmas
+    datetime.date(2025, 7, 4),  # Independence Day
+    datetime.date(2025, 9, 1),  # Labor Day
+    datetime.date(2025, 11, 27),  # Thanksgiving
+    datetime.date(2025, 12, 25),  # Christmas
     # 2026
-    datetime.date(2026, 1, 1),   # New Year's Day
+    datetime.date(2026, 1, 1),  # New Year's Day
     datetime.date(2026, 1, 19),  # MLK Day
     datetime.date(2026, 2, 16),  # Presidents Day
-    datetime.date(2026, 4, 3),   # Good Friday
+    datetime.date(2026, 4, 3),  # Good Friday
     datetime.date(2026, 5, 25),  # Memorial Day
     datetime.date(2026, 6, 19),  # Juneteenth
-    datetime.date(2026, 7, 3),   # Independence Day (observed)
-    datetime.date(2026, 9, 7),   # Labor Day
-    datetime.date(2026, 11, 26), # Thanksgiving
-    datetime.date(2026, 12, 25), # Christmas
+    datetime.date(2026, 7, 3),  # Independence Day (observed)
+    datetime.date(2026, 9, 7),  # Labor Day
+    datetime.date(2026, 11, 26),  # Thanksgiving
+    datetime.date(2026, 12, 25),  # Christmas
 }
 
 

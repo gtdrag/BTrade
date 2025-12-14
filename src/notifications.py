@@ -3,23 +3,23 @@ Notification system for IBIT Dip Bot.
 Handles email, SMS, and desktop notifications.
 """
 
+import logging
 import os
 import smtplib
-import logging
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
 from dataclasses import dataclass
-from typing import Optional, List
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 from enum import Enum
+from typing import List, Optional
 
-from .utils import get_et_now, format_currency, format_percentage
-
+from .utils import format_currency, format_percentage, get_et_now
 
 logger = logging.getLogger(__name__)
 
 
 class NotificationType(Enum):
     """Types of notifications."""
+
     INFO = "info"
     WARNING = "warning"
     ERROR = "error"
@@ -29,6 +29,7 @@ class NotificationType(Enum):
 @dataclass
 class NotificationConfig:
     """Configuration for notifications."""
+
     # Email settings
     email_enabled: bool = False
     smtp_server: str = "smtp.gmail.com"
@@ -68,17 +69,15 @@ class NotificationManager:
     def _check_desktop_available(self) -> bool:
         """Check if desktop notifications are available."""
         try:
-            import plyer
-            return True
+            import importlib.util
+
+            return importlib.util.find_spec("plyer") is not None
         except ImportError:
             logger.warning("plyer not installed - desktop notifications disabled")
             return False
 
     def send(
-        self,
-        title: str,
-        message: str,
-        notification_type: NotificationType = NotificationType.INFO
+        self, title: str, message: str, notification_type: NotificationType = NotificationType.INFO
     ):
         """
         Send notification through all enabled channels.
@@ -112,19 +111,21 @@ class NotificationManager:
                 title=f"IBIT Bot: {title}",
                 message=message[:256],  # Truncate long messages
                 app_name="IBIT Dip Bot",
-                timeout=10
+                timeout=10,
             )
         except Exception as e:
             logger.warning(f"Desktop notification failed: {e}")
 
     def _send_email(self, title: str, message: str, notification_type: NotificationType):
         """Send email notification."""
-        if not all([
-            self.config.smtp_server,
-            self.config.smtp_username,
-            self.config.smtp_password,
-            self.config.email_to
-        ]):
+        if not all(
+            [
+                self.config.smtp_server,
+                self.config.smtp_username,
+                self.config.smtp_password,
+                self.config.email_to,
+            ]
+        ):
             logger.warning("Email not configured properly")
             return
 
@@ -174,7 +175,7 @@ Type: {notification_type.value}
                 server.sendmail(
                     self.config.email_from or self.config.smtp_username,
                     self.config.email_to,
-                    msg.as_string()
+                    msg.as_string(),
                 )
 
             logger.info(f"Email sent to {self.config.email_to}")
@@ -202,7 +203,7 @@ Type: {notification_type.value}
                 server.sendmail(
                     self.config.email_from or self.config.smtp_username,
                     self.config.sms_to,
-                    msg.as_string()
+                    msg.as_string(),
                 )
 
             logger.info(f"SMS sent to {self.config.sms_to}")
@@ -233,7 +234,7 @@ Type: {notification_type.value}
         price: float,
         dip_pct: Optional[float] = None,
         pnl: Optional[float] = None,
-        pnl_pct: Optional[float] = None
+        pnl_pct: Optional[float] = None,
     ):
         """Send trade notification."""
         if not self.config.notify_on_trade:
@@ -259,7 +260,7 @@ Type: {notification_type.value}
         pnl: Optional[float] = None,
         pnl_pct: Optional[float] = None,
         total_pnl: Optional[float] = None,
-        win_rate: Optional[float] = None
+        win_rate: Optional[float] = None,
     ):
         """Send daily summary notification."""
         if not self.config.notify_on_daily_summary:
@@ -268,7 +269,9 @@ Type: {notification_type.value}
         title = f"Daily Summary - {date}"
 
         if traded:
-            message = f"Today's trade: {format_currency(pnl or 0)} ({format_percentage(pnl_pct or 0)})"
+            message = (
+                f"Today's trade: {format_currency(pnl or 0)} ({format_percentage(pnl_pct or 0)})"
+            )
         else:
             message = "No trades today"
 
@@ -286,7 +289,7 @@ def create_notification_manager(
     smtp_username: str = None,
     smtp_password: str = None,
     email_to: List[str] = None,
-    desktop_enabled: bool = True
+    desktop_enabled: bool = True,
 ) -> NotificationManager:
     """
     Factory function to create NotificationManager.
@@ -303,8 +306,10 @@ def create_notification_manager(
         smtp_port=int(os.environ.get("SMTP_PORT", "587")),
         smtp_username=smtp_username or os.environ.get("SMTP_USERNAME", ""),
         smtp_password=smtp_password or os.environ.get("SMTP_PASSWORD", ""),
-        email_to=email_to or os.environ.get("EMAIL_TO", "").split(",") if os.environ.get("EMAIL_TO") else [],
-        desktop_enabled=desktop_enabled
+        email_to=email_to or os.environ.get("EMAIL_TO", "").split(",")
+        if os.environ.get("EMAIL_TO")
+        else [],
+        desktop_enabled=desktop_enabled,
     )
 
     return NotificationManager(config)

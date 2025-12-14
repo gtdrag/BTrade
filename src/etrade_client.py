@@ -3,20 +3,18 @@ E*TRADE API Client for IBIT Dip Bot.
 Handles OAuth authentication, quotes, orders, and account management.
 """
 
-import os
 import json
-import time
 import logging
+import os
+import time
 import webbrowser
 from pathlib import Path
-from typing import Optional, Dict, Any, List
-from urllib.parse import parse_qs
+from typing import Any, Dict, List, Optional
 
 import requests
 from requests_oauthlib import OAuth1Session
 
 from .utils import get_et_now
-
 
 logger = logging.getLogger(__name__)
 
@@ -34,11 +32,13 @@ OAUTH_REVOKE_TOKEN = "/oauth/revoke_access_token"
 
 class ETradeAuthError(Exception):
     """Authentication error with E*TRADE API."""
+
     pass
 
 
 class ETradeAPIError(Exception):
     """API error from E*TRADE."""
+
     pass
 
 
@@ -59,7 +59,7 @@ class ETradeClient:
         consumer_key: str,
         consumer_secret: str,
         sandbox: bool = False,
-        token_file: Optional[Path] = None
+        token_file: Optional[Path] = None,
     ):
         """
         Initialize E*TRADE client.
@@ -86,10 +86,10 @@ class ETradeClient:
         """Load saved tokens from file."""
         if self.token_file.exists():
             try:
-                with open(self.token_file, 'r') as f:
+                with open(self.token_file) as f:
                     tokens = json.load(f)
-                    self.access_token = tokens.get('access_token')
-                    self.access_token_secret = tokens.get('access_token_secret')
+                    self.access_token = tokens.get("access_token")
+                    self.access_token_secret = tokens.get("access_token_secret")
                     if self.access_token and self.access_token_secret:
                         self._create_session()
                         logger.info("Loaded saved OAuth tokens")
@@ -99,12 +99,15 @@ class ETradeClient:
     def _save_tokens(self):
         """Save tokens to file."""
         try:
-            with open(self.token_file, 'w') as f:
-                json.dump({
-                    'access_token': self.access_token,
-                    'access_token_secret': self.access_token_secret,
-                    'saved_at': get_et_now().isoformat()
-                }, f)
+            with open(self.token_file, "w") as f:
+                json.dump(
+                    {
+                        "access_token": self.access_token,
+                        "access_token_secret": self.access_token_secret,
+                        "saved_at": get_et_now().isoformat(),
+                    },
+                    f,
+                )
             # Secure the file
             os.chmod(self.token_file, 0o600)
             logger.info("Saved OAuth tokens")
@@ -117,7 +120,7 @@ class ETradeClient:
             self.consumer_key,
             client_secret=self.consumer_secret,
             resource_owner_key=self.access_token,
-            resource_owner_secret=self.access_token_secret
+            resource_owner_secret=self.access_token_secret,
         )
 
     def is_authenticated(self) -> bool:
@@ -137,16 +140,14 @@ class ETradeClient:
         try:
             # Step 1: Get request token
             oauth = OAuth1Session(
-                self.consumer_key,
-                client_secret=self.consumer_secret,
-                callback_uri=callback_url
+                self.consumer_key, client_secret=self.consumer_secret, callback_uri=callback_url
             )
 
             request_token_url = f"{self.base_url}{OAUTH_REQUEST_TOKEN}"
             response = oauth.fetch_request_token(request_token_url)
 
-            resource_owner_key = response.get('oauth_token')
-            resource_owner_secret = response.get('oauth_token_secret')
+            resource_owner_key = response.get("oauth_token")
+            resource_owner_secret = response.get("oauth_token_secret")
 
             if not resource_owner_key:
                 raise ETradeAuthError("Failed to get request token")
@@ -180,14 +181,14 @@ class ETradeClient:
                 client_secret=self.consumer_secret,
                 resource_owner_key=resource_owner_key,
                 resource_owner_secret=resource_owner_secret,
-                verifier=verifier
+                verifier=verifier,
             )
 
             access_token_url = f"{self.base_url}{OAUTH_ACCESS_TOKEN}"
             access_tokens = oauth.fetch_access_token(access_token_url)
 
-            self.access_token = access_tokens.get('oauth_token')
-            self.access_token_secret = access_tokens.get('oauth_token_secret')
+            self.access_token = access_tokens.get("oauth_token")
+            self.access_token_secret = access_tokens.get("oauth_token_secret")
 
             if not self.access_token:
                 raise ETradeAuthError("Failed to get access token")
@@ -250,7 +251,7 @@ class ETradeClient:
         endpoint: str,
         params: Optional[Dict] = None,
         json_data: Optional[Dict] = None,
-        retry_count: int = 3
+        retry_count: int = 3,
     ) -> Dict[str, Any]:
         """
         Make authenticated API request with retry logic.
@@ -279,7 +280,9 @@ class ETradeClient:
                 if method.upper() == "GET":
                     response = self.session.get(url, params=params, headers=headers)
                 elif method.upper() == "POST":
-                    response = self.session.post(url, params=params, json=json_data, headers=headers)
+                    response = self.session.post(
+                        url, params=params, json=json_data, headers=headers
+                    )
                 elif method.upper() == "PUT":
                     response = self.session.put(url, params=params, json=json_data, headers=headers)
                 elif method.upper() == "DELETE":
@@ -289,7 +292,7 @@ class ETradeClient:
 
                 # Handle rate limiting
                 if response.status_code == 429:
-                    wait_time = int(response.headers.get('Retry-After', 60))
+                    wait_time = int(response.headers.get("Retry-After", 60))
                     logger.warning(f"Rate limited. Waiting {wait_time}s...")
                     time.sleep(wait_time)
                     continue
@@ -312,7 +315,7 @@ class ETradeClient:
             except (requests.RequestException, ConnectionError) as e:
                 logger.warning(f"Request failed (attempt {attempt + 1}): {e}")
                 if attempt < retry_count - 1:
-                    time.sleep(2 ** attempt)  # Exponential backoff
+                    time.sleep(2**attempt)  # Exponential backoff
                 else:
                     raise ETradeAPIError(f"Request failed after {retry_count} attempts: {e}")
 
@@ -405,7 +408,7 @@ class ETradeClient:
         """
         quote = self.get_quote("IBIT")
         all_data = quote.get("All", {})
-        intraday = quote.get("Intraday", {})
+        _intraday = quote.get("Intraday", {})  # noqa: F841 - reserved for future use
 
         return {
             "last_price": float(all_data.get("lastTrade", 0)),
@@ -427,7 +430,7 @@ class ETradeClient:
         action: str,  # "BUY" or "SELL"
         quantity: int,
         order_type: str = "MARKET",  # "MARKET" or "LIMIT"
-        limit_price: Optional[float] = None
+        limit_price: Optional[float] = None,
     ) -> Dict[str, Any]:
         """
         Preview an order before placing it.
@@ -439,9 +442,7 @@ class ETradeClient:
         )
 
         response = self._request(
-            "POST",
-            f"/v1/accounts/{account_id_key}/orders/preview",
-            json_data=order_data
+            "POST", f"/v1/accounts/{account_id_key}/orders/preview", json_data=order_data
         )
 
         return response.get("PreviewOrderResponse", {})
@@ -454,7 +455,7 @@ class ETradeClient:
         quantity: int,
         order_type: str = "MARKET",
         limit_price: Optional[float] = None,
-        preview_ids: Optional[List[Dict]] = None
+        preview_ids: Optional[List[Dict]] = None,
     ) -> Dict[str, Any]:
         """
         Place an order.
@@ -480,9 +481,7 @@ class ETradeClient:
             order_data["PlaceOrderRequest"]["PreviewIds"] = preview_ids
 
         response = self._request(
-            "POST",
-            f"/v1/accounts/{account_id_key}/orders/place",
-            json_data=order_data
+            "POST", f"/v1/accounts/{account_id_key}/orders/place", json_data=order_data
         )
 
         return response.get("PlaceOrderResponse", {})
@@ -494,7 +493,7 @@ class ETradeClient:
         quantity: int,
         order_type: str,
         limit_price: Optional[float],
-        preview: bool
+        preview: bool,
     ) -> Dict[str, Any]:
         """Build order request payload."""
         order = {
@@ -502,15 +501,14 @@ class ETradeClient:
             "priceType": order_type,
             "orderTerm": "GOOD_FOR_DAY",
             "marketSession": "REGULAR",
-            "Instrument": [{
-                "Product": {
-                    "securityType": "EQ",
-                    "symbol": symbol
-                },
-                "orderAction": action,
-                "quantityType": "QUANTITY",
-                "quantity": quantity
-            }]
+            "Instrument": [
+                {
+                    "Product": {"securityType": "EQ", "symbol": symbol},
+                    "orderAction": action,
+                    "quantityType": "QUANTITY",
+                    "quantity": quantity,
+                }
+            ],
         }
 
         if order_type == "LIMIT" and limit_price:
@@ -521,7 +519,7 @@ class ETradeClient:
             key: {
                 "orderType": "EQ",
                 "clientOrderId": f"IBIT_{get_et_now().strftime('%Y%m%d%H%M%S')}",
-                "Order": [order]
+                "Order": [order],
             }
         }
 
@@ -533,9 +531,11 @@ class ETradeClient:
     def cancel_order(self, account_id_key: str, order_id: str) -> bool:
         """Cancel an open order."""
         try:
-            self._request("PUT", f"/v1/accounts/{account_id_key}/orders/cancel", json_data={
-                "CancelOrderRequest": {"orderId": order_id}
-            })
+            self._request(
+                "PUT",
+                f"/v1/accounts/{account_id_key}/orders/cancel",
+                json_data={"CancelOrderRequest": {"orderId": order_id}},
+            )
             return True
         except ETradeAPIError:
             return False
@@ -569,12 +569,14 @@ class MockETradeClient:
         self._mock_prices[symbol] = price
 
     def list_accounts(self) -> List[Dict[str, Any]]:
-        return [{
-            "accountId": "MOCK_IRA_001",
-            "accountIdKey": "mock_key_001",
-            "accountDesc": "Mock IRA Account",
-            "accountType": "IRA"
-        }]
+        return [
+            {
+                "accountId": "MOCK_IRA_001",
+                "accountIdKey": "mock_key_001",
+                "accountDesc": "Mock IRA Account",
+                "accountType": "IRA",
+            }
+        ]
 
     def get_cash_available(self, account_id_key: str) -> float:
         return self.cash
@@ -582,12 +584,14 @@ class MockETradeClient:
     def get_account_positions(self, account_id_key: str) -> List[Dict[str, Any]]:
         positions = []
         for symbol, data in self.positions.items():
-            positions.append({
-                "symbolDescription": symbol,
-                "quantity": data["quantity"],
-                "costPerShare": data["cost_basis"],
-                "marketValue": data["quantity"] * self._mock_prices.get(symbol, 0)
-            })
+            positions.append(
+                {
+                    "symbolDescription": symbol,
+                    "quantity": data["quantity"],
+                    "costPerShare": data["cost_basis"],
+                    "marketValue": data["quantity"] * self._mock_prices.get(symbol, 0),
+                }
+            )
         return positions
 
     def get_quote(self, symbol: str) -> Dict[str, Any]:
@@ -600,7 +604,7 @@ class MockETradeClient:
                 "ask": price + 0.01,
                 "high": price * 1.01,
                 "low": price * 0.99,
-                "totalVolume": 1000000
+                "totalVolume": 1000000,
             }
         }
 
@@ -614,7 +618,7 @@ class MockETradeClient:
             "high": price * 1.01,
             "low": price * 0.99,
             "volume": 1000000,
-            "change_pct": -0.5
+            "change_pct": -0.5,
         }
 
     def preview_order(
@@ -624,17 +628,16 @@ class MockETradeClient:
         action: str,
         quantity: int,
         order_type: str = "MARKET",
-        limit_price: Optional[float] = None
+        limit_price: Optional[float] = None,
     ) -> Dict[str, Any]:
         price = limit_price or self._mock_prices.get(symbol, 50.0)
         total = price * quantity
 
         return {
             "PreviewIds": [{"previewId": "mock_preview_001"}],
-            "Order": [{
-                "estimatedTotalAmount": total if action == "BUY" else 0,
-                "estimatedCommission": 0
-            }]
+            "Order": [
+                {"estimatedTotalAmount": total if action == "BUY" else 0, "estimatedCommission": 0}
+            ],
         }
 
     def place_order(
@@ -645,7 +648,7 @@ class MockETradeClient:
         quantity: int,
         order_type: str = "MARKET",
         limit_price: Optional[float] = None,
-        preview_ids: Optional[List[Dict]] = None
+        preview_ids: Optional[List[Dict]] = None,
     ) -> Dict[str, Any]:
         price = limit_price or self._mock_prices.get(symbol, 50.0)
         total = price * quantity
@@ -662,7 +665,7 @@ class MockETradeClient:
                 new_qty = old_qty + quantity
                 self.positions[symbol] = {
                     "quantity": new_qty,
-                    "cost_basis": ((old_qty * old_cost) + total) / new_qty
+                    "cost_basis": ((old_qty * old_cost) + total) / new_qty,
                 }
             else:
                 self.positions[symbol] = {"quantity": quantity, "cost_basis": price}
@@ -681,7 +684,7 @@ class MockETradeClient:
             "quantity": quantity,
             "price": price,
             "status": "EXECUTED",
-            "timestamp": get_et_now().isoformat()
+            "timestamp": get_et_now().isoformat(),
         }
         self.orders.append(order)
 
@@ -689,10 +692,7 @@ class MockETradeClient:
 
         return {
             "OrderIds": [{"orderId": order_id}],
-            "Order": [{
-                "orderId": order_id,
-                "status": "EXECUTED"
-            }]
+            "Order": [{"orderId": order_id, "status": "EXECUTED"}],
         }
 
 
@@ -700,7 +700,7 @@ def create_etrade_client(
     consumer_key: Optional[str] = None,
     consumer_secret: Optional[str] = None,
     sandbox: bool = False,
-    dry_run: bool = False
+    dry_run: bool = False,
 ) -> ETradeClient:
     """
     Factory function to create appropriate E*TRADE client.

@@ -10,30 +10,29 @@ Implements data-driven strategies based on quantitative analysis:
 """
 
 import logging
-from dataclasses import dataclass, field
-from typing import Optional, List, Dict, Any, Tuple
-from enum import Enum
-from datetime import date, datetime, timedelta
 from abc import ABC, abstractmethod
-
-import pandas as pd
-import numpy as np
+from dataclasses import dataclass, field
+from datetime import date
+from enum import Enum
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
 
 class StrategyType(Enum):
     """Available strategy types."""
-    ORIGINAL_DIP = "original_dip"           # Original 10 AM dip (not recommended)
-    MEAN_REVERSION = "mean_reversion"       # Buy after big down days
-    SHORT_THURSDAY = "short_thursday"       # Short on Thursdays
-    INTRADAY_BOUNCE = "intraday_bounce"     # Buy after big intraday drops
-    TREND_FOLLOWING = "trend_following"     # MA crossover
-    COMBINED = "combined"                   # Multiple signals
+
+    ORIGINAL_DIP = "original_dip"  # Original 10 AM dip (not recommended)
+    MEAN_REVERSION = "mean_reversion"  # Buy after big down days
+    SHORT_THURSDAY = "short_thursday"  # Short on Thursdays
+    INTRADAY_BOUNCE = "intraday_bounce"  # Buy after big intraday drops
+    TREND_FOLLOWING = "trend_following"  # MA crossover
+    COMBINED = "combined"  # Multiple signals
 
 
 class SignalDirection(Enum):
     """Trade direction."""
+
     LONG = "long"
     SHORT = "short"
     FLAT = "flat"
@@ -42,6 +41,7 @@ class SignalDirection(Enum):
 @dataclass
 class StrategySignal:
     """Signal from a strategy."""
+
     strategy: StrategyType
     direction: SignalDirection
     strength: float  # 0-1, confidence/size multiplier
@@ -55,6 +55,7 @@ class StrategySignal:
 @dataclass
 class DailyData:
     """Daily OHLCV data for a single day."""
+
     date: date
     open: float
     high: float
@@ -93,7 +94,9 @@ class BaseStrategy(ABC):
     def add_daily_data(self, daily: DailyData):
         """Add a single day's data."""
         self._historical_data.append(daily)
-        self._historical_data = sorted(self._historical_data, key=lambda x: x.date)[-100:]  # Keep last 100 days
+        self._historical_data = sorted(self._historical_data, key=lambda x: x.date)[
+            -100:
+        ]  # Keep last 100 days
 
     @abstractmethod
     def generate_signal(self, current_price: float, current_date: date) -> Optional[StrategySignal]:
@@ -108,7 +111,9 @@ class BaseStrategy(ABC):
 
     def get_previous_days(self, n: int) -> List[DailyData]:
         """Get the last n days of data."""
-        return self._historical_data[-n:] if len(self._historical_data) >= n else self._historical_data
+        return (
+            self._historical_data[-n:] if len(self._historical_data) >= n else self._historical_data
+        )
 
 
 class MeanReversionStrategy(BaseStrategy):
@@ -143,7 +148,7 @@ class MeanReversionStrategy(BaseStrategy):
                 strategy=self.strategy_type,
                 direction=SignalDirection.FLAT,
                 strength=0.0,
-                reason=f"Previous day return {prev_return:.2f}% > threshold {self.threshold}%"
+                reason=f"Previous day return {prev_return:.2f}% > threshold {self.threshold}%",
             )
 
         # Check if today is Thursday (skip if configured)
@@ -152,7 +157,7 @@ class MeanReversionStrategy(BaseStrategy):
                 strategy=self.strategy_type,
                 direction=SignalDirection.FLAT,
                 strength=0.0,
-                reason=f"Skipping Thursday despite signal (prev day: {prev_return:.2f}%)"
+                reason=f"Skipping Thursday despite signal (prev day: {prev_return:.2f}%)",
             )
 
         # Generate buy signal
@@ -167,8 +172,8 @@ class MeanReversionStrategy(BaseStrategy):
             metadata={
                 "prev_return": prev_return,
                 "threshold": self.threshold,
-                "prev_date": prev_day.date.isoformat()
-            }
+                "prev_date": prev_day.date.isoformat(),
+            },
         )
 
 
@@ -196,7 +201,7 @@ class ShortThursdayStrategy(BaseStrategy):
                 strategy=self.strategy_type,
                 direction=SignalDirection.FLAT,
                 strength=0.0,
-                reason=f"Not Thursday (day {current_date.weekday()})"
+                reason=f"Not Thursday (day {current_date.weekday()})",
             )
 
         return StrategySignal(
@@ -208,8 +213,8 @@ class ShortThursdayStrategy(BaseStrategy):
             metadata={
                 "day_of_week": "Thursday",
                 "historical_win_rate": 0.594,
-                "historical_avg_return": 0.71
-            }
+                "historical_avg_return": 0.71,
+            },
         )
 
 
@@ -251,7 +256,7 @@ class IntradayBounceStrategy(BaseStrategy):
                 strategy=self.strategy_type,
                 direction=SignalDirection.FLAT,
                 strength=0.0,
-                reason=f"Intraday drop {drop_pct:.2f}% > threshold {self.threshold}%"
+                reason=f"Intraday drop {drop_pct:.2f}% > threshold {self.threshold}%",
             )
 
         # Generate buy signal
@@ -263,11 +268,7 @@ class IntradayBounceStrategy(BaseStrategy):
             strength=strength,
             reason=f"Intraday bounce: dropped {drop_pct:.2f}% from high",
             entry_price=current_price,
-            metadata={
-                "day_high": day_high,
-                "drop_pct": drop_pct,
-                "threshold": self.threshold
-            }
+            metadata={"day_high": day_high, "drop_pct": drop_pct, "threshold": self.threshold},
         )
 
 
@@ -304,7 +305,7 @@ class TrendFollowingStrategy(BaseStrategy):
                 strategy=self.strategy_type,
                 direction=SignalDirection.FLAT,
                 strength=0.0,
-                reason="Insufficient data for MA calculation"
+                reason="Insufficient data for MA calculation",
             )
 
         # Determine trend
@@ -323,8 +324,8 @@ class TrendFollowingStrategy(BaseStrategy):
                     "fast_sma": fast_sma,
                     "slow_sma": slow_sma,
                     "price_vs_fast": (current_price / fast_sma - 1) * 100,
-                    "price_vs_slow": (current_price / slow_sma - 1) * 100
-                }
+                    "price_vs_slow": (current_price / slow_sma - 1) * 100,
+                },
             )
         elif not above_fast and not above_slow and not fast_above_slow:
             return StrategySignal(
@@ -333,17 +334,14 @@ class TrendFollowingStrategy(BaseStrategy):
                 strength=0.6,
                 reason=f"Downtrend: Price < SMA{self.fast_period} < SMA{self.slow_period}",
                 entry_price=current_price,
-                metadata={
-                    "fast_sma": fast_sma,
-                    "slow_sma": slow_sma
-                }
+                metadata={"fast_sma": fast_sma, "slow_sma": slow_sma},
             )
         else:
             return StrategySignal(
                 strategy=self.strategy_type,
                 direction=SignalDirection.FLAT,
                 strength=0.0,
-                reason="Mixed signals - no clear trend"
+                reason="Mixed signals - no clear trend",
             )
 
 
@@ -363,15 +361,11 @@ class CombinedStrategy(BaseStrategy):
     - Beats Buy & Hold by +9.7%
     """
 
-    def __init__(
-        self,
-        mean_reversion_threshold: float = -2.0,
-        enable_short_thursday: bool = True
-    ):
+    def __init__(self, mean_reversion_threshold: float = -2.0, enable_short_thursday: bool = True):
         super().__init__("Combined", StrategyType.COMBINED)
         self.mean_reversion = MeanReversionStrategy(
             threshold=mean_reversion_threshold,
-            skip_thursday=False  # We handle Thursday logic here
+            skip_thursday=False,  # We handle Thursday logic here
         )
         self.short_thursday = ShortThursdayStrategy()
         self.enable_short_thursday = enable_short_thursday
@@ -402,24 +396,22 @@ class CombinedStrategy(BaseStrategy):
                 strength=mr_signal.strength,
                 reason=f"Combined: {mr_signal.reason}",
                 entry_price=current_price,
-                metadata={
-                    "trigger": "mean_reversion",
-                    **mr_signal.metadata
-                }
+                metadata={"trigger": "mean_reversion", **mr_signal.metadata},
             )
 
         # Short Thursday if enabled and today is Thursday
-        if self.enable_short_thursday and thu_signal and thu_signal.direction == SignalDirection.SHORT:
+        if (
+            self.enable_short_thursday
+            and thu_signal
+            and thu_signal.direction == SignalDirection.SHORT
+        ):
             return StrategySignal(
                 strategy=self.strategy_type,
                 direction=SignalDirection.SHORT,
                 strength=thu_signal.strength,
                 reason=f"Combined: {thu_signal.reason}",
                 entry_price=current_price,
-                metadata={
-                    "trigger": "short_thursday",
-                    **thu_signal.metadata
-                }
+                metadata={"trigger": "short_thursday", **thu_signal.metadata},
             )
 
         # No signal
@@ -427,7 +419,7 @@ class CombinedStrategy(BaseStrategy):
             strategy=self.strategy_type,
             direction=SignalDirection.FLAT,
             strength=0.0,
-            reason="No combined signal triggered"
+            reason="No combined signal triggered",
         )
 
 
@@ -474,7 +466,9 @@ class StrategyManager:
 
         return strategy.generate_signal(current_price, current_date)
 
-    def get_all_signals(self, current_price: float, current_date: date) -> Dict[StrategyType, StrategySignal]:
+    def get_all_signals(
+        self, current_price: float, current_date: date
+    ) -> Dict[StrategyType, StrategySignal]:
         """Get signals from all strategies."""
         signals = {}
         for strategy_type, strategy in self.strategies.items():

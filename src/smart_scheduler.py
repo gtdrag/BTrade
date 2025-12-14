@@ -5,24 +5,24 @@ Runs the smart strategy at market open and close.
 """
 
 import logging
-from datetime import datetime, time
-from typing import Optional, Callable
 from enum import Enum
+from typing import Optional
 
+from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_EXECUTED
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
-from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_EXECUTED
 
-from .trading_bot import TradingBot, TradeResult
-from .smart_strategy import Signal
-from .utils import get_et_now, is_trading_day, ET
 from .database import get_database
+from .smart_strategy import Signal
+from .trading_bot import TradeResult, TradingBot
+from .utils import ET, get_et_now, is_trading_day
 
 logger = logging.getLogger(__name__)
 
 
 class BotStatus(Enum):
     """Bot status."""
+
     STOPPED = "stopped"
     RUNNING = "running"
     ERROR = "error"
@@ -64,29 +64,29 @@ class SmartScheduler:
         # Morning execution - 9:35 AM ET (5 min after open to let prices settle)
         self.scheduler.add_job(
             self._job_morning_signal,
-            CronTrigger(day_of_week='mon-fri', hour=9, minute=35, timezone=ET),
-            id='morning_signal',
-            name='Execute Morning Signal',
-            misfire_grace_time=300
+            CronTrigger(day_of_week="mon-fri", hour=9, minute=35, timezone=ET),
+            id="morning_signal",
+            name="Execute Morning Signal",
+            misfire_grace_time=300,
         )
 
         # Close positions - 3:55 PM ET (before market close)
         self.scheduler.add_job(
             self._job_close_positions,
-            CronTrigger(day_of_week='mon-fri', hour=15, minute=55, timezone=ET),
-            id='close_positions',
-            name='Close Positions',
-            misfire_grace_time=300
+            CronTrigger(day_of_week="mon-fri", hour=15, minute=55, timezone=ET),
+            id="close_positions",
+            name="Close Positions",
+            misfire_grace_time=300,
         )
 
         # Token renewal for E*TRADE (if live mode) - 8:00 AM ET
         if not self.bot.is_paper_mode and self.bot.client:
             self.scheduler.add_job(
                 self._job_renew_token,
-                CronTrigger(day_of_week='mon-fri', hour=8, minute=0, timezone=ET),
-                id='renew_token',
-                name='Renew E*TRADE Token',
-                misfire_grace_time=3600
+                CronTrigger(day_of_week="mon-fri", hour=8, minute=0, timezone=ET),
+                id="renew_token",
+                name="Renew E*TRADE Token",
+                misfire_grace_time=3600,
             )
 
         logger.info("Scheduler jobs configured")
@@ -137,7 +137,7 @@ class SmartScheduler:
                         logger.error(f"Failed to close {etf}: {result.error}")
             else:
                 # For live trading, close known ETF positions
-                for etf in ['BITX', 'SBIT']:
+                for etf in ["BITX", "SBIT"]:
                     result = self.bot.close_position(etf)
                     if result.success and result.shares > 0:
                         logger.info(f"Closed {etf} position")
@@ -187,19 +187,23 @@ class SmartScheduler:
     def get_status(self) -> dict:
         """Get scheduler status."""
         return {
-            'status': self.status.value,
-            'last_result': {
-                'success': self._last_result.success if self._last_result else None,
-                'signal': self._last_result.signal.value if self._last_result else None,
-                'etf': self._last_result.etf if self._last_result else None,
-            } if self._last_result else None,
-            'error_count': self._error_count,
-            'next_jobs': [
+            "status": self.status.value,
+            "last_result": {
+                "success": self._last_result.success if self._last_result else None,
+                "signal": self._last_result.signal.value if self._last_result else None,
+                "etf": self._last_result.etf if self._last_result else None,
+            }
+            if self._last_result
+            else None,
+            "error_count": self._error_count,
+            "next_jobs": [
                 {
-                    'id': job.id,
-                    'name': job.name,
-                    'next_run': job.next_run_time.isoformat() if job.next_run_time else None
+                    "id": job.id,
+                    "name": job.name,
+                    "next_run": job.next_run_time.isoformat() if job.next_run_time else None,
                 }
                 for job in self.scheduler.get_jobs()
-            ] if self.status == BotStatus.RUNNING else []
+            ]
+            if self.status == BotStatus.RUNNING
+            else [],
         }

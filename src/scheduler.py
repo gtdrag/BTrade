@@ -7,24 +7,24 @@ import logging
 import threading
 import time
 from datetime import datetime, timedelta
-from typing import Callable, Optional, Dict, Any
 from enum import Enum
+from typing import Any, Dict, Optional
 
+from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_EXECUTED
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
-from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_EXECUTED
 
-from .utils import get_et_now, get_market_times, is_trading_day, ET
-from .strategy import IBITDipStrategy, TradeAction
 from .database import get_database
 from .notifications import NotificationManager
-
+from .strategy import IBITDipStrategy, TradeAction
+from .utils import ET, get_et_now, get_market_times, is_trading_day
 
 logger = logging.getLogger(__name__)
 
 
 class BotStatus(Enum):
     """Bot status states."""
+
     STOPPED = "stopped"
     RUNNING = "running"
     PAUSED = "paused"
@@ -42,9 +42,7 @@ class TradingScheduler:
     """
 
     def __init__(
-        self,
-        strategy: IBITDipStrategy,
-        notifications: Optional[NotificationManager] = None
+        self, strategy: IBITDipStrategy, notifications: Optional[NotificationManager] = None
     ):
         """
         Initialize scheduler.
@@ -63,24 +61,21 @@ class TradingScheduler:
         self._error_count = 0
 
         # Add error listener
-        self.scheduler.add_listener(
-            self._on_job_event,
-            EVENT_JOB_ERROR | EVENT_JOB_EXECUTED
-        )
+        self.scheduler.add_listener(self._on_job_event, EVENT_JOB_ERROR | EVENT_JOB_EXECUTED)
 
     def _on_job_event(self, event):
         """Handle scheduler job events."""
         if event.exception:
             self._error_count += 1
             logger.error(f"Scheduler job failed: {event.exception}")
-            self.db.log_event("ERROR", "Scheduler job failed", {
-                "job_id": event.job_id,
-                "error": str(event.exception)
-            })
+            self.db.log_event(
+                "ERROR",
+                "Scheduler job failed",
+                {"job_id": event.job_id, "error": str(event.exception)},
+            )
             if self.notifications:
                 self.notifications.send_error(
-                    f"Scheduler job {event.job_id} failed",
-                    str(event.exception)
+                    f"Scheduler job {event.job_id} failed", str(event.exception)
                 )
 
     def setup_jobs(self):
@@ -91,85 +86,55 @@ class TradingScheduler:
         # Job 1: Capture open price at 9:30 AM ET
         self.scheduler.add_job(
             self._job_capture_open,
-            CronTrigger(
-                day_of_week='mon-fri',
-                hour=9,
-                minute=30,
-                timezone=ET
-            ),
-            id='capture_open',
-            name='Capture Open Price',
-            replace_existing=True
+            CronTrigger(day_of_week="mon-fri", hour=9, minute=30, timezone=ET),
+            id="capture_open",
+            name="Capture Open Price",
+            replace_existing=True,
         )
 
         # Job 2: Dip check at 10:30 AM ET (middle of dip window)
         self.scheduler.add_job(
             self._job_dip_check,
-            CronTrigger(
-                day_of_week='mon-fri',
-                hour=10,
-                minute=30,
-                timezone=ET
-            ),
-            id='dip_check',
-            name='Dip Check and Buy',
-            replace_existing=True
+            CronTrigger(day_of_week="mon-fri", hour=10, minute=30, timezone=ET),
+            id="dip_check",
+            name="Dip Check and Buy",
+            replace_existing=True,
         )
 
         # Job 3: Friday close at 3:55 PM ET
         self.scheduler.add_job(
             self._job_friday_close,
-            CronTrigger(
-                day_of_week='fri',
-                hour=15,
-                minute=55,
-                timezone=ET
-            ),
-            id='friday_close',
-            name='Friday Close',
-            replace_existing=True
+            CronTrigger(day_of_week="fri", hour=15, minute=55, timezone=ET),
+            id="friday_close",
+            name="Friday Close",
+            replace_existing=True,
         )
 
         # Job 4: Regular close at 3:58 PM ET (Mon-Thu)
         self.scheduler.add_job(
             self._job_regular_close,
-            CronTrigger(
-                day_of_week='mon-thu',
-                hour=15,
-                minute=58,
-                timezone=ET
-            ),
-            id='regular_close',
-            name='Regular Close',
-            replace_existing=True
+            CronTrigger(day_of_week="mon-thu", hour=15, minute=58, timezone=ET),
+            id="regular_close",
+            name="Regular Close",
+            replace_existing=True,
         )
 
         # Job 5: Daily token renewal at 7:00 AM ET
         self.scheduler.add_job(
             self._job_renew_token,
-            CronTrigger(
-                day_of_week='mon-fri',
-                hour=7,
-                minute=0,
-                timezone=ET
-            ),
-            id='renew_token',
-            name='Renew OAuth Token',
-            replace_existing=True
+            CronTrigger(day_of_week="mon-fri", hour=7, minute=0, timezone=ET),
+            id="renew_token",
+            name="Renew OAuth Token",
+            replace_existing=True,
         )
 
         # Job 6: Status check every 5 minutes during market hours
         self.scheduler.add_job(
             self._job_status_check,
-            CronTrigger(
-                day_of_week='mon-fri',
-                hour='9-16',
-                minute='*/5',
-                timezone=ET
-            ),
-            id='status_check',
-            name='Status Check',
-            replace_existing=True
+            CronTrigger(day_of_week="mon-fri", hour="9-16", minute="*/5", timezone=ET),
+            id="status_check",
+            name="Status Check",
+            replace_existing=True,
         )
 
         logger.info("Scheduled jobs configured")
@@ -188,15 +153,12 @@ class TradingScheduler:
                 self._last_action = {
                     "job": "capture_open",
                     "time": get_et_now().isoformat(),
-                    "price": price
+                    "price": price,
                 }
                 self.db.log_event("INFO", "Open price captured", {"price": price})
 
                 if self.notifications:
-                    self.notifications.send_info(
-                        "Market Open",
-                        f"IBIT open price: ${price:.2f}"
-                    )
+                    self.notifications.send_info("Market Open", f"IBIT open price: ${price:.2f}")
         except Exception as e:
             logger.error(f"Failed to capture open price: {e}")
             raise
@@ -217,7 +179,7 @@ class TradingScheduler:
                 "time": get_et_now().isoformat(),
                 "signal": signal.action.value,
                 "dip_pct": signal.dip_percentage,
-                "reason": signal.reason
+                "reason": signal.reason,
             }
 
             if signal.action == TradeAction.BUY:
@@ -231,17 +193,21 @@ class TradingScheduler:
                             "IBIT",
                             result.get("shares", 0),
                             result.get("price", 0),
-                            dip_pct=result.get("dip_percentage", 0)
+                            dip_pct=result.get("dip_percentage", 0),
                         )
                 else:
                     logger.warning(f"Buy execution failed: {result.get('reason')}")
             else:
                 logger.info(f"No buy signal: {signal.reason}")
-                self.db.log_event("INFO", "Dip check - no buy", {
-                    "dip_pct": signal.dip_percentage,
-                    "threshold": signal.threshold_used,
-                    "reason": signal.reason
-                })
+                self.db.log_event(
+                    "INFO",
+                    "Dip check - no buy",
+                    {
+                        "dip_pct": signal.dip_percentage,
+                        "threshold": signal.threshold_used,
+                        "reason": signal.reason,
+                    },
+                )
 
         except Exception as e:
             logger.error(f"Dip check failed: {e}")
@@ -272,7 +238,7 @@ class TradingScheduler:
                     "job": "close",
                     "time": get_et_now().isoformat(),
                     "action": "none",
-                    "reason": "No position"
+                    "reason": "No position",
                 }
                 return
 
@@ -282,7 +248,7 @@ class TradingScheduler:
                 "job": "close",
                 "time": get_et_now().isoformat(),
                 "action": "sell" if result.get("success") else "failed",
-                "result": result
+                "result": result,
             }
 
             if result.get("success"):
@@ -294,14 +260,13 @@ class TradingScheduler:
                         result.get("shares", 0),
                         result.get("exit_price", 0),
                         pnl=result.get("dollar_pnl", 0),
-                        pnl_pct=result.get("percentage_pnl", 0)
+                        pnl_pct=result.get("percentage_pnl", 0),
                     )
             else:
                 logger.error(f"Failed to close position: {result.get('reason')}")
                 if self.notifications:
                     self.notifications.send_error(
-                        "Failed to close position",
-                        result.get("reason", "Unknown error")
+                        "Failed to close position", result.get("reason", "Unknown error")
                     )
 
         except Exception as e:
@@ -317,7 +282,7 @@ class TradingScheduler:
             self._last_action = {
                 "job": "renew_token",
                 "time": get_et_now().isoformat(),
-                "success": success
+                "success": success,
             }
 
             if success:
@@ -327,16 +292,13 @@ class TradingScheduler:
                 if self.notifications:
                     self.notifications.send_warning(
                         "Token Renewal Issue",
-                        "OAuth token renewal may have failed. Check authentication."
+                        "OAuth token renewal may have failed. Check authentication.",
                     )
 
         except Exception as e:
             logger.error(f"Token renewal failed: {e}")
             if self.notifications:
-                self.notifications.send_error(
-                    "Token Renewal Failed",
-                    str(e)
-                )
+                self.notifications.send_error("Token Renewal Failed", str(e))
             raise
 
     def _job_status_check(self):
@@ -345,11 +307,15 @@ class TradingScheduler:
             state = self.strategy.get_state()
 
             # Log heartbeat
-            self.db.log_event("DEBUG", "Status check", {
-                "has_position": state.has_position,
-                "dip_pct": state.dip_percentage,
-                "current_price": state.current_price
-            })
+            self.db.log_event(
+                "DEBUG",
+                "Status check",
+                {
+                    "has_position": state.has_position,
+                    "dip_pct": state.dip_percentage,
+                    "current_price": state.current_price,
+                },
+            )
 
         except Exception as e:
             logger.warning(f"Status check error: {e}")
@@ -403,17 +369,19 @@ class TradingScheduler:
         """Get current scheduler status."""
         jobs = []
         for job in self.scheduler.get_jobs():
-            jobs.append({
-                "id": job.id,
-                "name": job.name,
-                "next_run": job.next_run_time.isoformat() if job.next_run_time else None
-            })
+            jobs.append(
+                {
+                    "id": job.id,
+                    "name": job.name,
+                    "next_run": job.next_run_time.isoformat() if job.next_run_time else None,
+                }
+            )
 
         return {
             "status": self.status.value,
             "jobs": jobs,
             "last_action": self._last_action,
-            "error_count": self._error_count
+            "error_count": self._error_count,
         }
 
     def run_now(self, job_id: str) -> bool:
@@ -436,7 +404,7 @@ class SimpleScheduler:
         self,
         strategy: IBITDipStrategy,
         notifications: Optional[NotificationManager] = None,
-        check_interval: int = 30  # seconds
+        check_interval: int = 30,  # seconds
     ):
         self.strategy = strategy
         self.notifications = notifications
@@ -489,8 +457,10 @@ class SimpleScheduler:
 
                     # Check close (3:55 PM Friday, 3:58 PM other days)
                     is_friday = now.weekday() == 4
-                    close_time = times["friday_close"] if is_friday else (
-                        times["market_close"] - timedelta(minutes=2)
+                    close_time = (
+                        times["friday_close"]
+                        if is_friday
+                        else (times["market_close"] - timedelta(minutes=2))
                     )
 
                     if self._should_trigger("close", close_time):

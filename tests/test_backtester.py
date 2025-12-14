@@ -2,19 +2,23 @@
 Unit tests for IBIT Dip Bot backtester module.
 """
 
-import pytest
-from datetime import date, timedelta
-import pandas as pd
-import numpy as np
 import sys
+from datetime import date
 from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import pytest
 
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.backtester import (
-    Backtester, BacktestConfig, BacktestResult, BacktestTrade,
-    run_default_backtest
+    BacktestConfig,
+    Backtester,
+    BacktestResult,
+    BacktestTrade,
+    run_default_backtest,
 )
 
 
@@ -37,7 +41,7 @@ class TestBacktestConfig:
             end_date=date(2024, 6, 30),
             regular_threshold=0.8,
             monday_enabled=True,
-            initial_capital=50000
+            initial_capital=50000,
         )
 
         assert config.start_date == date(2024, 1, 1)
@@ -61,7 +65,7 @@ class TestBacktestTrade:
             shares=100,
             dollar_pnl=100.0,
             percentage_pnl=2.02,
-            cumulative_pnl=100.0
+            cumulative_pnl=100.0,
         )
 
         assert trade.date == date(2024, 6, 15)
@@ -86,7 +90,7 @@ class TestBacktestResult:
                 shares=100,
                 dollar_pnl=100.0,
                 percentage_pnl=2.02,
-                cumulative_pnl=100.0
+                cumulative_pnl=100.0,
             ),
             BacktestTrade(
                 date=date(2024, 6, 16),
@@ -98,7 +102,7 @@ class TestBacktestResult:
                 shares=100,
                 dollar_pnl=-50.0,
                 percentage_pnl=-0.99,
-                cumulative_pnl=50.0
+                cumulative_pnl=50.0,
             ),
             BacktestTrade(
                 date=date(2024, 6, 17),
@@ -110,8 +114,8 @@ class TestBacktestResult:
                 shares=100,
                 dollar_pnl=100.0,
                 percentage_pnl=2.0,
-                cumulative_pnl=150.0
-            )
+                cumulative_pnl=150.0,
+            ),
         ]
 
     def test_result_statistics(self, sample_trades):
@@ -134,8 +138,8 @@ class TestBacktestResult:
 
         assert isinstance(df, pd.DataFrame)
         assert len(df) == 3
-        assert 'date' in df.columns
-        assert 'dollar_pnl' in df.columns
+        assert "date" in df.columns
+        assert "dollar_pnl" in df.columns
 
     def test_result_summary(self, sample_trades):
         """Test generating summary text."""
@@ -155,7 +159,7 @@ class TestBacktester:
     @pytest.fixture
     def sample_data(self):
         """Create sample OHLCV data."""
-        dates = pd.date_range(start='2024-06-01', end='2024-06-30', freq='B')
+        dates = pd.date_range(start="2024-06-01", end="2024-06-30", freq="B")
 
         data = []
         price = 50.0
@@ -168,14 +172,16 @@ class TestBacktester:
             high_price = price * (1 + abs(np.random.uniform(0, 0.015)))
             close_price = price * (1 + change)
 
-            data.append({
-                'date': d.date(),
-                'open': open_price,
-                'high': high_price,
-                'low': low_price,
-                'close': close_price,
-                'volume': 1000000
-            })
+            data.append(
+                {
+                    "date": d.date(),
+                    "open": open_price,
+                    "high": high_price,
+                    "low": low_price,
+                    "close": close_price,
+                    "volume": 1000000,
+                }
+            )
 
             price = close_price
 
@@ -183,10 +189,7 @@ class TestBacktester:
 
     def test_backtester_initialization(self):
         """Test backtester initialization."""
-        config = BacktestConfig(
-            start_date=date(2024, 6, 1),
-            end_date=date(2024, 6, 30)
-        )
+        config = BacktestConfig(start_date=date(2024, 6, 1), end_date=date(2024, 6, 30))
         backtester = Backtester(config)
 
         assert backtester.config.start_date == date(2024, 6, 1)
@@ -197,7 +200,7 @@ class TestBacktester:
         config = BacktestConfig(
             start_date=date(2024, 6, 1),
             end_date=date(2024, 6, 30),
-            regular_threshold=0.5  # Lower threshold for more trades in test
+            regular_threshold=0.5,  # Lower threshold for more trades in test
         )
         backtester = Backtester(config)
 
@@ -210,16 +213,12 @@ class TestBacktester:
 
     def test_optimize_threshold(self, sample_data):
         """Test threshold optimization."""
-        config = BacktestConfig(
-            start_date=date(2024, 6, 1),
-            end_date=date(2024, 6, 30)
-        )
+        config = BacktestConfig(start_date=date(2024, 6, 1), end_date=date(2024, 6, 30))
         backtester = Backtester(config)
         backtester._data = sample_data
 
         optimal, results = backtester.optimize_threshold(
-            thresholds=[0.3, 0.5, 0.7, 0.9],
-            metric="return"
+            thresholds=[0.3, 0.5, 0.7, 0.9], metric="return"
         )
 
         assert optimal in [0.3, 0.5, 0.7, 0.9]
@@ -234,9 +233,7 @@ class TestRunDefaultBacktest:
         """Test running default backtest with custom dates."""
         # Run backtest with yfinance data
         result = run_default_backtest(
-            start_date=date(2024, 6, 1),
-            end_date=date(2024, 6, 30),
-            threshold=0.6
+            start_date=date(2024, 6, 1), end_date=date(2024, 6, 30), threshold=0.6
         )
 
         # Verify result structure

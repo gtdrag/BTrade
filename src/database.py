@@ -3,15 +3,14 @@ Database module for IBIT Dip Bot.
 Handles SQLite operations for trades, settings, and bot state.
 """
 
-import sqlite3
 import datetime
 import json
-from pathlib import Path
-from typing import Optional, List, Dict, Any
+import sqlite3
 from contextlib import contextmanager
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
-from .utils import get_et_now, ET
-
+from .utils import get_et_now
 
 # Default database path
 DEFAULT_DB_PATH = Path(__file__).parent.parent / "trades.db"
@@ -45,7 +44,8 @@ class Database:
             cursor = conn.cursor()
 
             # Trades table - stores all executed trades
-            cursor.execute("""
+            cursor.execute(
+                """
                 CREATE TABLE IF NOT EXISTS trades (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     date TEXT NOT NULL,
@@ -65,10 +65,12 @@ class Database:
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 )
-            """)
+            """
+            )
 
             # Bot state table - tracks current position and status
-            cursor.execute("""
+            cursor.execute(
+                """
                 CREATE TABLE IF NOT EXISTS bot_state (
                     id INTEGER PRIMARY KEY CHECK (id = 1),
                     is_paused INTEGER NOT NULL DEFAULT 0,
@@ -83,19 +85,23 @@ class Database:
                     total_pnl REAL DEFAULT 0,
                     updated_at TEXT NOT NULL
                 )
-            """)
+            """
+            )
 
             # Daily prices table - stores daily open prices
-            cursor.execute("""
+            cursor.execute(
+                """
                 CREATE TABLE IF NOT EXISTS daily_prices (
                     date TEXT PRIMARY KEY,
                     open_price REAL NOT NULL,
                     captured_at TEXT NOT NULL
                 )
-            """)
+            """
+            )
 
             # Logs table - for audit trail
-            cursor.execute("""
+            cursor.execute(
+                """
                 CREATE TABLE IF NOT EXISTS logs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     timestamp TEXT NOT NULL,
@@ -104,12 +110,16 @@ class Database:
                     details TEXT,
                     created_at TEXT NOT NULL
                 )
-            """)
+            """
+            )
 
             # Initialize bot state if not exists
-            cursor.execute("""
+            cursor.execute(
+                """
                 INSERT OR IGNORE INTO bot_state (id, updated_at) VALUES (1, ?)
-            """, (get_et_now().isoformat(),))
+            """,
+                (get_et_now().isoformat(),),
+            )
 
     # ==================== Trade Operations ====================
 
@@ -122,44 +132,44 @@ class Database:
         dip_percentage: float,
         shares: int,
         is_dry_run: bool = False,
-        notes: Optional[str] = None
+        notes: Optional[str] = None,
     ) -> int:
         """Record a new trade entry. Returns trade ID."""
         now = get_et_now()
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("""
+            cursor.execute(
+                """
                 INSERT INTO trades (
                     date, day_of_week, open_price, entry_price, dip_percentage,
                     shares, entry_time, status, is_dry_run, notes, created_at, updated_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?)
-            """, (
-                date.isoformat(),
-                day_of_week,
-                open_price,
-                entry_price,
-                dip_percentage,
-                shares,
-                now.isoformat(),
-                1 if is_dry_run else 0,
-                notes,
-                now.isoformat(),
-                now.isoformat()
-            ))
+            """,
+                (
+                    date.isoformat(),
+                    day_of_week,
+                    open_price,
+                    entry_price,
+                    dip_percentage,
+                    shares,
+                    now.isoformat(),
+                    1 if is_dry_run else 0,
+                    notes,
+                    now.isoformat(),
+                    now.isoformat(),
+                ),
+            )
             return cursor.lastrowid
 
     def record_trade_exit(
-        self,
-        trade_id: int,
-        exit_price: float,
-        dollar_pnl: float,
-        percentage_pnl: float
+        self, trade_id: int, exit_price: float, dollar_pnl: float, percentage_pnl: float
     ):
         """Record trade exit (sell)."""
         now = get_et_now()
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("""
+            cursor.execute(
+                """
                 UPDATE trades SET
                     exit_price = ?,
                     exit_time = ?,
@@ -168,35 +178,50 @@ class Database:
                     status = 'closed',
                     updated_at = ?
                 WHERE id = ?
-            """, (exit_price, now.isoformat(), dollar_pnl, percentage_pnl, now.isoformat(), trade_id))
+            """,
+                (
+                    exit_price,
+                    now.isoformat(),
+                    dollar_pnl,
+                    percentage_pnl,
+                    now.isoformat(),
+                    trade_id,
+                ),
+            )
 
     def get_open_trade(self) -> Optional[Dict[str, Any]]:
         """Get current open trade if exists."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("""
+            cursor.execute(
+                """
                 SELECT * FROM trades WHERE status = 'open' ORDER BY id DESC LIMIT 1
-            """)
+            """
+            )
             row = cursor.fetchone()
             return dict(row) if row else None
 
     def get_trade_history(
-        self,
-        limit: int = 100,
-        include_dry_runs: bool = True
+        self, limit: int = 100, include_dry_runs: bool = True
     ) -> List[Dict[str, Any]]:
         """Get trade history."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
             if include_dry_runs:
-                cursor.execute("""
+                cursor.execute(
+                    """
                     SELECT * FROM trades ORDER BY date DESC, id DESC LIMIT ?
-                """, (limit,))
+                """,
+                    (limit,),
+                )
             else:
-                cursor.execute("""
+                cursor.execute(
+                    """
                     SELECT * FROM trades WHERE is_dry_run = 0
                     ORDER BY date DESC, id DESC LIMIT ?
-                """, (limit,))
+                """,
+                    (limit,),
+                )
             return [dict(row) for row in cursor.fetchall()]
 
     def get_trade_statistics(self, include_dry_runs: bool = False) -> Dict[str, Any]:
@@ -206,7 +231,8 @@ class Database:
 
             dry_run_filter = "" if include_dry_runs else "AND is_dry_run = 0"
 
-            cursor.execute(f"""
+            cursor.execute(
+                f"""
                 SELECT
                     COUNT(*) as total_trades,
                     SUM(CASE WHEN percentage_pnl > 0 THEN 1 ELSE 0 END) as winning_trades,
@@ -218,15 +244,16 @@ class Database:
                     AVG(dip_percentage) as avg_dip
                 FROM trades
                 WHERE status = 'closed' {dry_run_filter}
-            """)
+            """
+            )
 
             row = cursor.fetchone()
             stats = dict(row)
 
             # Calculate win rate
-            total = stats['total_trades'] or 0
-            winning = stats['winning_trades'] or 0
-            stats['win_rate'] = (winning / total * 100) if total > 0 else 0
+            total = stats["total_trades"] or 0
+            winning = stats["winning_trades"] or 0
+            stats["win_rate"] = (winning / total * 100) if total > 0 else 0
 
             return stats
 
@@ -246,7 +273,7 @@ class Database:
             return
 
         now = get_et_now()
-        kwargs['updated_at'] = now.isoformat()
+        kwargs["updated_at"] = now.isoformat()
 
         fields = ", ".join(f"{k} = ?" for k in kwargs.keys())
         values = list(kwargs.values())
@@ -258,21 +285,17 @@ class Database:
     def set_paused(self, paused: bool, until: Optional[datetime.datetime] = None):
         """Set bot paused state."""
         self.update_bot_state(
-            is_paused=1 if paused else 0,
-            pause_until=until.isoformat() if until else None
+            is_paused=1 if paused else 0, pause_until=until.isoformat() if until else None
         )
 
     def set_position(
-        self,
-        shares: int,
-        entry_price: Optional[float] = None,
-        date: Optional[datetime.date] = None
+        self, shares: int, entry_price: Optional[float] = None, date: Optional[datetime.date] = None
     ):
         """Update current position in bot state."""
         self.update_bot_state(
             current_position_shares=shares,
             current_position_entry_price=entry_price,
-            current_position_date=date.isoformat() if date else None
+            current_position_date=date.isoformat() if date else None,
         )
 
     def clear_position(self):
@@ -286,26 +309,29 @@ class Database:
         now = get_et_now()
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("""
+            cursor.execute(
+                """
                 INSERT OR REPLACE INTO daily_prices (date, open_price, captured_at)
                 VALUES (?, ?, ?)
-            """, (date.isoformat(), price, now.isoformat()))
+            """,
+                (date.isoformat(), price, now.isoformat()),
+            )
 
         # Also update bot state
-        self.update_bot_state(
-            last_open_price=price,
-            last_open_price_date=date.isoformat()
-        )
+        self.update_bot_state(last_open_price=price, last_open_price_date=date.isoformat())
 
     def get_open_price(self, date: datetime.date) -> Optional[float]:
         """Get stored open price for a date."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("""
+            cursor.execute(
+                """
                 SELECT open_price FROM daily_prices WHERE date = ?
-            """, (date.isoformat(),))
+            """,
+                (date.isoformat(),),
+            )
             row = cursor.fetchone()
-            return row['open_price'] if row else None
+            return row["open_price"] if row else None
 
     # ==================== Logging Operations ====================
 
@@ -314,29 +340,38 @@ class Database:
         now = get_et_now()
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("""
+            cursor.execute(
+                """
                 INSERT INTO logs (timestamp, level, event, details, created_at)
                 VALUES (?, ?, ?, ?, ?)
-            """, (
-                now.isoformat(),
-                level,
-                event,
-                json.dumps(details) if details else None,
-                now.isoformat()
-            ))
+            """,
+                (
+                    now.isoformat(),
+                    level,
+                    event,
+                    json.dumps(details) if details else None,
+                    now.isoformat(),
+                ),
+            )
 
     def get_logs(self, limit: int = 100, level: Optional[str] = None) -> List[Dict[str, Any]]:
         """Get recent logs."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
             if level:
-                cursor.execute("""
+                cursor.execute(
+                    """
                     SELECT * FROM logs WHERE level = ? ORDER BY id DESC LIMIT ?
-                """, (level, limit))
+                """,
+                    (level, limit),
+                )
             else:
-                cursor.execute("""
+                cursor.execute(
+                    """
                     SELECT * FROM logs ORDER BY id DESC LIMIT ?
-                """, (limit,))
+                """,
+                    (limit,),
+                )
             return [dict(row) for row in cursor.fetchall()]
 
     # ==================== Equity Curve ====================
@@ -349,22 +384,24 @@ class Database:
             return []
 
         # Sort by date ascending
-        trades = sorted(trades, key=lambda x: (x['date'], x['id']))
+        trades = sorted(trades, key=lambda x: (x["date"], x["id"]))
 
         # Calculate cumulative returns
         cumulative_pnl = 0
         curve = []
 
         for trade in trades:
-            if trade['status'] == 'closed' and trade['dollar_pnl'] is not None:
-                cumulative_pnl += trade['dollar_pnl']
-                curve.append({
-                    'date': trade['date'],
-                    'trade_id': trade['id'],
-                    'trade_pnl': trade['dollar_pnl'],
-                    'trade_pct': trade['percentage_pnl'],
-                    'cumulative_pnl': cumulative_pnl
-                })
+            if trade["status"] == "closed" and trade["dollar_pnl"] is not None:
+                cumulative_pnl += trade["dollar_pnl"]
+                curve.append(
+                    {
+                        "date": trade["date"],
+                        "trade_id": trade["id"],
+                        "trade_pnl": trade["dollar_pnl"],
+                        "trade_pct": trade["percentage_pnl"],
+                        "cumulative_pnl": cumulative_pnl,
+                    }
+                )
 
         return curve
 
