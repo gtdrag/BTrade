@@ -1,0 +1,40 @@
+{
+  "etrade": {
+    "consumer_key": "",
+    "consumer_secret": "",
+    "account_id_key": "",
+    "sandbox": false
+  },
+  "strategy": {
+    "strategy_type": "combined",
+    "regular_threshold": 0.6,
+    "monday_threshold": 1.0,
+    "monday_enabled": false,
+    "mean_reversion_threshold": -3.0,
+    "skip_thursday_for_mr": true,
+    "enable_short_thursday": true,
+    "max_position_usd": null,
+    "max_position_pct": 100.0,
+    "use_limit_orders": false,
+    "limit_offset_pct": 0.05,
+    "dry_run": false
+  },
+  "notifications": {
+    "email_enabled": false,
+    "smtp_server": "smtp.gmail.com",
+    "smtp_port": 587,
+    "smtp_username": "",
+    "smtp_password": "",
+    "email_from": "",
+    "email_to": [],
+    "desktop_enabled": true,
+    "sms_enabled": false,
+    "sms_to": [],
+    "notify_on_trade": true,
+    "notify_on_error": true,
+    "notify_on_daily_summary": true
+  },
+  "dry_run": true,
+  "log_level": "INFO",
+  "theme": "dark"
+}
