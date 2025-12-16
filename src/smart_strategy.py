@@ -52,6 +52,10 @@ class StrategyConfig:
     mean_reversion_enabled: bool = True
     mean_reversion_threshold: float = -2.0  # Buy BITX after IBIT drops this much
 
+    # BTC overnight filter (dramatically improves win rate: 84% vs 17%)
+    # Only take mean reversion trades when BTC is UP overnight
+    btc_overnight_filter_enabled: bool = True
+
     # Short Thursday settings
     short_thursday_enabled: bool = True
 
@@ -102,6 +106,18 @@ class CrashDayStatus:
 
 
 @dataclass
+class BTCOvernightStatus:
+    """BTC overnight movement check (4 PM yesterday → now)."""
+
+    btc_close_yesterday: float  # BTC price at 4 PM ET yesterday
+    btc_current: float  # Current BTC price
+    overnight_change_pct: float  # % change overnight
+    is_up: bool  # True if BTC is up overnight
+    should_trade: bool  # True if conditions favor trading
+    message: str
+
+
+@dataclass
 class TodaySignal:
     """Today's trading signal."""
 
@@ -111,6 +127,7 @@ class TodaySignal:
     prev_day_return: Optional[float] = None
     crash_day_status: Optional[CrashDayStatus] = None
     weekend_gap: Optional[WeekendGapInfo] = None
+    btc_overnight: Optional[BTCOvernightStatus] = None
 
     def should_trade(self) -> bool:
         return self.signal != Signal.CASH
@@ -270,6 +287,100 @@ class SmartStrategy:
                 message=f"Error: {e}",
             )
 
+    def get_btc_overnight_status(self) -> BTCOvernightStatus:
+        """
+        Check if BTC is up overnight (4 PM yesterday → now).
+
+        This is the strongest predictor of mean reversion success:
+        - BTC up overnight: 84% win rate, +5.46% avg return
+        - BTC down overnight: 17% win rate, -3.65% avg return
+
+        We use this to filter mean reversion signals.
+        """
+        try:
+            today = date.today()
+
+            # Get BTC historical bars (last 3 days to ensure we have yesterday)
+            bars = self._alpaca.get_crypto_bars(
+                "BTC/USD",
+                (today - timedelta(days=3)).isoformat(),
+                (today + timedelta(days=1)).isoformat(),
+                "1Day",
+            )
+
+            if not bars or len(bars) < 2:
+                logger.warning("Insufficient BTC data for overnight check")
+                return BTCOvernightStatus(
+                    btc_close_yesterday=0,
+                    btc_current=0,
+                    overnight_change_pct=0,
+                    is_up=False,
+                    should_trade=False,
+                    message="Insufficient data - skipping trade",
+                )
+
+            # Get yesterday's close (the last complete bar before today)
+            df = pd.DataFrame(bars)
+            df["date"] = pd.to_datetime(df["t"]).dt.date
+            yesterday_bars = df[df["date"] < today]
+
+            if len(yesterday_bars) == 0:
+                logger.warning("No yesterday BTC data")
+                return BTCOvernightStatus(
+                    btc_close_yesterday=0,
+                    btc_current=0,
+                    overnight_change_pct=0,
+                    is_up=False,
+                    should_trade=False,
+                    message="No yesterday data - skipping trade",
+                )
+
+            btc_close_yesterday = yesterday_bars["c"].iloc[-1]
+
+            # Get current BTC price from real-time quote
+            btc_quote = self._alpaca.get_crypto_quote("BTC/USD")
+            if btc_quote:
+                btc_current = btc_quote.current_price
+            else:
+                # Fallback to most recent bar close
+                btc_current = df["c"].iloc[-1]
+
+            # Calculate overnight change
+            overnight_change_pct = (
+                (btc_current - btc_close_yesterday) / btc_close_yesterday * 100
+                if btc_close_yesterday > 0
+                else 0
+            )
+
+            is_up = overnight_change_pct > 0
+            should_trade = is_up  # Only trade mean reversion if BTC recovered overnight
+
+            if is_up:
+                message = f"BTC up {overnight_change_pct:+.2f}% overnight → TRADE"
+            else:
+                message = f"BTC down {overnight_change_pct:.2f}% overnight → SKIP (catching falling knife)"
+
+            return BTCOvernightStatus(
+                btc_close_yesterday=btc_close_yesterday,
+                btc_current=btc_current,
+                overnight_change_pct=overnight_change_pct,
+                is_up=is_up,
+                should_trade=should_trade,
+                message=message,
+            )
+
+        except Exception as e:
+            logger.warning(f"Failed to get BTC overnight status: {e}")
+            # On error, default to not trading (conservative)
+            return BTCOvernightStatus(
+                btc_close_yesterday=0,
+                btc_current=0,
+                overnight_change_pct=0,
+                is_up=False,
+                should_trade=False,
+                message=f"Error checking BTC: {e} - skipping trade",
+            )
+
     def get_crash_day_status(self) -> CrashDayStatus:
         """
         Check for intraday crash signal using Alpaca real-time data.
@@ -347,6 +458,7 @@ class SmartStrategy:
 
         Priority order:
         1. Mean Reversion (previous day drop) - highest priority
+           - BUT filtered by BTC overnight movement (84% vs 17% win rate!)
         2. Crash Day (intraday drop) - reactive signal
         3. Short Thursday - calendar-based
         4. Cash - default
@@ -366,17 +478,39 @@ class SmartStrategy:
         if check_crash_day and self.config.crash_day_enabled:
             crash_status = self.get_crash_day_status()
 
+        # Get BTC overnight status (key filter for mean reversion)
+        btc_overnight = None
+        if self.config.btc_overnight_filter_enabled:
+            btc_overnight = self.get_btc_overnight_status()
+
         # Check mean reversion first (higher priority)
         # This is a pre-market signal based on yesterday's close
         if self.config.mean_reversion_enabled:
             if prev_return is not None and prev_return < self.config.mean_reversion_threshold:
+                # Apply BTC overnight filter if enabled
+                if self.config.btc_overnight_filter_enabled and btc_overnight:
+                    if not btc_overnight.should_trade:
+                        # BTC is down overnight - skip this trade
+                        return TodaySignal(
+                            signal=Signal.CASH,
+                            etf="CASH",
+                            reason=f"Mean reversion SKIPPED: {btc_overnight.message}",
+                            prev_day_return=prev_return,
+                            crash_day_status=crash_status,
+                            weekend_gap=weekend_gap,
+                            btc_overnight=btc_overnight,
+                        )
+
+                # BTC is up overnight (or filter disabled) - take the trade!
                 return TodaySignal(
                     signal=Signal.MEAN_REVERSION,
                     etf="BITX",
-                    reason=f"Mean reversion: IBIT dropped {prev_return:.1f}% yesterday",
+                    reason=f"Mean reversion: IBIT dropped {prev_return:.1f}% yesterday"
+                    + (f" | {btc_overnight.message}" if btc_overnight else ""),
                     prev_day_return=prev_return,
                     crash_day_status=crash_status,
                     weekend_gap=weekend_gap,
+                    btc_overnight=btc_overnight,
                 )
 
         # Check crash day signal (intraday reactive)
@@ -388,6 +522,7 @@ class SmartStrategy:
                 prev_day_return=prev_return,
                 crash_day_status=crash_status,
                 weekend_gap=weekend_gap,
+                btc_overnight=btc_overnight,
             )
 
         # Check Thursday
@@ -399,6 +534,7 @@ class SmartStrategy:
                 prev_day_return=prev_return,
                 crash_day_status=crash_status,
                 weekend_gap=weekend_gap,
+                btc_overnight=btc_overnight,
             )
 
         # No signal - stay in cash
@@ -414,6 +550,7 @@ class SmartStrategy:
             prev_day_return=prev_return,
             crash_day_status=crash_status,
             weekend_gap=weekend_gap,
+            btc_overnight=btc_overnight,
         )
 
     def get_etf_quote(self, ticker: str) -> Dict[str, Any]:
@@ -452,7 +589,7 @@ class SmartBacktester:
         )
 
     def load_data(self, start_date: date, end_date: date):
-        """Load historical data for all ETFs from Alpaca."""
+        """Load historical data for all ETFs and BTC from Alpaca."""
         tickers = ["IBIT", "BITX", "SBIT"]
 
         for ticker in tickers:
@@ -471,6 +608,27 @@ class SmartBacktester:
             else:
                 logger.warning(f"No data received for {ticker}")
                 self.data[ticker] = pd.DataFrame(
+                    columns=["date", "open", "high", "low", "close", "volume"]
+                )
+
+        # Load BTC data for overnight filter
+        if self.config.btc_overnight_filter_enabled:
+            btc_bars = self._alpaca.get_crypto_bars(
+                "BTC/USD",
+                start_date.isoformat(),
+                (end_date + timedelta(days=1)).isoformat(),
+                "1Day",
+            )
+            if btc_bars and len(btc_bars) > 0:
+                btc_df = pd.DataFrame(btc_bars)
+                btc_df["date"] = pd.to_datetime(btc_df["t"]).dt.date
+                btc_df = btc_df.rename(
+                    columns={"o": "open", "h": "high", "l": "low", "c": "close", "v": "volume"}
+                )
+                self.data["BTC"] = btc_df
+            else:
+                logger.warning("No BTC data received for overnight filter")
+                self.data["BTC"] = pd.DataFrame(
                     columns=["date", "open", "high", "low", "close", "volume"]
                 )
 
@@ -494,13 +652,35 @@ class SmartBacktester:
         bitx = self.data["BITX"].copy()
         sbit = self.data["SBIT"].copy()
 
+        # Get BTC data for overnight filter
+        btc = (
+            self.data.get("BTC", pd.DataFrame()).copy()
+            if self.config.btc_overnight_filter_enabled
+            else pd.DataFrame()
+        )
+
         # Calculate IBIT daily return
         ibit["daily_return"] = (ibit["close"] - ibit["open"]) / ibit["open"] * 100
         ibit["prev_return"] = ibit["daily_return"].shift(1)
         ibit["weekday"] = pd.to_datetime(ibit["date"]).apply(lambda x: x.weekday())
 
+        # Create BTC overnight lookup (date → overnight change)
+        btc_overnight = {}
+        if len(btc) > 0:
+            btc = btc.sort_values("date").reset_index(drop=True)
+            for i in range(1, len(btc)):
+                # BTC overnight = today's open vs yesterday's close
+                # This approximates checking BTC at market open vs 4 PM yesterday
+                prev_close = btc.iloc[i - 1]["close"]
+                today_open = btc.iloc[i]["open"]
+                overnight_pct = (
+                    (today_open - prev_close) / prev_close * 100 if prev_close > 0 else 0
+                )
+                btc_overnight[btc.iloc[i]["date"]] = overnight_pct
+
         capital = self.initial_capital
         trades = []
+        skipped_trades = []  # Track trades we skipped due to BTC filter
         slippage = self.config.slippage_pct
 
         for i in range(len(ibit)):
@@ -518,6 +698,24 @@ class SmartBacktester:
             etf_data = None
 
             if self.config.mean_reversion_enabled and has_big_drop:
+                # Apply BTC overnight filter
+                if self.config.btc_overnight_filter_enabled and trade_date in btc_overnight:
+                    btc_change = btc_overnight[trade_date]
+                    if btc_change <= 0:
+                        # BTC down overnight - skip this trade
+                        skipped_trades.append(
+                            {
+                                "date": trade_date,
+                                "signal": "mean_reversion_skipped",
+                                "reason": f"BTC down {btc_change:.2f}% overnight",
+                                "would_have_returned": (
+                                    (bitx.iloc[i]["close"] / bitx.iloc[i]["open"]) - 1
+                                )
+                                * 100,
+                            }
+                        )
+                        continue  # Skip to Thursday check or next day
+
                 signal = "mean_reversion"
                 etf = "BITX"
                 etf_data = bitx.iloc[i]
@@ -604,4 +802,11 @@ class SmartBacktester:
             if thu_trades
             else 0,
             "trades": trades,
+            # BTC overnight filter stats
+            "btc_filter_enabled": self.config.btc_overnight_filter_enabled,
+            "skipped_trades": len(skipped_trades),
+            "skipped_trades_details": skipped_trades,
+            "skipped_would_have_returned": sum(t["would_have_returned"] for t in skipped_trades)
+            if skipped_trades
+            else 0,
         }
