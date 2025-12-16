@@ -3,6 +3,12 @@ Trading Bot - Integration Layer
 
 Connects SmartStrategy with E*TRADE execution, notifications, and scheduling.
 Supports both live trading and paper trading modes.
+
+Data Sources (in priority order):
+1. E*TRADE Production (real-time, requires approved API keys)
+2. Alpaca (real-time, free API keys)
+3. Finnhub (real-time with slight delay, free tier)
+4. Yahoo Finance (15-min delay, no auth - fallback only)
 """
 
 import logging
@@ -10,6 +16,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, Optional
 
+from .data_providers import MarketDataManager, create_data_manager
 from .database import Database, get_database
 from .etrade_client import ETradeAPIError, ETradeAuthError, ETradeClient
 from .notifications import NotificationConfig, NotificationManager, NotificationType
@@ -78,12 +85,18 @@ class TradingBot:
         client: Optional[ETradeClient] = None,
         notifications: Optional[NotificationManager] = None,
         db: Optional[Database] = None,
+        data_manager: Optional[MarketDataManager] = None,
     ):
         self.config = config
         self.client = client
         self.notifications = notifications or NotificationManager(config.notifications)
         self.db = db or get_database()
         self.strategy = SmartStrategy(config=config.strategy)
+
+        # Data manager for market quotes (uses best available source)
+        self.data_manager = data_manager or create_data_manager(
+            etrade_client=client if client and not getattr(client, "sandbox", True) else None
+        )
 
         # Paper trading state
         self._paper_capital = 10000.0
@@ -107,6 +120,73 @@ class TradingBot:
 
         return self.client.get_cash_available(self.config.account_id_key)
 
+    def get_portfolio_value(self) -> Dict[str, Any]:
+        """
+        Get real-time portfolio value with unrealized P&L.
+
+        Returns dict with:
+            cash: Available cash
+            positions: List of positions with current value
+            total_value: Cash + position values
+            unrealized_pnl: Total unrealized profit/loss
+            unrealized_pnl_pct: Unrealized P&L as percentage
+        """
+        if self.is_paper_mode:
+            cash = self._paper_capital
+            positions = []
+            total_position_value = 0.0
+            total_cost_basis = 0.0
+
+            for symbol, pos in self._paper_positions.items():
+                shares = pos.get("shares", 0)
+                entry_price = pos.get("entry_price", 0)
+                cost_basis = shares * entry_price
+
+                # Get current price
+                quote = self.data_manager.get_quote(symbol)
+                current_price = quote.current_price if quote else entry_price
+                current_value = shares * current_price
+                unrealized_pnl = current_value - cost_basis
+                unrealized_pnl_pct = (unrealized_pnl / cost_basis * 100) if cost_basis > 0 else 0
+
+                positions.append(
+                    {
+                        "symbol": symbol,
+                        "shares": shares,
+                        "entry_price": entry_price,
+                        "current_price": current_price,
+                        "cost_basis": cost_basis,
+                        "current_value": current_value,
+                        "unrealized_pnl": unrealized_pnl,
+                        "unrealized_pnl_pct": unrealized_pnl_pct,
+                        "source": quote.source.value if quote else "unknown",
+                    }
+                )
+
+                total_position_value += current_value
+                total_cost_basis += cost_basis
+
+            total_value = cash + total_position_value
+            total_unrealized_pnl = total_position_value - total_cost_basis
+            starting_capital = 10000.0  # Initial paper capital
+            total_pnl = total_value - starting_capital
+            total_pnl_pct = total_pnl / starting_capital * 100
+
+            return {
+                "cash": cash,
+                "positions": positions,
+                "total_position_value": total_position_value,
+                "total_value": total_value,
+                "unrealized_pnl": total_unrealized_pnl,
+                "total_pnl": total_pnl,
+                "total_pnl_pct": total_pnl_pct,
+                "starting_capital": starting_capital,
+            }
+
+        # Live mode - use E*TRADE
+        # TODO: Implement E*TRADE portfolio fetching
+        return {"error": "Live mode portfolio not implemented yet"}
+
     def calculate_position_size(self, price: float) -> int:
         """Calculate number of shares to buy."""
         capital = self.get_available_capital()
@@ -120,23 +200,23 @@ class TradingBot:
         return max(0, shares)
 
     def get_quote(self, symbol: str) -> Dict[str, float]:
-        """Get current quote for a symbol."""
-        if self.is_paper_mode:
-            # Use yfinance for paper trading
-            return self.strategy.get_etf_quote(symbol)
+        """Get current quote for a symbol using best available data source."""
+        # Use data manager for quotes (automatically uses best available source)
+        quote = self.data_manager.get_quote(symbol)
 
-        if not self.client:
-            raise ETradeAuthError("E*TRADE client not configured")
+        if quote:
+            return {
+                "current_price": quote.current_price,
+                "open_price": quote.open_price,
+                "bid": quote.bid,
+                "ask": quote.ask,
+                "source": quote.source.value,
+                "is_realtime": quote.is_realtime,
+            }
 
-        quote = self.client.get_quote(symbol)
-        all_data = quote.get("All", {})
-
-        return {
-            "current_price": float(all_data.get("lastTrade", 0)),
-            "open_price": float(all_data.get("open", 0)),
-            "bid": float(all_data.get("bid", 0)),
-            "ask": float(all_data.get("ask", 0)),
-        }
+        # Fallback to strategy's yfinance method if data manager fails
+        logger.warning(f"Data manager failed for {symbol}, using strategy fallback")
+        return self.strategy.get_etf_quote(symbol)
 
     def execute_signal(self, signal: Optional[TodaySignal] = None) -> TradeResult:
         """
@@ -444,9 +524,9 @@ class TradingBot:
     def _log_trade(self, result: TradeResult, signal: TodaySignal):
         """Log trade to database."""
         self.db.log_event(
-            event_type="TRADE" if result.success else "TRADE_FAILED",
-            message=f"{result.action} {result.shares} {result.etf}",
-            data={
+            level="TRADE" if result.success else "ERROR",
+            event=f"{result.action} {result.shares} {result.etf}",
+            details={
                 "signal": signal.signal.value,
                 "etf": result.etf,
                 "shares": result.shares,
@@ -495,6 +575,8 @@ def create_trading_bot(
     mean_reversion_threshold: float = -2.0,
     mean_reversion_enabled: bool = True,
     short_thursday_enabled: bool = True,
+    crash_day_enabled: bool = True,
+    crash_day_threshold: float = -2.0,
 ) -> TradingBot:
     """
     Factory function to create a configured TradingBot.
@@ -506,6 +588,8 @@ def create_trading_bot(
         mean_reversion_threshold: Threshold for mean reversion signal
         mean_reversion_enabled: Enable mean reversion strategy
         short_thursday_enabled: Enable short Thursday strategy
+        crash_day_enabled: Enable intraday crash detection
+        crash_day_threshold: Threshold for intraday crash signal
 
     Returns:
         Configured TradingBot instance
@@ -514,6 +598,8 @@ def create_trading_bot(
         mean_reversion_enabled=mean_reversion_enabled,
         mean_reversion_threshold=mean_reversion_threshold,
         short_thursday_enabled=short_thursday_enabled,
+        crash_day_enabled=crash_day_enabled,
+        crash_day_threshold=crash_day_threshold,
     )
 
     bot_config = BotConfig(
