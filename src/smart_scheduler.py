@@ -33,7 +33,7 @@ class SmartScheduler:
     Scheduler for automated strategy execution.
 
     Schedule:
-    - 9:35 AM ET: Execute morning signal (buy BITX or SBIT if signal exists)
+    - 9:35 AM ET: Execute morning signal (buy BITU or SBIT if signal exists)
     - 3:55 PM ET: Close any open positions
 
     The strategy is intraday - never hold overnight.
@@ -154,7 +154,7 @@ class SmartScheduler:
                 has_sbit = False
 
                 if self.bot.is_paper_mode:
-                    has_bitx = "BITX" in self.bot._paper_positions
+                    has_bitx = "BITU" in self.bot._paper_positions
                     has_sbit = "SBIT" in self.bot._paper_positions
                 elif self.bot.client:
                     # For live trading, check actual positions
@@ -165,21 +165,21 @@ class SmartScheduler:
                         for pos in positions:
                             symbol = pos.get("Product", {}).get("symbol", "")
                             qty = pos.get("quantity", 0)
-                            if symbol == "BITX" and qty > 0:
+                            if symbol == "BITU" and qty > 0:
                                 has_bitx = True
                             elif symbol == "SBIT" and qty > 0:
                                 has_sbit = True
                     except Exception as e:
                         logger.warning(f"Could not check positions: {e}")
 
-                # If holding BITX (long), we MUST close it - holding long during crash is disaster
+                # If holding BITU (long), we MUST close it - holding long during crash is disaster
                 if has_bitx:
-                    logger.warning("CRASH during BITX position! Closing BITX first...")
-                    close_result = self.bot.close_position("BITX")
+                    logger.warning("CRASH during BITU position! Closing BITU first...")
+                    close_result = self.bot.close_position("BITU")
                     if close_result.success:
-                        logger.info(f"Emergency close: Sold BITX @ ${close_result.price:.2f}")
+                        logger.info(f"Emergency close: Sold BITU @ ${close_result.price:.2f}")
                     else:
-                        logger.error(f"Failed to close BITX: {close_result.error}")
+                        logger.error(f"Failed to close BITU: {close_result.error}")
                         return  # Don't proceed if we can't close
 
                 # If already holding SBIT, we're already positioned correctly
@@ -219,7 +219,7 @@ class SmartScheduler:
         logger.info("Closing positions before market close")
 
         try:
-            # Close BITX position if exists
+            # Close BITU position if exists
             if self.bot.is_paper_mode:
                 for etf in list(self.bot._paper_positions.keys()):
                     result = self.bot.close_position(etf)
@@ -229,7 +229,7 @@ class SmartScheduler:
                         logger.error(f"Failed to close {etf}: {result.error}")
             else:
                 # For live trading, close known ETF positions
-                for etf in ["BITX", "SBIT"]:
+                for etf in ["BITU", "SBIT"]:
                     result = self.bot.close_position(etf)
                     if result.success and result.shares > 0:
                         logger.info(f"Closed {etf} position")

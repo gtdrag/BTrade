@@ -184,8 +184,83 @@ class TradingBot:
             }
 
         # Live mode - use E*TRADE
-        # TODO: Implement E*TRADE portfolio fetching
-        return {"error": "Live mode portfolio not implemented yet"}
+        if not self.client or not self.client.is_authenticated():
+            return {"error": "E*TRADE client not authenticated"}
+
+        try:
+            # Get cash available
+            cash = self.client.get_cash_available(self.config.account_id_key)
+
+            # Get positions
+            raw_positions = self.client.get_account_positions(self.config.account_id_key)
+            positions = []
+            total_position_value = 0.0
+            total_cost_basis = 0.0
+
+            total_days_gain = 0.0
+
+            for pos in raw_positions:
+                symbol = pos.get("Product", {}).get("symbol", pos.get("symbolDescription", "?"))
+                shares = int(pos.get("quantity", 0))
+                cost_basis = float(pos.get("costBasis", 0) or pos.get("totalCost", 0) or 0)
+                entry_price = cost_basis / shares if shares > 0 else 0
+                current_value = float(pos.get("marketValue", 0) or 0)
+                current_price = current_value / shares if shares > 0 else 0
+                unrealized_pnl = float(pos.get("totalGain", 0) or 0)
+                unrealized_pnl_pct = float(pos.get("totalGainPct", 0) or 0)
+                # Day's gain (today's change)
+                days_gain = float(pos.get("daysGain", 0) or 0)
+                days_gain_pct = float(pos.get("daysGainPct", 0) or 0)
+
+                positions.append(
+                    {
+                        "symbol": symbol,
+                        "shares": shares,
+                        "entry_price": entry_price,
+                        "current_price": current_price,
+                        "cost_basis": cost_basis,
+                        "current_value": current_value,
+                        "unrealized_pnl": unrealized_pnl,
+                        "unrealized_pnl_pct": unrealized_pnl_pct,
+                        "days_gain": days_gain,
+                        "days_gain_pct": days_gain_pct,
+                        "source": "etrade",
+                    }
+                )
+
+                total_position_value += current_value
+                total_cost_basis += cost_basis
+                total_days_gain += days_gain
+
+            total_value = cash + total_position_value
+            total_unrealized_pnl = total_position_value - total_cost_basis
+
+            # For live mode, we don't track starting capital the same way
+            # Just show unrealized P&L from positions
+            days_gain_pct = (
+                (total_days_gain / (total_position_value - total_days_gain) * 100)
+                if (total_position_value - total_days_gain) > 0
+                else 0
+            )
+
+            return {
+                "cash": cash,
+                "positions": positions,
+                "total_position_value": total_position_value,
+                "total_value": total_value,
+                "unrealized_pnl": total_unrealized_pnl,
+                "total_pnl": total_unrealized_pnl,
+                "total_pnl_pct": (total_unrealized_pnl / total_cost_basis * 100)
+                if total_cost_basis > 0
+                else 0,
+                "starting_capital": total_value,  # No fixed starting capital in live mode
+                "days_gain": total_days_gain,
+                "days_gain_pct": days_gain_pct,
+            }
+
+        except Exception as e:
+            logger.error(f"Error fetching E*TRADE portfolio: {e}")
+            return {"error": f"Failed to fetch portfolio: {e}"}
 
     def calculate_position_size(self, price: float) -> int:
         """Calculate number of shares to buy."""
@@ -577,6 +652,9 @@ def create_trading_bot(
     short_thursday_enabled: bool = True,
     crash_day_enabled: bool = True,
     crash_day_threshold: float = -2.0,
+    max_position_pct: float = 100.0,
+    max_position_usd: Optional[float] = None,
+    notification_config: Optional[NotificationConfig] = None,
 ) -> TradingBot:
     """
     Factory function to create a configured TradingBot.
@@ -590,6 +668,9 @@ def create_trading_bot(
         short_thursday_enabled: Enable short Thursday strategy
         crash_day_enabled: Enable intraday crash detection
         crash_day_threshold: Threshold for intraday crash signal
+        max_position_pct: Max percentage of cash per trade (1-100)
+        max_position_usd: Max dollar amount per trade (optional)
+        notification_config: Optional notification configuration
 
     Returns:
         Configured TradingBot instance
@@ -605,7 +686,13 @@ def create_trading_bot(
     bot_config = BotConfig(
         strategy=strategy_config,
         mode=TradingMode.LIVE if mode == "live" else TradingMode.PAPER,
+        max_position_pct=max_position_pct,
+        max_position_usd=max_position_usd,
         account_id_key=account_id_key,
+        notifications=notification_config or NotificationConfig(),
     )
 
-    return TradingBot(config=bot_config, client=etrade_client)
+    # Create notification manager from config
+    notifications = NotificationManager(bot_config.notifications)
+
+    return TradingBot(config=bot_config, client=etrade_client, notifications=notifications)

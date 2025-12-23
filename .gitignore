@@ -53,3 +53,8 @@ logs/
 .agentvibes/
 .bmad/
 .mcp.json
+
+# E*TRADE tokens and user settings (sensitive)
+.etrade_tokens.json
+.etrade_request_token.json
+.user_settings.json

@@ -2,7 +2,7 @@
 Smart Bitcoin ETF Trading Strategy.
 
 Proven strategy with +361.8% backtested return (vs +35.5% IBIT B&H):
-1. Mean Reversion: Buy BITX (2x) after IBIT drops -2%+ previous day
+1. Mean Reversion: Buy BITU (2x) after IBIT drops -2%+ previous day
 2. Short Thursday: Buy SBIT (2x inverse) every Thursday
 3. Crash Day: Buy SBIT when IBIT drops -2%+ intraday (reactive)
 4. All other days: Stay in cash
@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 class Signal(Enum):
     """Trading signals."""
 
-    MEAN_REVERSION = "mean_reversion"  # Buy BITX after big drop
+    MEAN_REVERSION = "mean_reversion"  # Buy BITU after big drop
     SHORT_THURSDAY = "short_thursday"  # Buy SBIT on Thursday
     CRASH_DAY = "crash_day"  # Buy SBIT on intraday crash
     CASH = "cash"  # No position
@@ -50,7 +50,7 @@ class StrategyConfig:
 
     # Mean reversion settings
     mean_reversion_enabled: bool = True
-    mean_reversion_threshold: float = -2.0  # Buy BITX after IBIT drops this much
+    mean_reversion_threshold: float = -2.0  # Buy BITU after IBIT drops this much
 
     # BTC overnight filter (dramatically improves win rate: 84% vs 17%)
     # Only take mean reversion trades when BTC is UP overnight
@@ -122,7 +122,7 @@ class TodaySignal:
     """Today's trading signal."""
 
     signal: Signal
-    etf: str  # BITX, SBIT, or CASH
+    etf: str  # BITU, SBIT, or CASH
     reason: str
     prev_day_return: Optional[float] = None
     crash_day_status: Optional[CrashDayStatus] = None
@@ -138,7 +138,7 @@ class SmartStrategy:
     Smart Bitcoin ETF Trading Strategy.
 
     Uses proven signals with appropriate ETF leverage:
-    - Mean Reversion → BITX (2x long)
+    - Mean Reversion → BITU (2x long)
     - Short Thursday → SBIT (2x inverse)
     - Crash Day → SBIT (2x inverse) on intraday crash
     - No signal → Cash
@@ -504,7 +504,7 @@ class SmartStrategy:
                 # BTC is up overnight (or filter disabled) - take the trade!
                 return TodaySignal(
                     signal=Signal.MEAN_REVERSION,
-                    etf="BITX",
+                    etf="BITU",
                     reason=f"Mean reversion: IBIT dropped {prev_return:.1f}% yesterday"
                     + (f" | {btc_overnight.message}" if btc_overnight else ""),
                     prev_day_return=prev_return,
@@ -590,7 +590,7 @@ class SmartBacktester:
 
     def load_data(self, start_date: date, end_date: date):
         """Load historical data for all ETFs and BTC from Alpaca."""
-        tickers = ["IBIT", "BITX", "SBIT"]
+        tickers = ["IBIT", "BITU", "SBIT"]
 
         for ticker in tickers:
             # Use Alpaca historical bars
@@ -649,7 +649,7 @@ class SmartBacktester:
     def run_backtest(self) -> Dict[str, Any]:
         """Run backtest and return results."""
         ibit = self.data["IBIT"].copy()
-        bitx = self.data["BITX"].copy()
+        bitx = self.data["BITU"].copy()
         sbit = self.data["SBIT"].copy()
 
         # Get BTC data for overnight filter
@@ -717,7 +717,7 @@ class SmartBacktester:
                         continue  # Skip to Thursday check or next day
 
                 signal = "mean_reversion"
-                etf = "BITX"
+                etf = "BITU"
                 etf_data = bitx.iloc[i]
             elif self.config.short_thursday_enabled and is_thursday:
                 signal = "short_thursday"

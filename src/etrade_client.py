@@ -124,8 +124,26 @@ class ETradeClient:
         )
 
     def is_authenticated(self) -> bool:
-        """Check if we have valid tokens."""
-        return self.access_token is not None and self.access_token_secret is not None
+        """Check if we have valid tokens that actually work."""
+        if self.access_token is None or self.access_token_secret is None:
+            return False
+
+        # Actually test the connection by trying to list accounts
+        try:
+            self._create_session()
+            url = f"{self.base_url}/v1/accounts/list"
+            response = self.session.get(url)
+            if response.status_code == 200:
+                return True
+            elif response.status_code == 401:
+                logger.warning("E*TRADE token expired or invalid")
+                return False
+            else:
+                logger.warning(f"E*TRADE auth check failed: {response.status_code}")
+                return False
+        except Exception as e:
+            logger.error(f"E*TRADE auth check error: {e}")
+            return False
 
     def authenticate(self, callback_url: str = "oob") -> bool:
         """
@@ -203,6 +221,67 @@ class ETradeClient:
         except Exception as e:
             logger.error(f"Authentication failed: {e}")
             raise ETradeAuthError(f"Authentication failed: {e}")
+
+    def get_authorization_url(self, callback_url: str = "oob") -> tuple:
+        """
+        Get authorization URL for OAuth flow (step 1).
+
+        Returns:
+            Tuple of (auth_url, request_token_dict)
+        """
+        oauth = OAuth1Session(
+            self.consumer_key, client_secret=self.consumer_secret, callback_uri=callback_url
+        )
+
+        request_token_url = f"{self.base_url}{OAUTH_REQUEST_TOKEN}"
+        response = oauth.fetch_request_token(request_token_url)
+
+        resource_owner_key = response.get("oauth_token")
+        resource_owner_secret = response.get("oauth_token_secret")
+
+        if not resource_owner_key:
+            raise ETradeAuthError("Failed to get request token")
+
+        auth_url = f"{OAUTH_AUTHORIZE}?key={self.consumer_key}&token={resource_owner_key}"
+
+        return auth_url, {
+            "oauth_token": resource_owner_key,
+            "oauth_token_secret": resource_owner_secret,
+        }
+
+    def complete_authorization(self, verifier: str, request_token: dict) -> bool:
+        """
+        Complete OAuth flow with verifier code (step 2).
+
+        Args:
+            verifier: The 5-character code from E*TRADE
+            request_token: Dict with oauth_token and oauth_token_secret from get_authorization_url
+
+        Returns:
+            True if successful
+        """
+        oauth = OAuth1Session(
+            self.consumer_key,
+            client_secret=self.consumer_secret,
+            resource_owner_key=request_token["oauth_token"],
+            resource_owner_secret=request_token["oauth_token_secret"],
+            verifier=verifier,
+        )
+
+        access_token_url = f"{self.base_url}{OAUTH_ACCESS_TOKEN}"
+        access_tokens = oauth.fetch_access_token(access_token_url)
+
+        self.access_token = access_tokens.get("oauth_token")
+        self.access_token_secret = access_tokens.get("oauth_token_secret")
+
+        if not self.access_token:
+            raise ETradeAuthError("Failed to get access token")
+
+        self._create_session()
+        self._save_tokens()
+
+        logger.info("E*TRADE authentication completed successfully")
+        return True
 
     def renew_token(self) -> bool:
         """
