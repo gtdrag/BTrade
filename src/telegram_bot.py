@@ -163,14 +163,14 @@ class TelegramBot:
         callback_id = f"test_{datetime.now().strftime('%H%M%S')}"
 
         message = (
-            "🧪 *TEST APPROVAL REQUEST*\n\n"
-            "📊 *Details:*\n"
-            "• Signal: MEAN_REVERSION\n"
+            "🧪 TEST APPROVAL REQUEST\n\n"
+            "📊 Details:\n"
+            "• Signal: MEAN REVERSION\n"
             "• Reason: IBIT dropped -2.5% yesterday\n"
             "• ETF: BITU (2x Long)\n"
             "• Shares: 10\n"
-            "• Price: $50.00\n"
-            "• Total: $500.00\n\n"
+            "• Price: 50.00 USD\n"
+            "• Total: 500.00 USD\n\n"
             "⏱ This is a TEST - tap a button to see the full flow!"
         )
 
