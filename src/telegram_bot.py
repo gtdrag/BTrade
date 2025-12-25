@@ -87,6 +87,7 @@ class TelegramBot:
         self._app.add_handler(CommandHandler("start", self._cmd_start))
         self._app.add_handler(CommandHandler("status", self._cmd_status))
         self._app.add_handler(CommandHandler("help", self._cmd_help))
+        self._app.add_handler(CommandHandler("test", self._cmd_test))
 
         # Add callback handler for inline buttons
         self._app.add_handler(CallbackQueryHandler(self._handle_callback))
@@ -152,9 +153,41 @@ class TelegramBot:
             "*Commands:*\n"
             "/start - Get your chat ID\n"
             "/status - Check bot status\n"
+            "/test - Test the approval flow\n"
             "/help - Show this help",
             parse_mode="Markdown",
         )
+
+    async def _cmd_test(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /test command - sends a mock approval request."""
+        callback_id = f"test_{datetime.now().strftime('%H%M%S')}"
+
+        message = (
+            "🧪 *TEST APPROVAL REQUEST*\n\n"
+            "📊 *Details:*\n"
+            "• Signal: MEAN_REVERSION\n"
+            "• Reason: IBIT dropped -2.5% yesterday\n"
+            "• ETF: BITU (2x Long)\n"
+            "• Shares: 10\n"
+            "• Price: $50.00\n"
+            "• Total: $500.00\n\n"
+            "⏱ This is a TEST - tap a button to see the full flow!"
+        )
+
+        keyboard = [
+            [
+                InlineKeyboardButton("✅ APPROVE", callback_data=f"approve_{callback_id}"),
+                InlineKeyboardButton("❌ REJECT", callback_data=f"reject_{callback_id}"),
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await update.message.reply_text(
+            message,
+            parse_mode="Markdown",
+            reply_markup=reply_markup,
+        )
+        logger.info(f"Test approval request sent with callback_id: {callback_id}")
 
     async def _handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle inline button callbacks."""
@@ -164,18 +197,49 @@ class TelegramBot:
         data = query.data
         logger.info(f"Received callback: {data}")
 
+        # Check if this is a test callback
+        is_test = "_test_" in data
+
         if data.startswith("approve_"):
             self._approval_result = ApprovalResult.APPROVED
-            await query.edit_message_text(
-                text=query.message.text + "\n\n✅ *APPROVED* - Executing trade...",
-                parse_mode="Markdown",
-            )
+            if is_test:
+                await query.edit_message_text(
+                    text=(
+                        "✅ *TEST APPROVED*\n\n"
+                        "🎉 *Full loop confirmed!*\n\n"
+                        "The approval workflow is working:\n"
+                        "1. ✓ Railway sent the message\n"
+                        "2. ✓ You tapped APPROVE\n"
+                        "3. ✓ Railway received your response\n\n"
+                        "_In production, the trade would execute now._"
+                    ),
+                    parse_mode="Markdown",
+                )
+            else:
+                await query.edit_message_text(
+                    text=query.message.text + "\n\n✅ *APPROVED* - Executing trade...",
+                    parse_mode="Markdown",
+                )
         elif data.startswith("reject_"):
             self._approval_result = ApprovalResult.REJECTED
-            await query.edit_message_text(
-                text=query.message.text + "\n\n❌ *REJECTED* - Trade cancelled.",
-                parse_mode="Markdown",
-            )
+            if is_test:
+                await query.edit_message_text(
+                    text=(
+                        "❌ *TEST REJECTED*\n\n"
+                        "🎉 *Full loop confirmed!*\n\n"
+                        "The rejection workflow is working:\n"
+                        "1. ✓ Railway sent the message\n"
+                        "2. ✓ You tapped REJECT\n"
+                        "3. ✓ Railway received your response\n\n"
+                        "_In production, the trade would be cancelled._"
+                    ),
+                    parse_mode="Markdown",
+                )
+            else:
+                await query.edit_message_text(
+                    text=query.message.text + "\n\n❌ *REJECTED* - Trade cancelled.",
+                    parse_mode="Markdown",
+                )
 
         # Signal that we got a response
         if self._approval_event:
