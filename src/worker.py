@@ -15,7 +15,6 @@ import logging
 import os
 import signal
 import sys
-import time
 
 from dotenv import load_dotenv
 
@@ -125,26 +124,28 @@ class TradingWorker:
         self.scheduler.start()
         logger.info("Scheduler started")
 
-        # Start Telegram polling in async context
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+        # Run async event loop
+        asyncio.run(self._run_async())
 
+    async def _run_async(self):
+        """Main async loop that keeps Telegram polling running."""
         try:
             # Start Telegram polling
-            loop.run_until_complete(self.start_telegram_polling())
+            await self.start_telegram_polling()
 
-            # Keep running
+            # Keep running with async sleep (keeps event loop active for polling)
             logger.info("Worker running. Press Ctrl+C to stop.")
             while self.running:
-                time.sleep(1)
+                await asyncio.sleep(1)
 
         except KeyboardInterrupt:
             logger.info("Shutdown requested...")
+        except asyncio.CancelledError:
+            logger.info("Async task cancelled...")
         finally:
             # Cleanup
-            loop.run_until_complete(self.stop_telegram_polling())
+            await self.stop_telegram_polling()
             self.scheduler.stop()
-            loop.close()
             logger.info("Worker stopped")
 
     def stop(self):
