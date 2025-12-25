@@ -58,6 +58,7 @@ class TelegramBot:
     - Send trade confirmations
     - Send daily summaries
     - Handle errors and alerts
+    - Interactive commands for bot control
     """
 
     def __init__(
@@ -65,10 +66,17 @@ class TelegramBot:
         token: Optional[str] = None,
         chat_id: Optional[str] = None,
         approval_timeout_minutes: int = 10,
+        scheduler=None,
+        trading_bot=None,
     ):
         self.token = token or os.environ.get("TELEGRAM_BOT_TOKEN")
         self.chat_id = chat_id or os.environ.get("TELEGRAM_CHAT_ID")
         self.approval_timeout = approval_timeout_minutes * 60  # Convert to seconds
+
+        # References for interactive commands
+        self.scheduler = scheduler
+        self.trading_bot = trading_bot
+        self._is_paused = False
 
         if not self.token:
             raise ValueError("TELEGRAM_BOT_TOKEN not set")
@@ -83,11 +91,22 @@ class TelegramBot:
         """Initialize the bot application."""
         self._app = Application.builder().token(self.token).build()
 
-        # Add command handlers
+        # Add command handlers - basic
         self._app.add_handler(CommandHandler("start", self._cmd_start))
         self._app.add_handler(CommandHandler("status", self._cmd_status))
         self._app.add_handler(CommandHandler("help", self._cmd_help))
         self._app.add_handler(CommandHandler("test", self._cmd_test))
+
+        # Add command handlers - bot control
+        self._app.add_handler(CommandHandler("mode", self._cmd_mode))
+        self._app.add_handler(CommandHandler("pause", self._cmd_pause))
+        self._app.add_handler(CommandHandler("resume", self._cmd_resume))
+
+        # Add command handlers - information
+        self._app.add_handler(CommandHandler("balance", self._cmd_balance))
+        self._app.add_handler(CommandHandler("positions", self._cmd_positions))
+        self._app.add_handler(CommandHandler("signal", self._cmd_signal))
+        self._app.add_handler(CommandHandler("jobs", self._cmd_jobs))
 
         # Add callback handler for inline buttons
         self._app.add_handler(CallbackQueryHandler(self._handle_callback))
@@ -129,32 +148,77 @@ class TelegramBot:
         )
 
     async def _cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /status command."""
-        status = "🟢 Online" if self._is_running else "🔴 Offline"
-        pending = "Yes" if self._pending_approval else "No"
+        """Handle /status command - comprehensive bot status."""
+        from .utils import get_et_now
 
-        await update.message.reply_text(
-            f"*Bot Status*\n\n"
-            f"Status: {status}\n"
-            f"Pending Approval: {pending}\n"
-            f"Approval Timeout: {self.approval_timeout // 60} min",
-            parse_mode="Markdown",
-        )
+        now = get_et_now()
+        lines = ["📊 *Bot Status*\n"]
+
+        # Bot status
+        if self._is_paused:
+            lines.append("⏸ Scheduler: PAUSED")
+        elif self._is_running:
+            lines.append("🟢 Scheduler: Running")
+        else:
+            lines.append("🔴 Scheduler: Stopped")
+
+        # Trading mode
+        if self.trading_bot:
+            mode = "LIVE" if not self.trading_bot.is_paper_mode else "PAPER"
+            mode_emoji = "💰" if mode == "LIVE" else "📝"
+            lines.append(f"{mode_emoji} Mode: {mode}")
+        else:
+            lines.append("❓ Mode: Unknown")
+
+        # Time
+        lines.append(f"🕐 Time: {now.strftime('%I:%M %p ET')}")
+        lines.append(f"📅 Date: {now.strftime('%A, %b %d')}")
+
+        # Pending approval
+        if self._pending_approval:
+            lines.append("⏳ Pending: Yes")
+        else:
+            lines.append("✓ Pending: None")
+
+        # Next scheduled job
+        if self.scheduler:
+            try:
+                jobs = self.scheduler.scheduler.get_jobs()
+                next_jobs = sorted(
+                    [j for j in jobs if j.next_run_time],
+                    key=lambda x: x.next_run_time,
+                )[:2]
+                if next_jobs:
+                    lines.append("\n📅 *Next Jobs:*")
+                    for job in next_jobs:
+                        time_str = job.next_run_time.strftime("%I:%M %p")
+                        lines.append(f"• {time_str}: {job.name}")
+            except Exception:
+                pass
+
+        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
     async def _cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /help command."""
         await update.message.reply_text(
             "*IBIT Trading Bot Help*\n\n"
-            "This bot sends you trade signals and waits for your approval.\n\n"
-            "*How it works:*\n"
-            "1. When a signal triggers, you'll get a notification\n"
+            "📱 *Bot Control:*\n"
+            "/status - Comprehensive bot status\n"
+            "/mode - Switch paper/live mode\n"
+            "/pause - Pause trading\n"
+            "/resume - Resume trading\n\n"
+            "📊 *Information:*\n"
+            "/balance - Account balance\n"
+            "/positions - Current positions\n"
+            "/signal - Check today's signal\n"
+            "/jobs - View scheduled jobs\n\n"
+            "🧪 *Testing:*\n"
+            "/test - Test approval flow\n"
+            "/start - Get your chat ID\n\n"
+            "*How approval works:*\n"
+            "1. Signal triggers → notification sent\n"
             "2. Tap ✅ Approve or ❌ Reject\n"
-            "3. The trade executes (or not) based on your choice\n\n"
-            "*Commands:*\n"
-            "/start - Get your chat ID\n"
-            "/status - Check bot status\n"
-            "/test - Test the approval flow\n"
-            "/help - Show this help",
+            "3. Trade executes (or not)",
             parse_mode="Markdown",
         )
 
@@ -188,6 +252,246 @@ class TelegramBot:
             reply_markup=reply_markup,
         )
         logger.info(f"Test approval request sent with callback_id: {callback_id}")
+
+    # ========== Bot Control Commands ==========
+
+    async def _cmd_mode(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /mode command - switch between paper and live mode."""
+        args = context.args
+
+        if not self.trading_bot:
+            await update.message.reply_text("❌ Trading bot not available. Cannot switch modes.")
+            return
+
+        current_mode = "paper" if self.trading_bot.is_paper_mode else "live"
+
+        if not args:
+            # Show current mode
+            mode_emoji = "📝" if current_mode == "paper" else "💰"
+            await update.message.reply_text(
+                f"{mode_emoji} *Current Mode: {current_mode.upper()}*\n\n"
+                "To switch modes:\n"
+                "/mode paper - Switch to paper trading\n"
+                "/mode live - Switch to live trading",
+                parse_mode="Markdown",
+            )
+            return
+
+        new_mode = args[0].lower()
+        if new_mode not in ["paper", "live"]:
+            await update.message.reply_text("❌ Invalid mode. Use 'paper' or 'live'.")
+            return
+
+        if new_mode == current_mode:
+            await update.message.reply_text(f"Already in {current_mode.upper()} mode.")
+            return
+
+        # Switch mode
+        if new_mode == "live":
+            # Check if E*TRADE is authenticated
+            if not self.trading_bot.client or not self.trading_bot.client.is_authenticated():
+                await update.message.reply_text(
+                    "❌ Cannot switch to LIVE mode.\n\n"
+                    "E*TRADE is not authenticated. "
+                    "Please complete OAuth setup first."
+                )
+                return
+
+            self.trading_bot.is_paper_mode = False
+            await update.message.reply_text(
+                "💰 *Switched to LIVE MODE*\n\n"
+                "⚠️ Real money trades will be executed!\n"
+                "All trades require your approval.",
+                parse_mode="Markdown",
+            )
+        else:
+            self.trading_bot.is_paper_mode = True
+            await update.message.reply_text(
+                "📝 *Switched to PAPER MODE*\n\n" "Simulated trades only. No real money at risk.",
+                parse_mode="Markdown",
+            )
+
+        logger.info(f"Mode switched to {new_mode.upper()}")
+
+    async def _cmd_pause(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /pause command - pause the scheduler."""
+        if self._is_paused:
+            await update.message.reply_text("⏸ Already paused.")
+            return
+
+        if self.scheduler:
+            self.scheduler.scheduler.pause()
+            self._is_paused = True
+            await update.message.reply_text(
+                "⏸ *Scheduler PAUSED*\n\n"
+                "No trades will be executed until resumed.\n"
+                "Use /resume to continue.",
+                parse_mode="Markdown",
+            )
+            logger.info("Scheduler paused via Telegram")
+        else:
+            await update.message.reply_text("❌ Scheduler not available.")
+
+    async def _cmd_resume(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /resume command - resume the scheduler."""
+        if not self._is_paused:
+            await update.message.reply_text("▶️ Already running.")
+            return
+
+        if self.scheduler:
+            self.scheduler.scheduler.resume()
+            self._is_paused = False
+            await update.message.reply_text(
+                "▶️ *Scheduler RESUMED*\n\n" "Trading operations are active again.",
+                parse_mode="Markdown",
+            )
+            logger.info("Scheduler resumed via Telegram")
+        else:
+            await update.message.reply_text("❌ Scheduler not available.")
+
+    # ========== Information Commands ==========
+
+    async def _cmd_balance(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /balance command - show account balance."""
+        if not self.trading_bot:
+            await update.message.reply_text("❌ Trading bot not available.")
+            return
+
+        try:
+            portfolio = self.trading_bot.get_portfolio_value()
+            cash = portfolio.get("cash", 0)
+            total_value = portfolio.get("total_value", cash)
+            positions_value = total_value - cash
+
+            mode = "PAPER" if self.trading_bot.is_paper_mode else "LIVE"
+            mode_emoji = "📝" if mode == "PAPER" else "💰"
+
+            lines = [
+                f"{mode_emoji} *Account Balance ({mode})*\n",
+                f"💵 Cash: ${cash:,.2f}",
+                f"📊 Positions: ${positions_value:,.2f}",
+                f"💼 Total: ${total_value:,.2f}",
+            ]
+
+            await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+        except Exception as e:
+            await update.message.reply_text(f"❌ Error fetching balance: {e}")
+
+    async def _cmd_positions(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /positions command - show current positions."""
+        if not self.trading_bot:
+            await update.message.reply_text("❌ Trading bot not available.")
+            return
+
+        try:
+            portfolio = self.trading_bot.get_portfolio_value()
+            positions = portfolio.get("positions", [])
+
+            if not positions:
+                await update.message.reply_text(
+                    "📭 *No Open Positions*\n\n" "Currently 100% in cash.",
+                    parse_mode="Markdown",
+                )
+                return
+
+            mode = "PAPER" if self.trading_bot.is_paper_mode else "LIVE"
+            lines = [f"📊 *Open Positions ({mode})*\n"]
+
+            for pos in positions:
+                symbol = pos.get("symbol", "?")
+                shares = pos.get("shares", 0)
+                entry = pos.get("entry_price", 0)
+                current = pos.get("current_price", 0)
+                pnl = pos.get("unrealized_pnl", 0)
+                pnl_pct = pos.get("unrealized_pnl_pct", 0)
+
+                emoji = "📈" if pnl >= 0 else "📉"
+                sign = "+" if pnl >= 0 else ""
+
+                lines.append(f"\n{emoji} *{symbol}*")
+                lines.append(f"• Shares: {shares}")
+                lines.append(f"• Entry: ${entry:.2f}")
+                lines.append(f"• Current: ${current:.2f}")
+                lines.append(f"• P/L: {sign}${pnl:.2f} ({sign}{pnl_pct:.1f}%)")
+
+            await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+        except Exception as e:
+            await update.message.reply_text(f"❌ Error fetching positions: {e}")
+
+    async def _cmd_signal(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /signal command - check today's signal."""
+        if not self.trading_bot:
+            await update.message.reply_text("❌ Trading bot not available.")
+            return
+
+        try:
+            from .utils import get_et_now, is_trading_day
+
+            now = get_et_now()
+            day_name = now.strftime("%A")
+
+            if not is_trading_day(now.date()):
+                await update.message.reply_text(
+                    f"📅 *Market Closed*\n\n" f"Today is {day_name}. No trading.",
+                    parse_mode="Markdown",
+                )
+                return
+
+            signal = self.trading_bot.strategy.get_today_signal()
+            signal_name = signal.signal.value.upper().replace("_", " ")
+
+            if signal.signal.value == "cash":
+                await update.message.reply_text(
+                    f"📭 *No Signal Today*\n\n"
+                    f"Day: {day_name}\n"
+                    f"Reason: {signal.reason or 'No qualifying conditions'}\n\n"
+                    "Staying in cash.",
+                    parse_mode="Markdown",
+                )
+            else:
+                emoji = self._get_signal_emoji(signal.signal.value)
+                etf = signal.etf if hasattr(signal, "etf") else "TBD"
+
+                await update.message.reply_text(
+                    f"{emoji} *Signal: {signal_name}*\n\n"
+                    f"Day: {day_name}\n"
+                    f"ETF: {etf}\n"
+                    f"Reason: {signal.reason or 'Conditions met'}",
+                    parse_mode="Markdown",
+                )
+        except Exception as e:
+            await update.message.reply_text(f"❌ Error checking signal: {e}")
+
+    async def _cmd_jobs(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /jobs command - list scheduled jobs."""
+        if not self.scheduler:
+            await update.message.reply_text("❌ Scheduler not available.")
+            return
+
+        try:
+            jobs = self.scheduler.scheduler.get_jobs()
+            if not jobs:
+                await update.message.reply_text("📅 No jobs scheduled.")
+                return
+
+            # Sort by next run time
+            sorted_jobs = sorted(
+                [j for j in jobs if j.next_run_time],
+                key=lambda x: x.next_run_time,
+            )
+
+            lines = ["📅 *Scheduled Jobs*\n"]
+            for job in sorted_jobs:
+                time_str = job.next_run_time.strftime("%I:%M %p")
+                date_str = job.next_run_time.strftime("%b %d")
+                lines.append(f"• {time_str} ({date_str}): {job.name}")
+
+            if self._is_paused:
+                lines.append("\n⏸ _Scheduler is PAUSED_")
+
+            await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+        except Exception as e:
+            await update.message.reply_text(f"❌ Error fetching jobs: {e}")
 
     async def _handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle inline button callbacks."""

@@ -46,6 +46,7 @@ class TradingWorker:
         self.running = False
         self.scheduler = None
         self.telegram_bot = None
+        self.trading_bot = None
 
         # Configuration from environment
         self.trading_mode = os.environ.get("TRADING_MODE", "paper")
@@ -65,7 +66,7 @@ class TradingWorker:
         logger.info("=" * 60)
 
         # Create trading bot
-        trading_bot = create_trading_bot(
+        self.trading_bot = create_trading_bot(
             mode=self.trading_mode,
             max_position_pct=self.max_position_pct,
             approval_mode=self.approval_mode,
@@ -73,7 +74,7 @@ class TradingWorker:
         )
 
         # Create scheduler
-        self.scheduler = SmartScheduler(trading_bot)
+        self.scheduler = SmartScheduler(self.trading_bot)
 
         # Create Telegram bot for polling (to receive approval responses)
         telegram_token = os.environ.get("TELEGRAM_BOT_TOKEN")
@@ -84,8 +85,10 @@ class TradingWorker:
                 token=telegram_token,
                 chat_id=telegram_chat_id,
                 approval_timeout_minutes=self.approval_timeout,
+                scheduler=self.scheduler,
+                trading_bot=self.trading_bot,
             )
-            logger.info("Telegram bot configured")
+            logger.info("Telegram bot configured with interactive commands")
         else:
             logger.warning("Telegram not configured - notifications disabled")
 
