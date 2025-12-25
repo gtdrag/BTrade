@@ -129,10 +129,38 @@ class SmartScheduler:
             misfire_grace_time=600,
         )
 
+        # Pre-market reminder - 9:15 AM ET
+        self.scheduler.add_job(
+            self._job_premarket_reminder,
+            CronTrigger(day_of_week="mon-fri", hour=9, minute=15, timezone=ET),
+            id="premarket_reminder",
+            name="Pre-Market Reminder",
+            misfire_grace_time=300,
+        )
+
+        # Hourly position updates - every hour during market hours (10 AM - 3 PM)
+        self.scheduler.add_job(
+            self._job_position_update,
+            CronTrigger(day_of_week="mon-fri", hour="10-15", minute=0, timezone=ET),
+            id="position_update",
+            name="Hourly Position Update",
+            misfire_grace_time=300,
+        )
+
+        # Health check - 8:30 AM ET (check cash, data feeds, etc.)
+        self.scheduler.add_job(
+            self._job_health_check,
+            CronTrigger(day_of_week="mon-fri", hour=8, minute=30, timezone=ET),
+            id="health_check",
+            name="Morning Health Check",
+            misfire_grace_time=600,
+        )
+
         logger.info("Scheduler jobs configured")
 
     def _job_morning_signal(self):
         """Execute morning trading signal."""
+
         now = get_et_now()
 
         if not is_trading_day(now.date()):
@@ -149,14 +177,78 @@ class SmartScheduler:
             if result.success:
                 if result.signal != Signal.CASH:
                     logger.info(f"Trade executed: {result.action} {result.shares} {result.etf}")
+                    # Trade notification is handled by execute_signal via approval flow
                 else:
+                    # No signal today - send notification
                     logger.info("No trade signal today")
+                    self._send_no_signal_notification(now)
             else:
                 logger.error(f"Trade failed: {result.error}")
+                self._send_error_notification(f"Trade failed: {result.error}")
 
         except Exception as e:
             logger.error(f"Morning signal job failed: {e}")
             self._error_count += 1
+            self._send_error_notification(f"Morning signal check failed: {e}")
+
+    def _send_no_signal_notification(self, now):
+        """Send notification when there's no trade signal."""
+        import asyncio
+
+        day_name = now.strftime("%A")
+
+        # Build reason for no signal
+        reason_lines = []
+
+        if day_name == "Thursday":
+            reason_lines.append("• Thursday detected, but overnight filter blocked short")
+        else:
+            reason_lines.append("• No mean reversion trigger (IBIT didn't drop enough)")
+
+        reason = "\n".join(reason_lines) if reason_lines else "• No qualifying conditions met"
+
+        async def _send():
+            bot = TelegramBot()
+            await bot.initialize()
+            await bot.send_message(
+                f"📭 No Trade Signal Today\n\n"
+                f"Time: {now.strftime('%I:%M %p ET')}\n"
+                f"Day: {day_name}\n\n"
+                f"Reason:\n{reason}\n\n"
+                "Staying in cash. Monitoring for intraday opportunities..."
+            )
+
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        loop.run_until_complete(_send())
+        logger.info("No-signal notification sent")
+
+    def _send_error_notification(self, error_msg: str):
+        """Send error notification via Telegram."""
+        import asyncio
+
+        now = get_et_now()
+
+        async def _send():
+            bot = TelegramBot()
+            await bot.initialize()
+            await bot.send_message(
+                f"🚨 Bot Error Alert\n\n"
+                f"Time: {now.strftime('%I:%M %p ET')}\n\n"
+                f"Error: {error_msg}\n\n"
+                "Please check logs for details."
+            )
+
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        loop.run_until_complete(_send())
+        logger.info("Error notification sent")
 
     def _job_crash_day_check(self):
         """Check for intraday crash signal and execute if triggered."""
@@ -406,6 +498,184 @@ class SmartScheduler:
         except Exception as e:
             logger.error(f"Daily summary failed: {e}")
             self._error_count += 1
+
+    def _job_premarket_reminder(self):
+        """Send pre-market reminder at 9:15 AM ET."""
+        import asyncio
+
+        now = get_et_now()
+
+        if not is_trading_day(now.date()):
+            # Send holiday/weekend notice instead
+            day_name = now.strftime("%A")
+
+            async def _send_closed():
+                bot = TelegramBot()
+                await bot.initialize()
+                await bot.send_message(
+                    f"📅 Market closed today ({day_name})\n\n"
+                    "No trading activity scheduled. Enjoy your day off!"
+                )
+
+            try:
+                loop = asyncio.get_event_loop()
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+            loop.run_until_complete(_send_closed())
+            return
+
+        # Get today's expected signal
+        signal = self.bot.strategy.get_today_signal()
+        signal_preview = ""
+        if signal.signal.value != "cash":
+            signal_preview = f"\n📊 Potential signal: {signal.signal.value.upper()}"
+
+        # Check what day it is for strategy hints
+        day_name = now.strftime("%A")
+        strategy_hint = ""
+        if day_name == "Thursday":
+            strategy_hint = "\n📅 Short Thursday strategy active"
+
+        async def _send_reminder():
+            bot = TelegramBot()
+            await bot.initialize()
+            await bot.send_message(
+                f"☀️ Market opens in 15 minutes!\n\n"
+                f"Time: {now.strftime('%I:%M %p ET')}\n"
+                f"Day: {day_name}"
+                f"{strategy_hint}"
+                f"{signal_preview}\n\n"
+                "Signal check at 9:35 AM ET"
+            )
+
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        loop.run_until_complete(_send_reminder())
+        logger.info("Pre-market reminder sent")
+
+    def _job_position_update(self):
+        """Send hourly position update if holding a position."""
+        import asyncio
+
+        now = get_et_now()
+
+        if not is_trading_day(now.date()):
+            return
+
+        # Check if we have any positions
+        portfolio = self.bot.get_portfolio_value()
+        positions = portfolio.get("positions", [])
+
+        if not positions:
+            return  # No positions, skip update
+
+        # Build position update message
+        position_lines = []
+        for pos in positions:
+            symbol = pos.get("symbol", "?")
+            shares = pos.get("shares", 0)
+            entry = pos.get("entry_price", 0)
+            current = pos.get("current_price", 0)
+            pnl = pos.get("unrealized_pnl", 0)
+            pnl_pct = pos.get("unrealized_pnl_pct", 0)
+
+            emoji = "📈" if pnl >= 0 else "📉"
+            sign = "+" if pnl >= 0 else ""
+            position_lines.append(
+                f"{emoji} {symbol}: {shares} shares\n"
+                f"   Entry: {entry:.2f} → Now: {current:.2f}\n"
+                f"   P/L: {sign}{pnl:.2f} ({sign}{pnl_pct:.1f}%)"
+            )
+
+        async def _send_update():
+            bot = TelegramBot()
+            await bot.initialize()
+            await bot.send_message(
+                f"📊 Position Update ({now.strftime('%I:%M %p ET')})\n\n"
+                + "\n\n".join(position_lines)
+                + "\n\nPositions close at 3:55 PM ET"
+            )
+
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        loop.run_until_complete(_send_update())
+        logger.info("Position update sent")
+
+    def _job_health_check(self):
+        """Morning health check - verify account, data feeds, etc."""
+        import asyncio
+
+        now = get_et_now()
+
+        if not is_trading_day(now.date()):
+            return
+
+        issues = []
+        status_lines = []
+
+        # Check cash balance
+        try:
+            portfolio = self.bot.get_portfolio_value()
+            cash = portfolio.get("cash", 0)
+            if cash < 100:
+                issues.append(f"💰 Low cash balance: ${cash:.2f}")
+            else:
+                status_lines.append(f"💰 Cash: ${cash:.2f}")
+        except Exception as e:
+            issues.append(f"💰 Could not check cash: {e}")
+
+        # Check data feed
+        try:
+            quote = self.bot.data_manager.get_quote("IBIT")
+            if quote:
+                source = quote.source.value
+                if quote.is_realtime:
+                    status_lines.append(f"📡 Data: {source} (real-time)")
+                else:
+                    issues.append(f"📡 Data: {source} (DELAYED - may affect signals)")
+            else:
+                issues.append("📡 Data feed unavailable")
+        except Exception as e:
+            issues.append(f"📡 Data feed error: {e}")
+
+        # Check E*TRADE auth (if live mode)
+        if not self.bot.is_paper_mode:
+            if self.bot.client and self.bot.client.is_authenticated():
+                status_lines.append("🔐 E*TRADE: Connected")
+            else:
+                issues.append("🔐 E*TRADE: NOT AUTHENTICATED - trades will fail!")
+
+        # Build message
+        if issues:
+            message = "⚠️ Morning Health Check - Issues Found\n\n" + "\n".join(issues)
+            if status_lines:
+                message += "\n\n✅ OK:\n" + "\n".join(status_lines)
+        else:
+            message = (
+                "✅ Morning Health Check - All Good!\n\n"
+                + "\n".join(status_lines)
+                + f"\n\nMode: {self.bot.config.mode.value.upper()}"
+            )
+
+        async def _send_health():
+            bot = TelegramBot()
+            await bot.initialize()
+            await bot.send_message(message)
+
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        loop.run_until_complete(_send_health())
+        logger.info(f"Health check sent: {len(issues)} issues found")
 
     def start(self):
         """Start the scheduler."""

@@ -97,11 +97,15 @@ class TradingWorker:
                 logger.info("Telegram bot polling started")
 
                 # Send startup notification
+                now = get_et_now()
+                next_jobs = self._get_next_jobs_preview()
                 await self.telegram_bot.send_message(
-                    f"🤖 *IBIT Trading Bot Online*\n\n"
+                    f"🤖 IBIT Trading Bot Online\n\n"
                     f"Mode: {self.trading_mode.upper()}\n"
                     f"Approval: {self.approval_mode}\n"
-                    f"Time: {get_et_now().strftime('%I:%M %p ET')}\n\n"
+                    f"Time: {now.strftime('%I:%M %p ET')}\n"
+                    f"Date: {now.strftime('%A, %b %d')}\n\n"
+                    f"📅 Upcoming:\n{next_jobs}\n\n"
                     f"Ready for trading signals!"
                 )
             except Exception as e:
@@ -151,6 +155,31 @@ class TradingWorker:
     def stop(self):
         """Signal the worker to stop."""
         self.running = False
+
+    def _get_next_jobs_preview(self) -> str:
+        """Get a preview of the next scheduled jobs."""
+        if not self.scheduler:
+            return "No scheduler configured"
+
+        try:
+            jobs = self.scheduler.scheduler.get_jobs()
+            if not jobs:
+                return "No jobs scheduled"
+
+            # Sort by next run time and get first 3
+            sorted_jobs = sorted(
+                [j for j in jobs if j.next_run_time],
+                key=lambda x: x.next_run_time,
+            )[:3]
+
+            lines = []
+            for job in sorted_jobs:
+                time_str = job.next_run_time.strftime("%I:%M %p")
+                lines.append(f"• {time_str}: {job.name}")
+
+            return "\n".join(lines) if lines else "No upcoming jobs"
+        except Exception:
+            return "Unable to fetch schedule"
 
 
 def main():
