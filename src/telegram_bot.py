@@ -579,9 +579,9 @@ class TelegramBot:
 
         except Exception as e:
             logger.error(f"Failed to get auth URL: {e}")
+            # Don't use Markdown - error messages may contain special chars
             await update.message.reply_text(
-                f"❌ *Authorization Failed*\n\n" f"Could not connect to E*TRADE:\n{e}",
-                parse_mode="Markdown",
+                f"❌ Authorization Failed\n\nCould not connect to E*TRADE:\n{e}"
             )
 
     async def _cmd_verify(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -657,9 +657,9 @@ class TelegramBot:
         except Exception as e:
             logger.error(f"Verification failed: {e}")
             self._pending_auth_request = None
+            # Don't use Markdown - error messages may contain special chars
             await update.message.reply_text(
-                f"❌ *Verification Failed*\n\n" f"Error: {e}\n\n" "Please try /auth again.",
-                parse_mode="Markdown",
+                f"❌ Verification Failed\n\nError: {e}\n\nPlease try /auth again."
             )
 
     async def _handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):

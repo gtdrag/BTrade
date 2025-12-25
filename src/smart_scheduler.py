@@ -235,11 +235,13 @@ class SmartScheduler:
         async def _send():
             bot = TelegramBot()
             await bot.initialize()
+            # Don't use Markdown - error messages may contain special chars
             await bot.send_message(
                 f"🚨 Bot Error Alert\n\n"
                 f"Time: {now.strftime('%I:%M %p ET')}\n\n"
                 f"Error: {error_msg}\n\n"
-                "Please check logs for details."
+                "Please check logs for details.",
+                parse_mode=None,
             )
 
         try:
@@ -667,7 +669,8 @@ class SmartScheduler:
         async def _send_health():
             bot = TelegramBot()
             await bot.initialize()
-            await bot.send_message(message)
+            # Don't use Markdown - message may contain error strings
+            await bot.send_message(message, parse_mode=None)
 
         try:
             loop = asyncio.get_event_loop()
