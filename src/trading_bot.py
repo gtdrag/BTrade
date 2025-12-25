@@ -12,6 +12,7 @@ Data Sources (in priority order):
 """
 
 import logging
+import os
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, Optional
@@ -21,6 +22,7 @@ from .database import Database, get_database
 from .etrade_client import ETradeAPIError, ETradeAuthError, ETradeClient
 from .notifications import NotificationConfig, NotificationManager, NotificationType
 from .smart_strategy import Signal, SmartStrategy, StrategyConfig, TodaySignal
+from .telegram_bot import ApprovalResult, TelegramNotifier
 from .utils import get_et_now
 
 logger = logging.getLogger(__name__)
@@ -31,6 +33,14 @@ class TradingMode(Enum):
 
     LIVE = "live"
     PAPER = "paper"
+
+
+class ApprovalMode(Enum):
+    """Trade approval mode for Telegram."""
+
+    REQUIRED = "required"  # Must approve each trade via Telegram
+    NOTIFY_ONLY = "notify_only"  # Send notification but auto-execute
+    AUTO_EXECUTE = "auto_execute"  # No notification, just execute
 
 
 @dataclass
@@ -67,6 +77,10 @@ class BotConfig:
     # Notifications
     notifications: NotificationConfig = field(default_factory=NotificationConfig)
 
+    # Telegram approval settings
+    approval_mode: ApprovalMode = ApprovalMode.REQUIRED
+    approval_timeout_minutes: int = 10
+
 
 class TradingBot:
     """
@@ -86,12 +100,20 @@ class TradingBot:
         notifications: Optional[NotificationManager] = None,
         db: Optional[Database] = None,
         data_manager: Optional[MarketDataManager] = None,
+        telegram: Optional[TelegramNotifier] = None,
     ):
         self.config = config
         self.client = client
         self.notifications = notifications or NotificationManager(config.notifications)
         self.db = db or get_database()
         self.strategy = SmartStrategy(config=config.strategy)
+
+        # Telegram notifier for trade approvals
+        self.telegram = telegram or TelegramNotifier(
+            token=os.environ.get("TELEGRAM_BOT_TOKEN"),
+            chat_id=os.environ.get("TELEGRAM_CHAT_ID"),
+            approval_timeout_minutes=config.approval_timeout_minutes,
+        )
 
         # Data manager for market quotes (uses best available source)
         self.data_manager = data_manager or create_data_manager(
@@ -295,7 +317,7 @@ class TradingBot:
 
     def execute_signal(self, signal: Optional[TodaySignal] = None) -> TradeResult:
         """
-        Execute today's trading signal.
+        Execute today's trading signal with optional Telegram approval.
 
         Args:
             signal: Optional pre-fetched signal. If None, fetches current signal.
@@ -329,6 +351,7 @@ class TradingBot:
 
             # Calculate position size
             shares = self.calculate_position_size(price)
+            position_value = shares * price
 
             if shares <= 0:
                 return TradeResult(
@@ -339,17 +362,82 @@ class TradingBot:
                     error="Insufficient capital for trade",
                 )
 
+            # Request Telegram approval if required
+            if self.config.approval_mode == ApprovalMode.REQUIRED:
+                logger.info(
+                    f"Requesting Telegram approval for {signal.signal.value}: {shares} {etf}"
+                )
+                approval = self.telegram.request_approval(
+                    signal_type=signal.signal.value,
+                    etf=etf,
+                    reason=signal.reason,
+                    shares=shares,
+                    price=price,
+                    position_value=position_value,
+                )
+
+                if approval == ApprovalResult.REJECTED:
+                    logger.info("Trade rejected by user")
+                    return TradeResult(
+                        success=False,
+                        signal=signal.signal,
+                        etf=etf,
+                        action="BUY",
+                        shares=shares,
+                        price=price,
+                        error="Trade rejected by user via Telegram",
+                        is_paper=self.is_paper_mode,
+                    )
+                elif approval == ApprovalResult.TIMEOUT:
+                    logger.info("Approval timed out - trade skipped")
+                    return TradeResult(
+                        success=False,
+                        signal=signal.signal,
+                        etf=etf,
+                        action="BUY",
+                        shares=shares,
+                        price=price,
+                        error="Approval timeout - no response received",
+                        is_paper=self.is_paper_mode,
+                    )
+                elif approval == ApprovalResult.ERROR:
+                    logger.warning("Telegram approval error - proceeding with trade")
+                    # Continue with trade on Telegram error (fail-open for paper mode)
+
+                logger.info("Trade approved via Telegram")
+
+            elif self.config.approval_mode == ApprovalMode.NOTIFY_ONLY:
+                # Send notification but don't wait for response
+                self.telegram.send_message(
+                    f"📊 *TRADE EXECUTING*\n\n"
+                    f"Signal: {signal.signal.value}\n"
+                    f"ETF: {etf}\n"
+                    f"Shares: {shares}\n"
+                    f"Price: ${price:.2f}\n"
+                    f"Total: ${position_value:.2f}"
+                )
+
             # Execute trade
             if self.is_paper_mode:
                 result = self._execute_paper_trade(etf, shares, price, signal)
             else:
                 result = self._execute_live_trade(etf, shares, signal)
 
-            # Send notification
+            # Send notification (email/desktop)
             if result.success:
                 self._notify_trade(result, signal)
+                # Also send Telegram confirmation
+                self.telegram.notify_trade_executed(
+                    signal_type=signal.signal.value,
+                    etf=etf,
+                    action="BUY",
+                    shares=shares,
+                    price=result.price,
+                    total=result.total_value,
+                )
             else:
                 self._notify_error(result.error or "Trade failed")
+                self.telegram.notify_error("Trade Execution", result.error or "Trade failed")
 
             # Log to database
             self._log_trade(result, signal)
@@ -359,6 +447,7 @@ class TradingBot:
         except Exception as e:
             logger.error(f"Trade execution failed: {e}")
             self._notify_error(str(e))
+            self.telegram.notify_error("Trade Execution", str(e))
             return TradeResult(
                 success=False,
                 signal=signal.signal,
@@ -487,7 +576,7 @@ class TradingBot:
 
         # Calculate P&L
         pnl = (exit_price - entry_price) * shares
-        _pnl_pct = ((exit_price - entry_price) / entry_price) * 100  # noqa: F841
+        pnl_pct = ((exit_price - entry_price) / entry_price) * 100
 
         # Update capital
         self._paper_capital += total_value
@@ -498,6 +587,33 @@ class TradingBot:
         logger.info(
             f"[PAPER] Sold {shares} {etf} @ ${exit_price:.2f} = ${total_value:.2f} (P&L: ${pnl:+.2f})"
         )
+
+        # Send Telegram notification for position closed
+        try:
+            import asyncio
+
+            from .telegram_bot import TelegramBot
+
+            async def _notify():
+                bot = TelegramBot()
+                await bot.initialize()
+                await bot.send_position_closed(
+                    etf=etf,
+                    shares=shares,
+                    entry_price=entry_price,
+                    exit_price=exit_price,
+                    pnl=pnl,
+                    pnl_pct=pnl_pct,
+                )
+
+            try:
+                loop = asyncio.get_event_loop()
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+            loop.run_until_complete(_notify())
+        except Exception as e:
+            logger.warning(f"Failed to send Telegram position closed notification: {e}")
 
         return TradeResult(
             success=True,
@@ -655,6 +771,8 @@ def create_trading_bot(
     max_position_pct: float = 100.0,
     max_position_usd: Optional[float] = None,
     notification_config: Optional[NotificationConfig] = None,
+    approval_mode: str = "required",
+    approval_timeout_minutes: int = 10,
 ) -> TradingBot:
     """
     Factory function to create a configured TradingBot.
@@ -671,6 +789,8 @@ def create_trading_bot(
         max_position_pct: Max percentage of cash per trade (1-100)
         max_position_usd: Max dollar amount per trade (optional)
         notification_config: Optional notification configuration
+        approval_mode: "required", "notify_only", or "auto_execute"
+        approval_timeout_minutes: Minutes to wait for Telegram approval
 
     Returns:
         Configured TradingBot instance
@@ -683,6 +803,13 @@ def create_trading_bot(
         crash_day_threshold=crash_day_threshold,
     )
 
+    # Parse approval mode
+    approval_mode_enum = ApprovalMode.REQUIRED
+    if approval_mode == "notify_only":
+        approval_mode_enum = ApprovalMode.NOTIFY_ONLY
+    elif approval_mode == "auto_execute":
+        approval_mode_enum = ApprovalMode.AUTO_EXECUTE
+
     bot_config = BotConfig(
         strategy=strategy_config,
         mode=TradingMode.LIVE if mode == "live" else TradingMode.PAPER,
@@ -690,6 +817,8 @@ def create_trading_bot(
         max_position_usd=max_position_usd,
         account_id_key=account_id_key,
         notifications=notification_config or NotificationConfig(),
+        approval_mode=approval_mode_enum,
+        approval_timeout_minutes=approval_timeout_minutes,
     )
 
     # Create notification manager from config

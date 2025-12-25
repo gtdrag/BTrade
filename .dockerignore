@@ -1,0 +1,54 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+venv/
+.venv/
+*.egg-info/
+.eggs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Environment
+.env
+.env.local
+*.local
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Data files (will be created at runtime)
+*.db
+*.sqlite
+*.sqlite3
+
+# Logs
+*.log
+logs/
+
+# Documentation
+docs/
+*.md
+!README.md
+
+# Analysis scripts (not needed in production)
+analysis/
+
+# Local config
+.claude/
+*.json.bak
+
+# Token files (sensitive)
+.etrade_*.json

@@ -5,7 +5,8 @@ Proven strategy with +361.8% backtested return (vs +35.5% IBIT B&H):
 1. Mean Reversion: Buy BITU (2x) after IBIT drops -2%+ previous day
 2. Short Thursday: Buy SBIT (2x inverse) every Thursday
 3. Crash Day: Buy SBIT when IBIT drops -2%+ intraday (reactive)
-4. All other days: Stay in cash
+4. Pump Day: Buy BITU when IBIT rises +2%+ intraday (reactive)
+5. All other days: Stay in cash
 
 Key insight: Don't predict market direction. Use leverage ONLY on high-probability signals.
 """
@@ -32,6 +33,7 @@ class Signal(Enum):
     MEAN_REVERSION = "mean_reversion"  # Buy BITU after big drop
     SHORT_THURSDAY = "short_thursday"  # Buy SBIT on Thursday
     CRASH_DAY = "crash_day"  # Buy SBIT on intraday crash
+    PUMP_DAY = "pump_day"  # Buy BITU on intraday pump
     CASH = "cash"  # No position
 
 
@@ -66,6 +68,14 @@ class StrategyConfig:
         default_factory=lambda: ["09:45", "10:00", "10:15", "10:30", "10:45", "11:00", "11:30"]
     )
     crash_day_cutoff_time: str = "12:00"  # Don't enter crash trades after this time
+
+    # Pump day settings (intraday reactive - opposite of crash day)
+    pump_day_enabled: bool = True
+    pump_day_threshold: float = 2.0  # Buy BITU when IBIT rises this much intraday
+    pump_day_check_times: List[str] = field(
+        default_factory=lambda: ["09:45", "10:00", "10:15", "10:30", "10:45", "11:00", "11:30"]
+    )
+    pump_day_cutoff_time: str = "12:00"  # Don't enter pump trades after this time
 
     # Weekend gap monitoring
     weekend_gap_enabled: bool = True
@@ -106,6 +116,18 @@ class CrashDayStatus:
 
 
 @dataclass
+class PumpDayStatus:
+    """Intraday pump detection status."""
+
+    is_triggered: bool
+    current_gain_pct: float
+    ibit_open: float
+    ibit_current: float
+    trigger_time: Optional[str] = None
+    already_traded_today: bool = False
+
+
+@dataclass
 class BTCOvernightStatus:
     """BTC overnight movement check (4 PM yesterday → now)."""
 
@@ -126,6 +148,7 @@ class TodaySignal:
     reason: str
     prev_day_return: Optional[float] = None
     crash_day_status: Optional[CrashDayStatus] = None
+    pump_day_status: Optional[PumpDayStatus] = None
     weekend_gap: Optional[WeekendGapInfo] = None
     btc_overnight: Optional[BTCOvernightStatus] = None
 
@@ -138,9 +161,10 @@ class SmartStrategy:
     Smart Bitcoin ETF Trading Strategy.
 
     Uses proven signals with appropriate ETF leverage:
-    - Mean Reversion → BITU (2x long)
-    - Short Thursday → SBIT (2x inverse)
-    - Crash Day → SBIT (2x inverse) on intraday crash
+    - Mean Reversion → BITU (2x long) after big daily drop
+    - Short Thursday → SBIT (2x inverse) on Thursdays
+    - Crash Day → SBIT (2x inverse) on intraday crash (-2%+)
+    - Pump Day → BITU (2x long) on intraday pump (+2%+)
     - No signal → Cash
     """
 
@@ -151,6 +175,8 @@ class SmartStrategy:
         self._last_data_fetch: Optional[datetime] = None
         self._crash_day_traded_today: bool = False
         self._crash_day_trade_date: Optional[date] = None
+        self._pump_day_traded_today: bool = False
+        self._pump_day_trade_date: Optional[date] = None
 
         # Initialize Alpaca data provider
         self._alpaca = AlpacaProvider(
@@ -452,16 +478,90 @@ class SmartStrategy:
         self._crash_day_traded_today = True
         self._crash_day_trade_date = date.today()
 
-    def get_today_signal(self, check_crash_day: bool = True) -> TodaySignal:
+    def get_pump_day_status(self) -> PumpDayStatus:
+        """
+        Check for intraday pump signal using Alpaca real-time data.
+
+        If IBIT rises >= pump_day_threshold from today's open,
+        this triggers a BITU buy signal.
+        """
+        today = date.today()
+        now = datetime.now()
+
+        # Reset pump day flag if it's a new day
+        if self._pump_day_trade_date != today:
+            self._pump_day_traded_today = False
+            self._pump_day_trade_date = today
+
+        try:
+            # Use Alpaca snapshot for real-time data
+            quote = self._data_manager.get_quote("IBIT")
+
+            if quote is None:
+                return PumpDayStatus(
+                    is_triggered=False,
+                    current_gain_pct=0,
+                    ibit_open=0,
+                    ibit_current=0,
+                    already_traded_today=self._pump_day_traded_today,
+                )
+
+            ibit_open = quote.open_price
+            ibit_current = quote.current_price
+            current_gain_pct = (ibit_current - ibit_open) / ibit_open * 100 if ibit_open > 0 else 0
+
+            # Check if threshold is met (positive threshold for pump)
+            is_triggered = current_gain_pct >= self.config.pump_day_threshold
+
+            # Check if we're past cutoff time
+            cutoff_hour, cutoff_min = map(int, self.config.pump_day_cutoff_time.split(":"))
+            is_past_cutoff = now.hour > cutoff_hour or (
+                now.hour == cutoff_hour and now.minute >= cutoff_min
+            )
+
+            # Don't trigger if past cutoff or already traded
+            if is_past_cutoff or self._pump_day_traded_today:
+                is_triggered = False
+
+            trigger_time = now.strftime("%H:%M") if is_triggered else None
+
+            return PumpDayStatus(
+                is_triggered=is_triggered,
+                current_gain_pct=current_gain_pct,
+                ibit_open=ibit_open,
+                ibit_current=ibit_current,
+                trigger_time=trigger_time,
+                already_traded_today=self._pump_day_traded_today,
+            )
+
+        except Exception as e:
+            logger.warning(f"Failed to get pump day status: {e}")
+            return PumpDayStatus(
+                is_triggered=False,
+                current_gain_pct=0,
+                ibit_open=0,
+                ibit_current=0,
+                already_traded_today=self._pump_day_traded_today,
+            )
+
+    def mark_pump_day_traded(self):
+        """Mark that we've executed a pump day trade today."""
+        self._pump_day_traded_today = True
+        self._pump_day_trade_date = date.today()
+
+    def get_today_signal(
+        self, check_crash_day: bool = True, check_pump_day: bool = True
+    ) -> TodaySignal:
         """
         Determine today's trading signal.
 
         Priority order:
         1. Mean Reversion (previous day drop) - highest priority
            - BUT filtered by BTC overnight movement (84% vs 17% win rate!)
-        2. Crash Day (intraday drop) - reactive signal
-        3. Short Thursday - calendar-based
-        4. Cash - default
+        2. Crash Day (intraday drop) - reactive signal (go inverse)
+        3. Pump Day (intraday pump) - reactive signal (go long)
+        4. Short Thursday - calendar-based
+        5. Cash - default
         """
         today = date.today()
         weekday = today.weekday()  # 0=Monday, 3=Thursday
@@ -477,6 +577,11 @@ class SmartStrategy:
         crash_status = None
         if check_crash_day and self.config.crash_day_enabled:
             crash_status = self.get_crash_day_status()
+
+        # Get pump day status
+        pump_status = None
+        if check_pump_day and self.config.pump_day_enabled:
+            pump_status = self.get_pump_day_status()
 
         # Get BTC overnight status (key filter for mean reversion)
         btc_overnight = None
@@ -497,6 +602,7 @@ class SmartStrategy:
                             reason=f"Mean reversion SKIPPED: {btc_overnight.message}",
                             prev_day_return=prev_return,
                             crash_day_status=crash_status,
+                            pump_day_status=pump_status,
                             weekend_gap=weekend_gap,
                             btc_overnight=btc_overnight,
                         )
@@ -509,11 +615,12 @@ class SmartStrategy:
                     + (f" | {btc_overnight.message}" if btc_overnight else ""),
                     prev_day_return=prev_return,
                     crash_day_status=crash_status,
+                    pump_day_status=pump_status,
                     weekend_gap=weekend_gap,
                     btc_overnight=btc_overnight,
                 )
 
-        # Check crash day signal (intraday reactive)
+        # Check crash day signal (intraday reactive - go inverse)
         if self.config.crash_day_enabled and crash_status and crash_status.is_triggered:
             return TodaySignal(
                 signal=Signal.CRASH_DAY,
@@ -521,6 +628,20 @@ class SmartStrategy:
                 reason=f"Crash day: IBIT down {crash_status.current_drop_pct:.1f}% today - buying SBIT",
                 prev_day_return=prev_return,
                 crash_day_status=crash_status,
+                pump_day_status=pump_status,
+                weekend_gap=weekend_gap,
+                btc_overnight=btc_overnight,
+            )
+
+        # Check pump day signal (intraday reactive - go long)
+        if self.config.pump_day_enabled and pump_status and pump_status.is_triggered:
+            return TodaySignal(
+                signal=Signal.PUMP_DAY,
+                etf="BITU",
+                reason=f"Pump day: IBIT up {pump_status.current_gain_pct:.1f}% today - buying BITU",
+                prev_day_return=prev_return,
+                crash_day_status=crash_status,
+                pump_day_status=pump_status,
                 weekend_gap=weekend_gap,
                 btc_overnight=btc_overnight,
             )
@@ -533,15 +654,18 @@ class SmartStrategy:
                 reason="Short Thursday: Statistically worst day for Bitcoin",
                 prev_day_return=prev_return,
                 crash_day_status=crash_status,
+                pump_day_status=pump_status,
                 weekend_gap=weekend_gap,
                 btc_overnight=btc_overnight,
             )
 
         # No signal - stay in cash
-        # But still include crash day monitoring info
+        # But still include crash/pump day monitoring info
         reason = "No signal today"
         if crash_status and crash_status.current_drop_pct < -1.0:
-            reason = f"Watching: IBIT down {crash_status.current_drop_pct:.1f}% (threshold: {self.config.crash_day_threshold}%)"
+            reason = f"Watching: IBIT down {crash_status.current_drop_pct:.1f}% (crash threshold: {self.config.crash_day_threshold}%)"
+        elif pump_status and pump_status.current_gain_pct > 1.0:
+            reason = f"Watching: IBIT up {pump_status.current_gain_pct:.1f}% (pump threshold: {self.config.pump_day_threshold}%)"
 
         return TodaySignal(
             signal=Signal.CASH,
@@ -549,6 +673,7 @@ class SmartStrategy:
             reason=reason,
             prev_day_return=prev_return,
             crash_day_status=crash_status,
+            pump_day_status=pump_status,
             weekend_gap=weekend_gap,
             btc_overnight=btc_overnight,
         )

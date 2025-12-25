@@ -14,6 +14,7 @@ from apscheduler.triggers.cron import CronTrigger
 
 from .database import get_database
 from .smart_strategy import Signal
+from .telegram_bot import TelegramBot
 from .trading_bot import TradeResult, TradingBot
 from .utils import ET, get_et_now, is_trading_day
 
@@ -85,6 +86,21 @@ class SmartScheduler:
                 misfire_grace_time=120,
             )
 
+        # Pump day monitoring - check every 15 min from 9:45 AM to 12:00 PM ET
+        if self.bot.config.strategy.pump_day_enabled:
+            self.scheduler.add_job(
+                self._job_pump_day_check,
+                CronTrigger(
+                    day_of_week="mon-fri",
+                    hour="9-11",
+                    minute="45,0,15,30,45",
+                    timezone=ET,
+                ),
+                id="pump_day_check",
+                name="Pump Day Monitor",
+                misfire_grace_time=120,
+            )
+
         # Close positions - 3:55 PM ET (before market close)
         self.scheduler.add_job(
             self._job_close_positions,
@@ -103,6 +119,15 @@ class SmartScheduler:
                 name="Renew E*TRADE Token",
                 misfire_grace_time=3600,
             )
+
+        # Daily summary - 4:00 PM ET (after positions closed)
+        self.scheduler.add_job(
+            self._job_daily_summary,
+            CronTrigger(day_of_week="mon-fri", hour=16, minute=0, timezone=ET),
+            id="daily_summary",
+            name="Daily Summary",
+            misfire_grace_time=600,
+        )
 
         logger.info("Scheduler jobs configured")
 
@@ -209,6 +234,82 @@ class SmartScheduler:
             logger.error(f"Crash day check failed: {e}")
             self._error_count += 1
 
+    def _job_pump_day_check(self):
+        """Check for intraday pump signal and execute if triggered."""
+        now = get_et_now()
+
+        if not is_trading_day(now.date()):
+            return
+
+        try:
+            # Get fresh signal with pump day check
+            signal = self.bot.strategy.get_today_signal(check_crash_day=False, check_pump_day=True)
+
+            if signal.signal == Signal.PUMP_DAY:
+                logger.info(
+                    f"PUMP DAY TRIGGERED: IBIT up {signal.pump_day_status.current_gain_pct:.1f}%"
+                )
+
+                # Check if we have an existing position that conflicts
+                has_bitu = False
+                has_sbit = False
+
+                if self.bot.is_paper_mode:
+                    has_bitu = "BITU" in self.bot._paper_positions
+                    has_sbit = "SBIT" in self.bot._paper_positions
+                elif self.bot.client:
+                    # For live trading, check actual positions
+                    try:
+                        positions = self.bot.client.get_account_positions(
+                            self.bot.config.account_id_key
+                        )
+                        for pos in positions:
+                            symbol = pos.get("Product", {}).get("symbol", "")
+                            qty = pos.get("quantity", 0)
+                            if symbol == "BITU" and qty > 0:
+                                has_bitu = True
+                            elif symbol == "SBIT" and qty > 0:
+                                has_sbit = True
+                    except Exception as e:
+                        logger.warning(f"Could not check positions: {e}")
+
+                # If holding SBIT (inverse), we MUST close it - holding inverse during pump is disaster
+                if has_sbit:
+                    logger.warning("PUMP during SBIT position! Closing SBIT first...")
+                    close_result = self.bot.close_position("SBIT")
+                    if close_result.success:
+                        logger.info(f"Emergency close: Sold SBIT @ ${close_result.price:.2f}")
+                    else:
+                        logger.error(f"Failed to close SBIT: {close_result.error}")
+                        return  # Don't proceed if we can't close
+
+                # If already holding BITU, we're already positioned correctly
+                elif has_bitu:
+                    logger.info("Already holding BITU - correctly positioned for pump")
+                    return
+
+                # Now execute the pump day trade
+                result = self.bot.execute_signal(signal)
+                self._last_result = result
+
+                if result.success:
+                    # Mark that we've traded the pump day
+                    self.bot.strategy.mark_pump_day_traded()
+                    logger.info(
+                        f"Pump day trade executed: {result.shares} BITU @ ${result.price:.2f}"
+                    )
+                else:
+                    logger.error(f"Pump day trade failed: {result.error}")
+            else:
+                if signal.pump_day_status:
+                    gain = signal.pump_day_status.current_gain_pct
+                    threshold = self.bot.config.strategy.pump_day_threshold
+                    logger.debug(f"Pump day check: IBIT {gain:+.1f}% (threshold: +{threshold}%)")
+
+        except Exception as e:
+            logger.error(f"Pump day check failed: {e}")
+            self._error_count += 1
+
     def _job_close_positions(self):
         """Close any open positions before market close."""
         now = get_et_now()
@@ -246,6 +347,65 @@ class SmartScheduler:
                 logger.info("E*TRADE token renewed")
             except Exception as e:
                 logger.error(f"Token renewal failed: {e}")
+
+    def _job_daily_summary(self):
+        """Send daily summary via Telegram at 4:00 PM ET."""
+        import asyncio
+
+        now = get_et_now()
+
+        if not is_trading_day(now.date()):
+            return
+
+        logger.info("Sending daily summary")
+
+        try:
+            # Get today's trades from database
+            today_str = now.strftime("%Y-%m-%d")
+            events = self.db.get_events(since=today_str, level="TRADE")
+
+            trades_today = len(events)
+            total_pnl = 0.0
+            wins = 0
+
+            for event in events:
+                details = event.get("details", {})
+                if isinstance(details, dict):
+                    pnl = details.get("pnl", 0)
+                    if pnl:
+                        total_pnl += pnl
+                        if pnl > 0:
+                            wins += 1
+
+            win_rate = (wins / trades_today * 100) if trades_today > 0 else 0
+
+            # Get ending cash
+            portfolio = self.bot.get_portfolio_value()
+            ending_cash = portfolio.get("cash", 0)
+
+            # Send Telegram summary
+            async def _send_summary():
+                bot = TelegramBot()
+                await bot.initialize()
+                await bot.send_daily_summary(
+                    trades_today=trades_today,
+                    total_pnl=total_pnl,
+                    win_rate=win_rate,
+                    ending_cash=ending_cash,
+                )
+
+            try:
+                loop = asyncio.get_event_loop()
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+            loop.run_until_complete(_send_summary())
+
+            logger.info(f"Daily summary sent: {trades_today} trades, P/L: ${total_pnl:.2f}")
+
+        except Exception as e:
+            logger.error(f"Daily summary failed: {e}")
+            self._error_count += 1
 
     def start(self):
         """Start the scheduler."""

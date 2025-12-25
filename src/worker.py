@@ -1,0 +1,173 @@
+"""
+Railway Worker - Background process for 24/7 trading bot operation.
+
+This module runs continuously on Railway, managing:
+- APScheduler for scheduled trade execution
+- Telegram bot for notifications and approvals
+- E*TRADE token refresh
+
+Usage:
+    python -m src.worker
+"""
+
+import asyncio
+import logging
+import os
+import signal
+import sys
+import time
+
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
+
+from .smart_scheduler import SmartScheduler  # noqa: E402
+from .telegram_bot import TelegramBot  # noqa: E402
+from .trading_bot import create_trading_bot  # noqa: E402
+from .utils import get_et_now  # noqa: E402
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)],
+)
+logger = logging.getLogger(__name__)
+
+
+class TradingWorker:
+    """
+    Main worker process for Railway deployment.
+
+    Manages the trading bot scheduler and Telegram bot polling.
+    """
+
+    def __init__(self):
+        self.running = False
+        self.scheduler = None
+        self.telegram_bot = None
+
+        # Configuration from environment
+        self.trading_mode = os.environ.get("TRADING_MODE", "paper")
+        self.approval_mode = os.environ.get("APPROVAL_MODE", "required")
+        self.approval_timeout = int(os.environ.get("APPROVAL_TIMEOUT_MINUTES", "10"))
+        self.max_position_pct = float(os.environ.get("MAX_POSITION_PCT", "75"))
+
+    def setup(self):
+        """Initialize all components."""
+        logger.info("=" * 60)
+        logger.info("IBIT Trading Bot Worker Starting")
+        logger.info("=" * 60)
+        logger.info(f"Trading Mode: {self.trading_mode.upper()}")
+        logger.info(f"Approval Mode: {self.approval_mode}")
+        logger.info(f"Max Position: {self.max_position_pct}%")
+        logger.info(f"Current Time (ET): {get_et_now()}")
+        logger.info("=" * 60)
+
+        # Create trading bot
+        trading_bot = create_trading_bot(
+            mode=self.trading_mode,
+            max_position_pct=self.max_position_pct,
+            approval_mode=self.approval_mode,
+            approval_timeout_minutes=self.approval_timeout,
+        )
+
+        # Create scheduler
+        self.scheduler = SmartScheduler(trading_bot)
+
+        # Create Telegram bot for polling (to receive approval responses)
+        telegram_token = os.environ.get("TELEGRAM_BOT_TOKEN")
+        telegram_chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+
+        if telegram_token and telegram_chat_id:
+            self.telegram_bot = TelegramBot(
+                token=telegram_token,
+                chat_id=telegram_chat_id,
+                approval_timeout_minutes=self.approval_timeout,
+            )
+            logger.info("Telegram bot configured")
+        else:
+            logger.warning("Telegram not configured - notifications disabled")
+
+    async def start_telegram_polling(self):
+        """Start Telegram bot polling in background."""
+        if self.telegram_bot:
+            try:
+                await self.telegram_bot.start_polling()
+                logger.info("Telegram bot polling started")
+
+                # Send startup notification
+                await self.telegram_bot.send_message(
+                    f"🤖 *IBIT Trading Bot Online*\n\n"
+                    f"Mode: {self.trading_mode.upper()}\n"
+                    f"Approval: {self.approval_mode}\n"
+                    f"Time: {get_et_now().strftime('%I:%M %p ET')}\n\n"
+                    f"Ready for trading signals!"
+                )
+            except Exception as e:
+                logger.error(f"Failed to start Telegram polling: {e}")
+
+    async def stop_telegram_polling(self):
+        """Stop Telegram bot polling."""
+        if self.telegram_bot:
+            try:
+                await self.telegram_bot.stop()
+                logger.info("Telegram bot stopped")
+            except Exception as e:
+                logger.error(f"Error stopping Telegram bot: {e}")
+
+    def start(self):
+        """Start the worker."""
+        self.running = True
+
+        # Start scheduler
+        self.scheduler.start()
+        logger.info("Scheduler started")
+
+        # Start Telegram polling in async context
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+        try:
+            # Start Telegram polling
+            loop.run_until_complete(self.start_telegram_polling())
+
+            # Keep running
+            logger.info("Worker running. Press Ctrl+C to stop.")
+            while self.running:
+                time.sleep(1)
+
+        except KeyboardInterrupt:
+            logger.info("Shutdown requested...")
+        finally:
+            # Cleanup
+            loop.run_until_complete(self.stop_telegram_polling())
+            self.scheduler.stop()
+            loop.close()
+            logger.info("Worker stopped")
+
+    def stop(self):
+        """Signal the worker to stop."""
+        self.running = False
+
+
+def main():
+    """Entry point for the worker."""
+    worker = TradingWorker()
+
+    # Handle signals for graceful shutdown
+    def signal_handler(signum, frame):
+        logger.info(f"Received signal {signum}")
+        worker.stop()
+
+    signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGINT, signal_handler)
+
+    # Setup and run
+    worker.setup()
+    worker.start()
+
+
+if __name__ == "__main__":
+    main()

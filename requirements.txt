@@ -21,6 +21,7 @@ yfinance>=0.2.33
 
 # Notifications
 plyer>=2.1.0  # Desktop notifications
+python-telegram-bot>=20.0  # Telegram bot for mobile notifications & trade approval
 
 # Testing
 pytest>=7.4.0
