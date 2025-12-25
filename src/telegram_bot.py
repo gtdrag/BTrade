@@ -217,8 +217,8 @@ class TelegramBot:
             "/positions - Current positions\n"
             "/signal - Check today's signal\n"
             "/jobs - View scheduled jobs\n\n"
-            "🔐 *E*TRADE Auth:*\n"
-            "/auth - Start E*TRADE login\n"
+            "🔐 E\\*TRADE Auth:\n"
+            "/auth - Start E\\*TRADE login\n"
             "/verify CODE - Complete login\n\n"
             "🧪 *Testing:*\n"
             "/test - Test approval flow\n"
@@ -530,11 +530,10 @@ class TelegramBot:
 
             if not consumer_key or not consumer_secret:
                 await update.message.reply_text(
-                    "❌ *E*TRADE Not Configured*\n\n"
+                    "❌ E*TRADE Not Configured\n\n"
                     "Missing API credentials.\n"
                     "Set ETRADE_CONSUMER_KEY and ETRADE_CONSUMER_SECRET\n"
-                    "in Railway environment variables.",
-                    parse_mode="Markdown",
+                    "in Railway environment variables."
                 )
                 return
 
@@ -565,14 +564,13 @@ class TelegramBot:
             }
 
             await update.message.reply_text(
-                "🔐 *E*TRADE Authorization*\n\n"
-                "*Step 1:* Tap the link below to open E*TRADE:\n\n"
-                f"[Authorize IBIT Bot]({auth_url})\n\n"
-                "*Step 2:* Log in and click 'Authorize'\n\n"
-                "*Step 3:* Copy the verification code shown\n\n"
-                "*Step 4:* Send: `/verify YOUR_CODE`\n\n"
+                "🔐 E*TRADE Authorization\n\n"
+                "Step 1: Tap the link below to open E*TRADE:\n\n"
+                f"{auth_url}\n\n"
+                "Step 2: Log in and click 'Authorize'\n\n"
+                "Step 3: Copy the verification code shown\n\n"
+                "Step 4: Send: /verify YOUR_CODE\n\n"
                 "⏱ Link expires in 5 minutes.",
-                parse_mode="Markdown",
                 disable_web_page_preview=True,
             )
             logger.info("E*TRADE auth URL sent to user")
@@ -637,21 +635,19 @@ class TelegramBot:
                 self._pending_auth_request = None
 
                 await update.message.reply_text(
-                    "✅ *E*TRADE Connected!*\n\n"
+                    "✅ E*TRADE Connected!\n\n"
                     "Authentication successful.\n\n"
                     "You can now:\n"
-                    "• Use `/mode live` to switch to live trading\n"
-                    "• Use `/balance` to check your account\n\n"
-                    "⚠️ Tokens auto-renew daily at 8 AM ET.",
-                    parse_mode="Markdown",
+                    "• Use /mode live to switch to live trading\n"
+                    "• Use /balance to check your account\n\n"
+                    "⚠️ Tokens auto-renew daily at 8 AM ET."
                 )
                 logger.info("E*TRADE authentication completed via Telegram")
             else:
                 await update.message.reply_text(
-                    "❌ *Verification Failed*\n\n"
+                    "❌ Verification Failed\n\n"
                     "Could not complete authorization.\n"
-                    "Please try /auth again.",
-                    parse_mode="Markdown",
+                    "Please try /auth again."
                 )
 
         except Exception as e:
