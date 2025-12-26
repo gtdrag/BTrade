@@ -265,6 +265,9 @@ class TelegramBot:
 
     async def _cmd_mode(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /mode command - switch between paper and live mode."""
+        # Deferred import to avoid circular dependency
+        from .trading_bot import TradingMode
+
         args = context.args
 
         if not self.trading_bot:
@@ -305,7 +308,7 @@ class TelegramBot:
                 )
                 return
 
-            self.trading_bot.is_paper_mode = False
+            self.trading_bot.config.mode = TradingMode.LIVE
             await update.message.reply_text(
                 "💰 *Switched to LIVE MODE*\n\n"
                 "⚠️ Real money trades will be executed!\n"
@@ -313,7 +316,7 @@ class TelegramBot:
                 parse_mode="Markdown",
             )
         else:
-            self.trading_bot.is_paper_mode = True
+            self.trading_bot.config.mode = TradingMode.PAPER
             await update.message.reply_text(
                 "📝 *Switched to PAPER MODE*\n\n" "Simulated trades only. No real money at risk.",
                 parse_mode="Markdown",
