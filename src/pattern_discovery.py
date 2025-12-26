@@ -491,6 +491,13 @@ Output format:
 
             response_text = message.content[0].text
 
+            # Save raw response to database for review
+            self._save_analysis_to_db(
+                prompt=prompt,
+                response=response_text,
+                model=self.model,
+            )
+
             # Extract JSON from response
             patterns = self._parse_response(response_text)
 
@@ -503,6 +510,28 @@ Output format:
         except Exception as e:
             logger.error("Pattern analysis failed", error=str(e))
             return []
+
+    def _save_analysis_to_db(self, prompt: str, response: str, model: str) -> None:
+        """Save analysis prompt and response to database for review."""
+        try:
+            from .database import get_database
+
+            db = get_database()
+            db.log_event(
+                level="PATTERN_ANALYSIS",
+                event="Monthly pattern discovery analysis",
+                details={
+                    "model": model,
+                    "prompt_length": len(prompt),
+                    "response_length": len(response),
+                    "prompt": prompt[:5000],  # Truncate if very long
+                    "response": response,
+                    "lookback_days": self.lookback_days,
+                },
+            )
+            logger.info("Saved analysis to database for review")
+        except Exception as e:
+            logger.warning(f"Failed to save analysis to database: {e}")
 
     def _parse_response(self, response_text: str) -> List[TradingPattern]:
         """Parse LLM response into TradingPattern objects."""
