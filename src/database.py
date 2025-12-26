@@ -1,10 +1,16 @@
 """
 Database module for IBIT Dip Bot.
 Handles SQLite operations for trades, settings, and bot state.
+
+Database path can be configured via DATABASE_PATH environment variable.
+This is useful for Railway deployments with persistent volumes:
+  - Set DATABASE_PATH=/data/trades.db
+  - Mount a volume at /data
 """
 
 import datetime
 import json
+import os
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
@@ -12,8 +18,27 @@ from typing import Any, Dict, List, Optional
 
 from .utils import get_et_now
 
-# Default database path
-DEFAULT_DB_PATH = Path(__file__).parent.parent / "trades.db"
+
+def get_default_db_path() -> Path:
+    """Get database path from environment or use default.
+
+    Environment variable: DATABASE_PATH
+    Default: ./trades.db (relative to project root)
+
+    For Railway with persistent volume:
+        DATABASE_PATH=/data/trades.db
+    """
+    env_path = os.environ.get("DATABASE_PATH")
+    if env_path:
+        path = Path(env_path)
+        # Ensure parent directory exists
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return path
+    return Path(__file__).parent.parent / "trades.db"
+
+
+# Default database path (can be overridden by DATABASE_PATH env var)
+DEFAULT_DB_PATH = get_default_db_path()
 
 
 class Database:
