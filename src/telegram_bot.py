@@ -143,6 +143,8 @@ class TelegramBot:
         self._app.add_handler(CommandHandler("analyze", self._cmd_analyze))
         self._app.add_handler(CommandHandler("patterns", self._cmd_patterns))
         self._app.add_handler(CommandHandler("analyses", self._cmd_analyses))
+        self._app.add_handler(CommandHandler("promote", self._cmd_promote))
+        self._app.add_handler(CommandHandler("retire", self._cmd_retire))
 
         # Add command handlers - E*TRADE authentication
         self._app.add_handler(CommandHandler("auth", self._cmd_auth))
@@ -276,7 +278,9 @@ class TelegramBot:
             "🤖 *AI Pattern Discovery:*\n"
             "/analyze - Run pattern analysis now\n"
             "/patterns - View discovered patterns\n"
-            "/analyses - View past Claude analyses\n\n"
+            "/analyses - View past Claude analyses\n"
+            "/promote - Promote pattern to paper/live\n"
+            "/retire - Retire a pattern\n\n"
             "🔐 E\\*TRADE Auth:\n"
             "/auth - Start E\\*TRADE login\n"
             "/verify CODE - Complete login\n\n"
@@ -885,6 +889,156 @@ class TelegramBot:
 
         except Exception as e:
             await update.message.reply_text(f"❌ Error: {e}")
+
+    async def _cmd_promote(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /promote command - promote a pattern to paper or live status."""
+        if not self._is_authorized(update):
+            await self._send_unauthorized_response(update)
+            return
+
+        from .pattern_discovery import PatternStatus, get_pattern_registry
+
+        args = context.args
+        if not args or len(args) < 2:
+            # Show usage and list available patterns
+            registry = get_pattern_registry()
+            candidates = registry.get_candidate_patterns()
+            paper = registry.get_paper_patterns()
+
+            pattern_list = ""
+            if candidates:
+                pattern_list += "\n*Candidates:*\n"
+                pattern_list += "\n".join(f"  • `{p.name}`" for p in candidates)
+            if paper:
+                pattern_list += "\n*Paper:*\n"
+                pattern_list += "\n".join(f"  • `{p.name}`" for p in paper)
+
+            if not pattern_list:
+                pattern_list = "\nNo patterns available to promote."
+
+            await update.message.reply_text(
+                "📈 *Promote Pattern*\n\n"
+                "Usage: `/promote <pattern_name> <paper|live>`\n"
+                f"{pattern_list}",
+                parse_mode="Markdown",
+            )
+            return
+
+        pattern_name = args[0]
+        target_status = args[1].lower()
+
+        if target_status not in ("paper", "live"):
+            await update.message.reply_text(
+                "❌ Invalid status. Use `paper` or `live`.",
+                parse_mode="Markdown",
+            )
+            return
+
+        registry = get_pattern_registry()
+        pattern = registry.get_pattern(pattern_name)
+
+        if not pattern:
+            await update.message.reply_text(
+                f"❌ Pattern `{pattern_name}` not found.\n"
+                "Use /patterns to see available patterns.",
+                parse_mode="Markdown",
+            )
+            return
+
+        # Validate promotion path
+        new_status = PatternStatus.PAPER if target_status == "paper" else PatternStatus.LIVE
+        old_status = pattern.status
+
+        if new_status == PatternStatus.LIVE and old_status == PatternStatus.CANDIDATE:
+            # Warn about skipping paper validation
+            await update.message.reply_text(
+                f"⚠️ *Warning*: Promoting directly to LIVE skips paper validation.\n\n"
+                f"Pattern: `{pattern_name}`\n"
+                f"From: {old_status.value} → To: {new_status.value}\n\n"
+                f"Proceeding with promotion...",
+                parse_mode="Markdown",
+            )
+
+        success = registry.promote_pattern(pattern_name, new_status)
+
+        if success:
+            emoji = "🟡" if new_status == PatternStatus.PAPER else "🟢"
+            await update.message.reply_text(
+                f"{emoji} *Pattern Promoted*\n\n"
+                f"Pattern: `{pattern_name}`\n"
+                f"Status: {old_status.value} → *{new_status.value}*\n\n"
+                f"Use /patterns to view all patterns.",
+                parse_mode="Markdown",
+            )
+        else:
+            await update.message.reply_text(f"❌ Failed to promote pattern `{pattern_name}`.")
+
+    async def _cmd_retire(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /retire command - retire a pattern that's no longer working."""
+        if not self._is_authorized(update):
+            await self._send_unauthorized_response(update)
+            return
+
+        from .pattern_discovery import get_pattern_registry
+
+        args = context.args
+        if not args:
+            # Show usage and list active patterns
+            registry = get_pattern_registry()
+            live = registry.get_live_patterns()
+            paper = registry.get_paper_patterns()
+            candidates = registry.get_candidate_patterns()
+
+            pattern_list = ""
+            if live:
+                pattern_list += "\n*Live:*\n"
+                pattern_list += "\n".join(f"  • `{p.name}`" for p in live)
+            if paper:
+                pattern_list += "\n*Paper:*\n"
+                pattern_list += "\n".join(f"  • `{p.name}`" for p in paper)
+            if candidates:
+                pattern_list += "\n*Candidates:*\n"
+                pattern_list += "\n".join(f"  • `{p.name}`" for p in candidates)
+
+            if not pattern_list:
+                pattern_list = "\nNo patterns available to retire."
+
+            await update.message.reply_text(
+                "🔴 *Retire Pattern*\n\n"
+                "Usage: `/retire <pattern_name> [reason]`\n"
+                f"{pattern_list}",
+                parse_mode="Markdown",
+            )
+            return
+
+        pattern_name = args[0]
+        reason = " ".join(args[1:]) if len(args) > 1 else "Manually retired"
+
+        registry = get_pattern_registry()
+        pattern = registry.get_pattern(pattern_name)
+
+        if not pattern:
+            await update.message.reply_text(
+                f"❌ Pattern `{pattern_name}` not found.\n"
+                "Use /patterns to see available patterns.",
+                parse_mode="Markdown",
+            )
+            return
+
+        old_status = pattern.status
+        success = registry.retire_pattern(pattern_name, reason)
+
+        if success:
+            await update.message.reply_text(
+                f"🔴 *Pattern Retired*\n\n"
+                f"Pattern: `{pattern_name}`\n"
+                f"Previous status: {old_status.value}\n"
+                f"Reason: {reason}\n\n"
+                f"The pattern will no longer trade.",
+                parse_mode="Markdown",
+            )
+        else:
+            await update.message.reply_text(f"❌ Failed to retire pattern `{pattern_name}`.")
 
     # ========== E*TRADE Authentication Commands ==========
 
