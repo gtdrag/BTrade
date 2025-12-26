@@ -168,6 +168,20 @@ class SmartScheduler:
             misfire_grace_time=300,
         )
 
+        # Trailing hedge check - every 5 minutes from 9:40 AM to 3:50 PM ET
+        self.scheduler.add_job(
+            self._job_hedge_check,
+            CronTrigger(
+                day_of_week="mon-fri",
+                hour="9-15",
+                minute="*/5",
+                timezone=ET,
+            ),
+            id="hedge_check",
+            name="Trailing Hedge Check",
+            misfire_grace_time=120,
+        )
+
         # Token renewal for E*TRADE (if live mode) - 8:00 AM ET
         if not self.bot.is_paper_mode and self.bot.client:
             self.scheduler.add_job(
@@ -658,6 +672,89 @@ class SmartScheduler:
         except Exception as e:
             logger.error(f"Close positions job failed: {e}")
             self._error_count += 1
+
+    def _job_hedge_check(self):
+        """Check and execute trailing hedges if position has gained enough."""
+        now = get_et_now()
+
+        if not is_trading_day(now.date()):
+            return
+
+        # Only run during market hours (9:40 AM - 3:50 PM ET)
+        if now.hour < 9 or (now.hour == 9 and now.minute < 40):
+            return
+        if now.hour > 15 or (now.hour == 15 and now.minute > 50):
+            return
+
+        # Check if we have a position to hedge
+        if not self.bot.hedge_manager.position:
+            return
+
+        try:
+            result = self.bot.check_and_execute_hedge()
+
+            if result and result.success:
+                logger.info(
+                    f"Trailing hedge executed: {result.shares} {result.etf} @ ${result.price:.2f}",
+                )
+
+                # Send Telegram notification
+                self._send_hedge_notification(result)
+
+                self.db.log_event(
+                    "HEDGE_EXECUTED",
+                    f"Trailing hedge: {result.shares} {result.etf}",
+                    {
+                        "etf": result.etf,
+                        "shares": result.shares,
+                        "price": result.price,
+                        "value": result.total_value,
+                        "is_paper": result.is_paper,
+                    },
+                )
+
+        except Exception as e:
+            logger.error(f"Hedge check job failed: {e}")
+
+    def _send_hedge_notification(self, result):
+        """Send Telegram notification for hedge execution."""
+        import asyncio
+
+        try:
+            from .telegram_bot import TelegramBot
+
+            async def _notify():
+                bot = TelegramBot()
+                await bot.initialize()
+                mode = "[PAPER]" if result.is_paper else "[LIVE]"
+
+                # Get hedge status
+                status = self.bot.hedge_manager.get_status()
+                total_hedge_pct = status.get("hedge", {}).get("total_pct", 0)
+
+                message = (
+                    f"🛡️ *Trailing Hedge Executed*\n\n"
+                    f"{mode} Bought {result.shares} {result.etf}\n"
+                    f"Price: ${result.price:.2f}\n"
+                    f"Value: ${result.total_value:.2f}\n\n"
+                    f"Total hedge: {total_hedge_pct:.0f}% of position"
+                )
+
+                await bot._bot.send_message(
+                    chat_id=bot._chat_id,
+                    text=message,
+                    parse_mode="Markdown",
+                )
+
+            try:
+                loop = asyncio.get_event_loop()
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+            loop.run_until_complete(_notify())
+
+        except Exception as e:
+            logger.warning(f"Failed to send hedge notification: {e}")
 
     def _job_renew_token(self):
         """Renew E*TRADE token."""

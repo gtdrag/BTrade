@@ -23,6 +23,7 @@ from .etrade_client import ETradeAPIError, ETradeAuthError, ETradeClient
 from .notifications import NotificationConfig, NotificationManager, NotificationType
 from .smart_strategy import Signal, SmartStrategy, StrategyConfig, TodaySignal
 from .telegram_bot import ApprovalResult, TelegramNotifier
+from .trailing_hedge import get_hedge_manager
 from .utils import get_et_now
 
 logger = logging.getLogger(__name__)
@@ -126,6 +127,9 @@ class TradingBot:
 
         # Daily trade tracking to prevent duplicates
         self._trades_today: Dict[str, str] = {}  # signal_type -> timestamp
+
+        # Trailing hedge manager
+        self.hedge_manager = get_hedge_manager()
 
     @property
     def is_paper_mode(self) -> bool:
@@ -676,6 +680,13 @@ class TradingBot:
             "signal": signal.signal.value,
         }
 
+        # Register with hedge manager for trailing hedge tracking
+        self.hedge_manager.register_position(
+            instrument=etf,
+            shares=shares,
+            entry_price=price,
+        )
+
         logger.info(f"[PAPER] Bought {shares} {etf} @ ${price:.2f} = ${total_value:.2f}")
 
         return TradeResult(
@@ -722,6 +733,13 @@ class TradingBot:
 
             # Get fill price (may need to poll for fill)
             fill_price = estimated_value / shares if shares > 0 else 0
+
+            # Register with hedge manager for trailing hedge tracking
+            self.hedge_manager.register_position(
+                instrument=etf,
+                shares=shares,
+                entry_price=fill_price,
+            )
 
             logger.info(f"[LIVE] Bought {shares} {etf} - Order ID: {order_id}")
 
@@ -785,6 +803,9 @@ class TradingBot:
 
         # Remove position
         del self._paper_positions[etf]
+
+        # Clear hedge manager tracking
+        self.hedge_manager.clear_position()
 
         logger.info(
             f"[PAPER] Sold {shares} {etf} @ ${exit_price:.2f} = ${total_value:.2f} (P&L: ${pnl:+.2f})"
@@ -868,6 +889,9 @@ class TradingBot:
 
             order_id = str(order_response.get("OrderId", ""))
 
+            # Clear hedge manager tracking
+            self.hedge_manager.clear_position()
+
             logger.info(f"[LIVE] Sold {shares} {etf} - Order ID: {order_id}")
 
             return TradeResult(
@@ -889,6 +913,118 @@ class TradingBot:
                 error=str(e),
                 is_paper=False,
             )
+
+    def check_and_execute_hedge(self) -> Optional[TradeResult]:
+        """
+        Check if a trailing hedge should be added and execute it.
+
+        Called periodically during market hours to monitor position gains
+        and add inverse positions to lock in profits.
+
+        Returns:
+            TradeResult if hedge was executed, None otherwise
+        """
+        if not self.hedge_manager.position:
+            return None
+
+        # Get current price for the position
+        position = self.hedge_manager.position
+        quote = self.get_quote(position.instrument)
+        if not quote or quote.get("current_price", 0) <= 0:
+            logger.warning(f"Could not get quote for {position.instrument}")
+            return None
+
+        current_price = quote["current_price"]
+
+        # Check if hedge should be triggered
+        hedge_order = self.hedge_manager.check_and_hedge(current_price)
+        if not hedge_order:
+            return None
+
+        # Execute the hedge
+        hedge_instrument = hedge_order["instrument"]
+        hedge_value = hedge_order["value"]
+
+        # Get price for hedge instrument
+        hedge_quote = self.get_quote(hedge_instrument)
+        if not hedge_quote or hedge_quote.get("current_price", 0) <= 0:
+            logger.warning(f"Could not get quote for hedge instrument {hedge_instrument}")
+            return None
+
+        hedge_price = hedge_quote["current_price"]
+        hedge_shares = max(1, int(hedge_value / hedge_price))
+
+        logger.info(
+            f"Executing trailing hedge: {hedge_shares} {hedge_instrument} @ ${hedge_price:.2f}",
+            reason=hedge_order["reason"],
+            position_gain_pct=f"{hedge_order['position_gain_pct']:.2f}%",
+        )
+
+        if self.is_paper_mode:
+            # Paper trade the hedge
+            self._paper_capital -= hedge_shares * hedge_price
+            if hedge_instrument not in self._paper_positions:
+                self._paper_positions[hedge_instrument] = {
+                    "shares": hedge_shares,
+                    "entry_price": hedge_price,
+                    "entry_time": get_et_now(),
+                    "signal": "HEDGE",
+                }
+            else:
+                # Add to existing hedge position
+                self._paper_positions[hedge_instrument]["shares"] += hedge_shares
+
+            # Update hedge manager
+            self.hedge_manager.update_hedge_shares(hedge_shares)
+
+            return TradeResult(
+                success=True,
+                signal=Signal.CASH,
+                etf=hedge_instrument,
+                action="BUY",
+                shares=hedge_shares,
+                price=hedge_price,
+                total_value=hedge_shares * hedge_price,
+                order_id=f"HEDGE-{get_et_now().strftime('%Y%m%d%H%M%S')}",
+                is_paper=True,
+            )
+        else:
+            # Live trade the hedge via E*TRADE
+            if not self.client or not self.client.is_authenticated():
+                logger.error("Cannot execute live hedge: E*TRADE not authenticated")
+                return None
+
+            try:
+                order_response = self.client.place_order(
+                    account_id_key=self.config.account_id_key,
+                    symbol=hedge_instrument,
+                    action="BUY",
+                    quantity=hedge_shares,
+                    order_type="MARKET",
+                )
+
+                order_id = str(order_response.get("OrderId", ""))
+                self.hedge_manager.update_hedge_shares(hedge_shares)
+
+                logger.info(
+                    f"[LIVE] Hedge executed: {hedge_shares} {hedge_instrument} - Order ID: {order_id}"
+                )
+
+                return TradeResult(
+                    success=True,
+                    signal=Signal.CASH,
+                    etf=hedge_instrument,
+                    action="BUY",
+                    shares=hedge_shares,
+                    price=hedge_price,
+                    total_value=hedge_shares * hedge_price,
+                    order_id=order_id,
+                    is_paper=False,
+                )
+
+            except ETradeAPIError as e:
+                logger.error(f"Failed to execute live hedge: {e}")
+                return None
 
     def _notify_trade(self, result: TradeResult, signal: TodaySignal):
         """Send trade notification."""

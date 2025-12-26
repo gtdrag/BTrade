@@ -145,6 +145,7 @@ class TelegramBot:
         self._app.add_handler(CommandHandler("analyses", self._cmd_analyses))
         self._app.add_handler(CommandHandler("promote", self._cmd_promote))
         self._app.add_handler(CommandHandler("retire", self._cmd_retire))
+        self._app.add_handler(CommandHandler("hedge", self._cmd_hedge))
 
         # Add command handlers - E*TRADE authentication
         self._app.add_handler(CommandHandler("auth", self._cmd_auth))
@@ -281,6 +282,8 @@ class TelegramBot:
             "/analyses - View past Claude analyses\n"
             "/promote - Promote pattern to paper/live\n"
             "/retire - Retire a pattern\n\n"
+            "🛡️ *Risk Management:*\n"
+            "/hedge - Trailing hedge status/control\n\n"
             "🔐 E\\*TRADE Auth:\n"
             "/auth - Start E\\*TRADE login\n"
             "/verify CODE - Complete login\n\n"
@@ -390,7 +393,7 @@ class TelegramBot:
         else:
             self.trading_bot.config.mode = TradingMode.PAPER
             await update.message.reply_text(
-                "📝 *Switched to PAPER MODE*\n\n" "Simulated trades only. No real money at risk.",
+                "📝 *Switched to PAPER MODE*\n\nSimulated trades only. No real money at risk.",
                 parse_mode="Markdown",
             )
 
@@ -433,7 +436,7 @@ class TelegramBot:
             self.scheduler.scheduler.resume()
             self._is_paused = False
             await update.message.reply_text(
-                "▶️ *Scheduler RESUMED*\n\n" "Trading operations are active again.",
+                "▶️ *Scheduler RESUMED*\n\nTrading operations are active again.",
                 parse_mode="Markdown",
             )
             logger.info("Scheduler resumed via Telegram")
@@ -488,7 +491,7 @@ class TelegramBot:
 
             if not positions:
                 await update.message.reply_text(
-                    "📭 *No Open Positions*\n\n" "Currently 100% in cash.",
+                    "📭 *No Open Positions*\n\nCurrently 100% in cash.",
                     parse_mode="Markdown",
                 )
                 return
@@ -535,7 +538,7 @@ class TelegramBot:
 
             if not is_trading_day(now.date()):
                 await update.message.reply_text(
-                    f"📅 *Market Closed*\n\n" f"Today is {day_name}. No trading.",
+                    f"📅 *Market Closed*\n\nToday is {day_name}. No trading.",
                     parse_mode="Markdown",
                 )
                 return
@@ -619,7 +622,7 @@ class TelegramBot:
 
             if not events:
                 await update.message.reply_text(
-                    "📋 *Activity Logs*\n\n" "No activity logged today.",
+                    "📋 *Activity Logs*\n\nNo activity logged today.",
                     parse_mode="Markdown",
                 )
                 return
@@ -939,8 +942,7 @@ class TelegramBot:
 
         if not pattern:
             await update.message.reply_text(
-                f"❌ Pattern `{pattern_name}` not found.\n"
-                "Use /patterns to see available patterns.",
+                f"❌ Pattern `{pattern_name}` not found.\nUse /patterns to see available patterns.",
                 parse_mode="Markdown",
             )
             return
@@ -973,6 +975,97 @@ class TelegramBot:
         else:
             await update.message.reply_text(f"❌ Failed to promote pattern `{pattern_name}`.")
 
+    async def _cmd_hedge(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /hedge command - view and control trailing hedge settings."""
+        if not self._is_authorized(update):
+            await self._send_unauthorized_response(update)
+            return
+
+        from .trailing_hedge import get_hedge_manager
+
+        args = context.args
+        manager = get_hedge_manager()
+
+        if not args:
+            # Show current hedge status
+            status = manager.get_status()
+
+            if not status.get("active"):
+                lines = [
+                    "🛡️ *Trailing Hedge Status*\n",
+                    f"Enabled: {'✅' if manager.config.enabled else '❌'}",
+                    "",
+                    "*No active position being tracked*",
+                    "",
+                    "Hedges will activate after opening a position.",
+                    "",
+                    "*Tier Configuration:*",
+                ]
+                for i, tier in enumerate(manager.config.tiers, 1):
+                    lines.append(
+                        f"  {i}. +{tier.gain_threshold_pct}% gain → +{tier.hedge_size_pct}% hedge"
+                    )
+                lines.append(f"\nMax hedge: {manager.config.max_hedge_pct}%")
+                lines.append("\n*Commands:*")
+                lines.append("`/hedge on` - Enable hedging")
+                lines.append("`/hedge off` - Disable hedging")
+            else:
+                pos = status["position"]
+                hedge = status["hedge"]
+
+                lines = [
+                    "🛡️ *Trailing Hedge Status*\n",
+                    f"Enabled: {'✅' if status['enabled'] else '❌'}",
+                    "",
+                    "*Active Position:*",
+                    f"  • {pos['instrument']}: {pos['shares']} shares",
+                    f"  • Entry: ${pos['entry_price']:.2f}",
+                    f"  • Value: ${pos['original_value']:.2f}",
+                    "",
+                    "*Hedge Status:*",
+                    f"  • Instrument: {hedge['instrument']}",
+                    f"  • Shares: {hedge['shares']}",
+                    f"  • Coverage: {hedge['total_pct']:.1f}%",
+                    f"  • Tiers triggered: {hedge['tiers_triggered']}/{hedge['tiers_total']}",
+                ]
+
+                # Show tier details
+                lines.append("\n*Tier Configuration:*")
+                for i, tier in enumerate(manager.config.tiers, 1):
+                    status_emoji = "✅" if tier.triggered else "⏳"
+                    lines.append(
+                        f"  {status_emoji} +{tier.gain_threshold_pct}% → "
+                        f"+{tier.hedge_size_pct}% hedge"
+                    )
+
+            await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+            return
+
+        # Handle subcommands
+        subcommand = args[0].lower()
+
+        if subcommand == "on":
+            manager.config.enabled = True
+            await update.message.reply_text(
+                "✅ *Trailing Hedge ENABLED*\n\nHedges will be added as positions gain value.",
+                parse_mode="Markdown",
+            )
+        elif subcommand == "off":
+            manager.config.enabled = False
+            await update.message.reply_text(
+                "❌ *Trailing Hedge DISABLED*\n\nNo automatic hedges will be placed.",
+                parse_mode="Markdown",
+            )
+        else:
+            await update.message.reply_text(
+                "❌ Unknown subcommand.\n\n"
+                "Usage:\n"
+                "`/hedge` - View status\n"
+                "`/hedge on` - Enable hedging\n"
+                "`/hedge off` - Disable hedging",
+                parse_mode="Markdown",
+            )
+
     async def _cmd_retire(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /retire command - retire a pattern that's no longer working."""
         if not self._is_authorized(update):
@@ -1004,9 +1097,7 @@ class TelegramBot:
                 pattern_list = "\nNo patterns available to retire."
 
             await update.message.reply_text(
-                "🔴 *Retire Pattern*\n\n"
-                "Usage: `/retire <pattern_name> [reason]`\n"
-                f"{pattern_list}",
+                f"🔴 *Retire Pattern*\n\nUsage: `/retire <pattern_name> [reason]`\n{pattern_list}",
                 parse_mode="Markdown",
             )
             return
@@ -1019,8 +1110,7 @@ class TelegramBot:
 
         if not pattern:
             await update.message.reply_text(
-                f"❌ Pattern `{pattern_name}` not found.\n"
-                "Use /patterns to see available patterns.",
+                f"❌ Pattern `{pattern_name}` not found.\nUse /patterns to see available patterns.",
                 parse_mode="Markdown",
             )
             return
