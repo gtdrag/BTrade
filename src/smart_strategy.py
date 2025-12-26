@@ -36,6 +36,7 @@ class Signal(Enum):
     CRASH_DAY = "crash_day"  # Buy SBIT on intraday crash
     PUMP_DAY = "pump_day"  # Buy BITU on intraday pump
     TEN_AM_DUMP = "ten_am_dump"  # Buy SBIT at 9:35, sell at 10:30 (daily)
+    DISCOVERED = "discovered"  # AI-discovered pattern from registry
     CASH = "cash"  # No position
 
 
@@ -162,6 +163,21 @@ class BTCOvernightStatus:
 
 
 @dataclass
+class DiscoveredPatternStatus:
+    """Status of a discovered pattern from the pattern registry."""
+
+    pattern_name: str  # Name of the pattern from registry
+    display_name: str  # Human readable name
+    should_enter: bool  # True if pattern should trigger now
+    should_exit: bool  # True if pattern should exit now
+    instrument: str  # BITU or SBIT
+    entry_time: str
+    exit_time: str
+    confidence: float  # Win rate
+    expected_edge: float  # Expected return %
+
+
+@dataclass
 class TodaySignal:
     """Today's trading signal."""
 
@@ -174,6 +190,7 @@ class TodaySignal:
     ten_am_dump_status: Optional[TenAmDumpStatus] = None
     weekend_gap: Optional[WeekendGapInfo] = None
     btc_overnight: Optional[BTCOvernightStatus] = None
+    discovered_pattern: Optional[DiscoveredPatternStatus] = None  # AI-discovered pattern
 
     def should_trade(self) -> bool:
         return self.signal != Signal.CASH
@@ -191,7 +208,12 @@ class SmartStrategy:
     - No signal → Cash
     """
 
-    def __init__(self, config: Optional[StrategyConfig] = None, db: Optional[Database] = None):
+    def __init__(
+        self,
+        config: Optional[StrategyConfig] = None,
+        db: Optional[Database] = None,
+        pattern_registry: Optional[Any] = None,  # Optional PatternRegistry from pattern_discovery
+    ):
         self.config = config or StrategyConfig()
         self.db = db or get_database()
         self._ibit_data: Optional[pd.DataFrame] = None
@@ -203,6 +225,11 @@ class SmartStrategy:
         self._ten_am_dump_traded_today: bool = False
         self._ten_am_dump_trade_date: Optional[date] = None
         self._ten_am_dump_position_open: bool = False
+
+        # Pattern registry for AI-discovered patterns (optional)
+        self._pattern_registry = pattern_registry
+        self._discovered_pattern_traded_today: Dict[str, bool] = {}
+        self._discovered_pattern_trade_date: Optional[date] = None
 
         # Initialize Alpaca data provider
         self._alpaca = AlpacaProvider(
@@ -644,6 +671,50 @@ class SmartStrategy:
         self._ten_am_dump_position_open = False
         self._ten_am_dump_traded_today = True
 
+    def get_discovered_pattern_status(self) -> Optional[DiscoveredPatternStatus]:
+        """
+        Check for any active discovered patterns from the pattern registry.
+
+        Returns the highest priority pattern that should trade now, or None.
+        """
+        if self._pattern_registry is None:
+            return None
+
+        today = date.today()
+        now = datetime.now()
+
+        # Reset flags if it's a new day
+        if self._discovered_pattern_trade_date != today:
+            self._discovered_pattern_traded_today = {}
+            self._discovered_pattern_trade_date = today
+
+        # Get active pattern from registry
+        active_pattern = self._pattern_registry.get_active_signal(now)
+
+        if active_pattern is None:
+            return None
+
+        # Check if we've already traded this pattern today
+        if self._discovered_pattern_traded_today.get(active_pattern.name, False):
+            return None
+
+        return DiscoveredPatternStatus(
+            pattern_name=active_pattern.name,
+            display_name=active_pattern.display_name,
+            should_enter=active_pattern.should_trade_now(now),
+            should_exit=active_pattern.should_exit_now(now),
+            instrument=active_pattern.instrument,
+            entry_time=active_pattern.entry_time,
+            exit_time=active_pattern.exit_time,
+            confidence=active_pattern.confidence,
+            expected_edge=active_pattern.expected_edge,
+        )
+
+    def mark_discovered_pattern_traded(self, pattern_name: str):
+        """Mark that we've traded a discovered pattern today."""
+        self._discovered_pattern_traded_today[pattern_name] = True
+        self._discovered_pattern_trade_date = date.today()
+
     def get_today_signal(
         self,
         check_crash_day: bool = True,
@@ -780,6 +851,22 @@ class SmartStrategy:
                 ten_am_dump_status=ten_am_status,
                 weekend_gap=weekend_gap,
                 btc_overnight=btc_overnight,
+            )
+
+        # Check discovered patterns from registry (lowest priority among active signals)
+        discovered_status = self.get_discovered_pattern_status()
+        if discovered_status and discovered_status.should_enter:
+            return TodaySignal(
+                signal=Signal.DISCOVERED,
+                etf=discovered_status.instrument,
+                reason=f"AI Pattern: {discovered_status.display_name} ({discovered_status.confidence:.0%} conf, {discovered_status.expected_edge:.2f}% edge)",
+                prev_day_return=prev_return,
+                crash_day_status=crash_status,
+                pump_day_status=pump_status,
+                ten_am_dump_status=ten_am_status,
+                weekend_gap=weekend_gap,
+                btc_overnight=btc_overnight,
+                discovered_pattern=discovered_status,
             )
 
         # No signal - stay in cash

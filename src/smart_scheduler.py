@@ -223,6 +223,16 @@ class SmartScheduler:
             misfire_grace_time=600,
         )
 
+        # Monthly pattern analysis - 1st of each month at 6:00 AM ET
+        # Runs LLM analysis to discover new trading patterns
+        self.scheduler.add_job(
+            self._job_pattern_analysis,
+            CronTrigger(day=1, hour=6, minute=0, timezone=ET),
+            id="pattern_analysis",
+            name="Monthly Pattern Analysis",
+            misfire_grace_time=3600,  # 1 hour grace period
+        )
+
         logger.info("Scheduler jobs configured")
 
     def _job_auth_reminder(self):
@@ -897,6 +907,84 @@ class SmartScheduler:
             asyncio.set_event_loop(loop)
         loop.run_until_complete(_send_health())
         logger.info(f"Health check sent: {len(issues)} issues found")
+
+    def _job_pattern_analysis(self):
+        """Monthly pattern analysis - runs LLM to discover new trading patterns."""
+        import asyncio
+
+        from .pattern_discovery import (
+            PatternStatus,
+            get_data_collector,
+            get_pattern_analyzer,
+            get_pattern_registry,
+        )
+
+        logger.info("Starting monthly pattern analysis")
+
+        async def _run_analysis():
+            try:
+                # Collect historical data
+                collector = get_data_collector(lookback_days=90)
+                data = collector.collect_from_alpaca()
+
+                if not data:
+                    logger.error("Failed to collect market data for pattern analysis")
+                    return
+
+                # Get current patterns to avoid duplicates
+                registry = get_pattern_registry()
+                active_patterns = registry.get_live_patterns()
+
+                # Run LLM analysis
+                analyzer = get_pattern_analyzer()
+                new_patterns = await analyzer.analyze(
+                    day_of_week_stats=data.get("day_of_week_stats", {}),
+                    hourly_stats=data.get("hourly_stats", {}),
+                    overnight_stats=data.get("overnight_stats", {}),
+                    active_patterns=active_patterns,
+                )
+
+                if not new_patterns:
+                    logger.info("No new patterns discovered")
+                    message = "📊 Monthly Pattern Analysis Complete\n\nNo new patterns discovered."
+                else:
+                    # Add new patterns as candidates
+                    for pattern in new_patterns:
+                        pattern.status = PatternStatus.CANDIDATE
+                        registry.add_pattern(pattern)
+
+                    pattern_list = "\n".join(
+                        f"• {p.display_name} ({p.instrument}, {p.confidence:.0%} conf)"
+                        for p in new_patterns
+                    )
+                    message = (
+                        f"📊 Monthly Pattern Analysis Complete\n\n"
+                        f"Discovered {len(new_patterns)} new pattern(s):\n{pattern_list}\n\n"
+                        f"Status: CANDIDATE (paper trade before promoting)"
+                    )
+
+                # Send Telegram notification
+                bot = TelegramBot()
+                await bot.initialize()
+                await bot.send_message(message)
+                logger.info(f"Pattern analysis complete: {len(new_patterns)} new patterns")
+
+            except Exception as e:
+                logger.error(f"Pattern analysis failed: {e}")
+                # Send error notification
+                try:
+                    bot = TelegramBot()
+                    await bot.initialize()
+                    await bot.send_message(f"❌ Pattern analysis failed: {e}")
+                except Exception:
+                    pass
+
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        loop.run_until_complete(_run_analysis())
 
     def start(self):
         """Start the scheduler."""

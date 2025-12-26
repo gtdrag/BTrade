@@ -1,0 +1,26 @@
+{
+  "version": "1.0",
+  "updated_at": "2025-12-26T16:00:00-05:00",
+  "patterns": {
+    "late_afternoon_strength": {
+      "name": "late_afternoon_strength",
+      "display_name": "Late Afternoon Strength",
+      "signal": "long",
+      "instrument": "BITU",
+      "entry_time": "15:30",
+      "exit_time": "15:55",
+      "conditions": [],
+      "confidence": 0.58,
+      "sample_size": 62,
+      "expected_edge": 0.22,
+      "status": "candidate",
+      "discovered_at": "2025-12-26T06:00:00-05:00",
+      "last_validated": "2025-12-26T06:00:00-05:00",
+      "validation_trades": 0,
+      "validation_pnl": 0.0,
+      "priority": 75,
+      "source": "llm_discovery",
+      "notes": "Power hour strength pattern - buy BITU at 3:30 PM, sell at 3:55 PM. Based on 62 samples with 58% win rate."
+    }
+  }
+}
