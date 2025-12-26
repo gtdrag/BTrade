@@ -401,8 +401,22 @@ class TradingBot:
                         is_paper=self.is_paper_mode,
                     )
                 elif approval == ApprovalResult.ERROR:
-                    logger.warning("Telegram approval error - proceeding with trade")
-                    # Continue with trade on Telegram error (fail-open for paper mode)
+                    if self.is_paper_mode:
+                        logger.warning("Telegram approval error - proceeding with paper trade")
+                        # Fail-open for paper mode only (no real money at risk)
+                    else:
+                        # FAIL-SECURE: Never execute live trades without proper approval
+                        logger.error("Telegram approval error - BLOCKING live trade for safety")
+                        return TradeResult(
+                            success=False,
+                            signal=signal.signal,
+                            etf=etf,
+                            action="BUY",
+                            shares=shares,
+                            price=price,
+                            error="Telegram error - live trade blocked for safety. Check Telegram connectivity.",
+                            is_paper=False,
+                        )
 
                 logger.info("Trade approved via Telegram")
 
