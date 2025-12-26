@@ -149,6 +149,16 @@ class SmartScheduler:
                 misfire_grace_time=120,
             )
 
+        # 10 AM Dump exit - 10:30 AM ET (close SBIT from morning 10 AM dump trade)
+        if self.bot.config.strategy.ten_am_dump_enabled:
+            self.scheduler.add_job(
+                self._job_ten_am_dump_exit,
+                CronTrigger(day_of_week="mon-fri", hour=10, minute=30, timezone=ET),
+                id="ten_am_dump_exit",
+                name="10 AM Dump Exit",
+                misfire_grace_time=120,
+            )
+
         # Close positions - 3:55 PM ET (before market close)
         self.scheduler.add_job(
             self._job_close_positions,
@@ -302,6 +312,11 @@ class SmartScheduler:
                 if result.signal != Signal.CASH:
                     logger.info(f"Trade executed: {result.action} {result.shares} {result.etf}")
                     # Trade notification is handled by execute_signal via approval flow
+
+                    # Mark 10 AM dump position if that's what we entered
+                    if result.signal == Signal.TEN_AM_DUMP:
+                        self.bot.strategy.mark_ten_am_dump_entered()
+                        logger.info("Marked 10 AM dump position as open (will exit at 10:30)")
                 else:
                     # No signal today - send notification
                     logger.info("No trade signal today")
@@ -532,6 +547,77 @@ class SmartScheduler:
 
         except Exception as e:
             logger.error(f"Pump day check failed: {e}")
+            self._error_count += 1
+
+    def _job_ten_am_dump_exit(self):
+        """Exit 10 AM dump position at 10:30 AM ET."""
+        import asyncio
+
+        now = get_et_now()
+
+        if not is_trading_day(now.date()):
+            return
+
+        # Check if we have a 10 AM dump position open
+        if not self.bot.strategy._ten_am_dump_position_open:
+            logger.debug("No 10 AM dump position to close")
+            return
+
+        logger.info("Executing 10 AM dump exit at 10:30 AM ET")
+
+        try:
+            # Close the SBIT position
+            result = self.bot.close_position("SBIT")
+
+            if result.success and result.shares > 0:
+                # Mark the position as closed
+                self.bot.strategy.mark_ten_am_dump_exited()
+
+                # Calculate P/L
+                pnl = result.pnl if hasattr(result, "pnl") else 0
+                pnl_str = f"${pnl:+.2f}" if pnl else "TBD"
+
+                # Send notification
+                async def _send_exit():
+                    bot = TelegramBot()
+                    await bot.initialize()
+                    await bot.send_message(
+                        f"🔔 *10 AM Dump Exit*\n\n"
+                        f"Sold: {result.shares} SBIT @ ${result.price:.2f}\n"
+                        f"P/L: {pnl_str}\n"
+                        f"Time: {now.strftime('%I:%M %p ET')}\n\n"
+                        "Strategy: Captured 10 AM weakness window",
+                        parse_mode="Markdown",
+                    )
+
+                try:
+                    loop = asyncio.get_event_loop()
+                except RuntimeError:
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                loop.run_until_complete(_send_exit())
+
+                logger.info(f"10 AM dump exit: Sold {result.shares} SBIT @ ${result.price:.2f}")
+
+                self.db.log_event(
+                    "TEN_AM_DUMP_EXIT",
+                    "Exited 10 AM dump position",
+                    {
+                        "shares": result.shares,
+                        "price": result.price,
+                        "pnl": pnl,
+                        "timestamp": now.isoformat(),
+                    },
+                )
+            elif result.shares == 0:
+                # No position to close
+                logger.info("No SBIT position to close for 10 AM dump")
+                self.bot.strategy.mark_ten_am_dump_exited()
+            else:
+                logger.error(f"Failed to close 10 AM dump position: {result.error}")
+
+        except Exception as e:
+            logger.error(f"10 AM dump exit failed: {e}")
             self._error_count += 1
 
     def _job_close_positions(self):

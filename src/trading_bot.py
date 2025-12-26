@@ -979,6 +979,9 @@ def create_trading_bot(
     short_thursday_enabled: bool = True,
     crash_day_enabled: bool = True,
     crash_day_threshold: float = -2.0,
+    pump_day_enabled: bool = True,
+    pump_day_threshold: float = 2.0,
+    ten_am_dump_enabled: bool = True,
     max_position_pct: float = 100.0,
     max_position_usd: Optional[float] = None,
     notification_config: Optional[NotificationConfig] = None,
@@ -997,6 +1000,9 @@ def create_trading_bot(
         short_thursday_enabled: Enable short Thursday strategy
         crash_day_enabled: Enable intraday crash detection
         crash_day_threshold: Threshold for intraday crash signal
+        pump_day_enabled: Enable intraday pump detection
+        pump_day_threshold: Threshold for intraday pump signal
+        ten_am_dump_enabled: Enable 10 AM dump strategy (daily 9:35-10:30)
         max_position_pct: Max percentage of cash per trade (1-100)
         max_position_usd: Max dollar amount per trade (optional)
         notification_config: Optional notification configuration
@@ -1012,6 +1018,9 @@ def create_trading_bot(
         short_thursday_enabled=short_thursday_enabled,
         crash_day_enabled=crash_day_enabled,
         crash_day_threshold=crash_day_threshold,
+        pump_day_enabled=pump_day_enabled,
+        pump_day_threshold=pump_day_threshold,
+        ten_am_dump_enabled=ten_am_dump_enabled,
     )
 
     # Parse approval mode
