@@ -182,6 +182,21 @@ class SmartScheduler:
             misfire_grace_time=120,
         )
 
+        # Reversal check - every 5 minutes during market hours
+        # Flips BITU to SBIT if position drops -2% (backed by backtesting)
+        self.scheduler.add_job(
+            self._job_reversal_check,
+            CronTrigger(
+                day_of_week="mon-fri",
+                hour="9-15",
+                minute="*/5",
+                timezone=ET,
+            ),
+            id="reversal_check",
+            name="Position Reversal Check",
+            misfire_grace_time=120,
+        )
+
         # Token renewal for E*TRADE (if live mode) - 8:00 AM ET
         if not self.bot.is_paper_mode and self.bot.client:
             self.scheduler.add_job(
@@ -755,6 +770,88 @@ class SmartScheduler:
 
         except Exception as e:
             logger.warning(f"Failed to send hedge notification: {e}")
+
+    def _job_reversal_check(self):
+        """Check and execute position reversal if BITU is down enough."""
+        now = get_et_now()
+
+        if not is_trading_day(now.date()):
+            return
+
+        # Only run during market hours (9:40 AM - 3:50 PM ET)
+        if now.hour < 9 or (now.hour == 9 and now.minute < 40):
+            return
+        if now.hour > 15 or (now.hour == 15 and now.minute > 50):
+            return
+
+        # Check if we have a BITU position that might need reversing
+        positions = self.bot.get_open_positions()
+        if "BITU" not in positions:
+            return
+
+        try:
+            result = self.bot.check_and_execute_reversal()
+
+            if result and result.success:
+                logger.info(
+                    f"Position reversal executed: {result.shares} {result.etf} @ ${result.price:.2f}",
+                )
+
+                # Send Telegram notification
+                self._send_reversal_notification(result)
+
+                self.db.log_event(
+                    "REVERSAL_NOTIFICATION",
+                    f"Position reversed to {result.etf}",
+                    {
+                        "etf": result.etf,
+                        "shares": result.shares,
+                        "price": result.price,
+                        "value": result.total_value,
+                        "is_paper": result.is_paper,
+                    },
+                )
+
+        except Exception as e:
+            logger.error(f"Reversal check job failed: {e}")
+
+    def _send_reversal_notification(self, result):
+        """Send Telegram notification for position reversal."""
+        import asyncio
+
+        try:
+            from .telegram_bot import TelegramBot
+
+            async def _notify():
+                bot = TelegramBot()
+                await bot.initialize()
+                mode = "[PAPER]" if result.is_paper else "[LIVE]"
+
+                message = (
+                    f"🔄 *Position Reversed!*\n\n"
+                    f"{mode} BITU was down -2% → flipped to SBIT\n\n"
+                    f"New position:\n"
+                    f"• {result.shares} {result.etf}\n"
+                    f"• Price: ${result.price:.2f}\n"
+                    f"• Value: ${result.total_value:.2f}\n\n"
+                    f"_Riding the trend down to EOD close_"
+                )
+
+                await bot._app.bot.send_message(
+                    chat_id=bot.chat_id,
+                    text=message,
+                    parse_mode="Markdown",
+                )
+
+            try:
+                loop = asyncio.get_event_loop()
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+            loop.run_until_complete(_notify())
+
+        except Exception as e:
+            logger.warning(f"Failed to send reversal notification: {e}")
 
     def _job_renew_token(self):
         """Renew E*TRADE token."""

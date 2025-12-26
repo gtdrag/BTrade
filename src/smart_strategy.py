@@ -1,15 +1,17 @@
 """
 Smart Bitcoin ETF Trading Strategy.
 
-Proven strategy with +361.8% backtested return (vs +35.5% IBIT B&H):
-1. 10 AM Dump: Buy SBIT at 9:35, sell at 10:30 (exploits consistent 10 AM weakness)
-2. Mean Reversion: Buy BITU (2x) after IBIT drops -2%+ previous day
-3. Short Thursday: Buy SBIT (2x inverse) every Thursday
-4. Crash Day: Buy SBIT when IBIT drops -2%+ intraday (reactive)
-5. Pump Day: Buy BITU when IBIT rises +2%+ intraday (reactive)
-6. All other days: Stay in cash
+Core strategies:
+1. Mean Reversion: Buy BITU (2x) after IBIT drops -2%+ previous day
+   - With BTC overnight filter (84% vs 17% win rate)
+   - With -2% reversal trigger (flip to SBIT if trade goes against us)
+2. Crash Day: Buy SBIT when IBIT drops -2%+ intraday (reactive)
+3. Pump Day: Buy BITU when IBIT rises +2%+ intraday (reactive)
+4. 10 AM Dump: Buy SBIT at 9:35, sell at 10:30 (time-based)
+5. All other days: Stay in cash
 
 Key insight: Don't predict market direction. Use leverage ONLY on high-probability signals.
+When wrong, reverse position instead of stop-loss (backed by data).
 """
 
 import logging
@@ -61,8 +63,13 @@ class StrategyConfig:
     # Only take mean reversion trades when BTC is UP overnight
     btc_overnight_filter_enabled: bool = True
 
-    # Short Thursday settings
-    short_thursday_enabled: bool = True
+    # Short Thursday settings (DISABLED - backtesting showed negative returns)
+    short_thursday_enabled: bool = False
+
+    # Position reversal settings (flip to inverse when losing)
+    # Backtested: +8.7% return vs -8.1% without reversal
+    reversal_enabled: bool = True
+    reversal_threshold: float = -2.0  # Flip position when down this % intraday
 
     # Crash day settings (intraday reactive)
     crash_day_enabled: bool = True
