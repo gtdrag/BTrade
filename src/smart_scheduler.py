@@ -58,6 +58,54 @@ class SmartScheduler:
             logger.error(f"Job failed: {event.exception}")
             self.db.log_event("SCHEDULER_ERROR", str(event.exception))
 
+    def _log_signal_check(self, job_type: str, signal, now):
+        """Log comprehensive signal check data for analytics."""
+        details = {
+            "job_type": job_type,
+            "timestamp": now.isoformat(),
+            "day_of_week": now.strftime("%A"),
+            "signal": signal.signal.value,
+            "etf": signal.etf,
+            "reason": signal.reason,
+            "prev_day_return": signal.prev_day_return,
+        }
+
+        # Add BTC overnight data if available
+        if signal.btc_overnight:
+            details["btc_overnight"] = {
+                "change_pct": signal.btc_overnight.change_pct,
+                "is_positive": signal.btc_overnight.is_positive,
+                "message": signal.btc_overnight.message,
+            }
+
+        # Add crash day status if available
+        if signal.crash_day_status:
+            details["crash_day"] = {
+                "current_drop_pct": signal.crash_day_status.current_drop_pct,
+                "is_triggered": signal.crash_day_status.is_triggered,
+                "threshold": signal.crash_day_status.threshold,
+            }
+
+        # Add pump day status if available
+        if signal.pump_day_status:
+            details["pump_day"] = {
+                "current_gain_pct": signal.pump_day_status.current_gain_pct,
+                "is_triggered": signal.pump_day_status.is_triggered,
+                "threshold": signal.pump_day_status.threshold,
+            }
+
+        # Add weekend gap if available
+        if signal.weekend_gap:
+            details["weekend_gap"] = {
+                "gap_pct": signal.weekend_gap.gap_pct,
+                "alert_level": signal.weekend_gap.alert_level.value
+                if signal.weekend_gap.alert_level
+                else None,
+            }
+
+        self.db.log_event("SIGNAL_CHECK", f"{job_type}: {signal.signal.value}", details)
+        logger.info(f"Signal check logged: {job_type} -> {signal.signal.value}")
+
     def setup_jobs(self):
         """Set up scheduled jobs."""
         self.scheduler.remove_all_jobs()
@@ -156,7 +204,79 @@ class SmartScheduler:
             misfire_grace_time=600,
         )
 
+        # Daily auth reminder - 8:00 AM ET (prompt to authenticate before trading)
+        self.scheduler.add_job(
+            self._job_auth_reminder,
+            CronTrigger(day_of_week="mon-fri", hour=8, minute=0, timezone=ET),
+            id="auth_reminder",
+            name="Daily Auth Reminder",
+            misfire_grace_time=600,
+        )
+
         logger.info("Scheduler jobs configured")
+
+    def _job_auth_reminder(self):
+        """Send daily authentication reminder at 8:00 AM ET."""
+        import asyncio
+
+        now = get_et_now()
+
+        if not is_trading_day(now.date()):
+            return
+
+        # Check if E*TRADE is authenticated
+        is_authenticated = False
+        auth_status = "Unknown"
+
+        if self.bot.is_paper_mode:
+            auth_status = "Paper Mode (no auth needed)"
+            is_authenticated = True
+        elif self.bot.client:
+            try:
+                is_authenticated = self.bot.client.is_authenticated()
+                auth_status = "Connected" if is_authenticated else "NOT CONNECTED"
+            except Exception as e:
+                auth_status = f"Error: {e}"
+                is_authenticated = False
+        else:
+            auth_status = "No E*TRADE client configured"
+
+        # Always send reminder on trading days
+        async def _send_reminder():
+            bot = TelegramBot()
+            await bot.initialize()
+
+            if is_authenticated:
+                await bot.send_message(
+                    f"☀️ *Good Morning!* Trading day started.\n\n"
+                    f"🔐 E*TRADE: {auth_status}\n"
+                    f"📅 {now.strftime('%A, %B %d')}\n\n"
+                    f"Signal check at 9:35 AM ET",
+                    parse_mode="Markdown",
+                )
+            else:
+                await bot.send_message(
+                    "🚨 *ACTION REQUIRED*\n\n"
+                    "E*TRADE authentication expired!\n\n"
+                    "➡️ Run /auth now to login\n"
+                    "⏰ Must complete before 9:35 AM ET\n\n"
+                    "Without auth, trades will be blocked.",
+                    parse_mode="Markdown",
+                )
+
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        loop.run_until_complete(_send_reminder())
+
+        self.db.log_event(
+            "AUTH_REMINDER",
+            f"Daily auth check: {auth_status}",
+            {"is_authenticated": is_authenticated, "mode": self.bot.config.mode.value},
+        )
+        logger.info(f"Auth reminder sent: {auth_status}")
 
     def _job_morning_signal(self):
         """Execute morning trading signal."""
@@ -170,8 +290,12 @@ class SmartScheduler:
         logger.info("Executing morning signal check")
 
         try:
+            # Get and log the signal with full context BEFORE execution
+            signal = self.bot.get_today_signal()
+            self._log_signal_check("MORNING_SIGNAL", signal, now)
+
             # Don't check crash day in morning - that's handled separately
-            result = self.bot.execute_signal()
+            result = self.bot.execute_signal(signal)
             self._last_result = result
 
             if result.success:
@@ -263,6 +387,9 @@ class SmartScheduler:
             # Get fresh signal with crash day check
             signal = self.bot.strategy.get_today_signal(check_crash_day=True)
 
+            # Log every crash day check for analytics
+            self._log_signal_check("CRASH_DAY_CHECK", signal, now)
+
             if signal.signal == Signal.CRASH_DAY:
                 logger.info(
                     f"CRASH DAY TRIGGERED: IBIT down {signal.crash_day_status.current_drop_pct:.1f}%"
@@ -338,6 +465,9 @@ class SmartScheduler:
         try:
             # Get fresh signal with pump day check
             signal = self.bot.strategy.get_today_signal(check_crash_day=False, check_pump_day=True)
+
+            # Log every pump day check for analytics
+            self._log_signal_check("PUMP_DAY_CHECK", signal, now)
 
             if signal.signal == Signal.PUMP_DAY:
                 logger.info(
@@ -652,7 +782,9 @@ class SmartScheduler:
             if self.bot.client and self.bot.client.is_authenticated():
                 status_lines.append("🔐 E*TRADE: Connected")
             else:
-                issues.append("🔐 E*TRADE: NOT AUTHENTICATED - trades will fail!")
+                issues.append(
+                    "🔐 E*TRADE: NOT AUTHENTICATED!\n   ➡️ Run /auth to login before 9:35 AM"
+                )
 
         # Build message
         if issues:

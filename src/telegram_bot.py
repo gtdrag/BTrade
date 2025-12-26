@@ -139,6 +139,7 @@ class TelegramBot:
         self._app.add_handler(CommandHandler("positions", self._cmd_positions))
         self._app.add_handler(CommandHandler("signal", self._cmd_signal))
         self._app.add_handler(CommandHandler("jobs", self._cmd_jobs))
+        self._app.add_handler(CommandHandler("logs", self._cmd_logs))
 
         # Add command handlers - E*TRADE authentication
         self._app.add_handler(CommandHandler("auth", self._cmd_auth))
@@ -267,7 +268,8 @@ class TelegramBot:
             "/balance - Account balance\n"
             "/positions - Current positions\n"
             "/signal - Check today's signal\n"
-            "/jobs - View scheduled jobs\n\n"
+            "/jobs - View scheduled jobs\n"
+            "/logs - View recent activity logs\n\n"
             "🔐 E\\*TRADE Auth:\n"
             "/auth - Start E\\*TRADE login\n"
             "/verify CODE - Complete login\n\n"
@@ -586,6 +588,80 @@ class TelegramBot:
             await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
         except Exception as e:
             await update.message.reply_text(f"❌ Error fetching jobs: {e}")
+
+    async def _cmd_logs(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /logs command - view recent activity logs."""
+        if not self._is_authorized(update):
+            await self._send_unauthorized_response(update)
+            return
+
+        from .database import get_database
+        from .utils import get_et_now
+
+        try:
+            db = get_database()
+            now = get_et_now()
+            today_str = now.strftime("%Y-%m-%d")
+
+            # Get today's logs, most recent first
+            events = db.get_events(since=today_str, limit=20)
+
+            if not events:
+                await update.message.reply_text(
+                    "📋 *Activity Logs*\n\n" "No activity logged today.",
+                    parse_mode="Markdown",
+                )
+                return
+
+            lines = [f"📋 *Activity Logs* ({now.strftime('%b %d')})\n"]
+
+            for event in reversed(events):  # Show oldest first
+                timestamp = event.get("timestamp", "")
+                level = event.get("level", "")
+                evt = event.get("event", "")
+
+                # Parse timestamp to show just time
+                try:
+                    from datetime import datetime
+
+                    ts = datetime.fromisoformat(timestamp)
+                    time_str = ts.strftime("%I:%M %p")
+                except Exception:
+                    time_str = timestamp[:8] if timestamp else "?"
+
+                # Emoji based on event type
+                emoji = "📊"
+                if "SIGNAL" in level:
+                    emoji = "🔍"
+                elif "APPROVAL" in level:
+                    emoji = "✋"
+                elif "TRADE" in level:
+                    emoji = "💰"
+                elif "ERROR" in level:
+                    emoji = "❌"
+                elif "DUPLICATE" in level:
+                    emoji = "🚫"
+                elif "SCHEDULER" in level:
+                    emoji = "⏰"
+
+                # Truncate event if too long
+                evt_short = evt[:40] + "..." if len(evt) > 40 else evt
+                lines.append(f"{emoji} {time_str}: {evt_short}")
+
+            # Add summary of event types
+            signal_checks = sum(1 for e in events if "SIGNAL" in e.get("level", ""))
+            trades = sum(1 for e in events if "TRADE" in e.get("level", ""))
+            approvals = sum(1 for e in events if "APPROVAL" in e.get("level", ""))
+
+            if signal_checks or trades or approvals:
+                lines.append(
+                    f"\n📈 Summary: {signal_checks} signals, {approvals} approvals, {trades} trades"
+                )
+
+            await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+        except Exception as e:
+            await update.message.reply_text(f"❌ Error fetching logs: {e}")
 
     # ========== E*TRADE Authentication Commands ==========
 

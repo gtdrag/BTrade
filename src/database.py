@@ -374,6 +374,36 @@ class Database:
                 )
             return [dict(row) for row in cursor.fetchall()]
 
+    def get_events(
+        self, since: Optional[str] = None, level: Optional[str] = None, limit: int = 50
+    ) -> List[Dict[str, Any]]:
+        """Get events, optionally filtered by date and level.
+
+        Args:
+            since: ISO date string (YYYY-MM-DD) to filter events from
+            level: Filter by event level/type
+            limit: Max number of events to return
+        """
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+
+            query = "SELECT * FROM logs WHERE 1=1"
+            params = []
+
+            if since:
+                query += " AND timestamp >= ?"
+                params.append(since)
+
+            if level:
+                query += " AND level = ?"
+                params.append(level)
+
+            query += " ORDER BY id DESC LIMIT ?"
+            params.append(limit)
+
+            cursor.execute(query, params)
+            return [dict(row) for row in cursor.fetchall()]
+
     # ==================== Equity Curve ====================
 
     def get_equity_curve(self, include_dry_runs: bool = False) -> List[Dict[str, Any]]:

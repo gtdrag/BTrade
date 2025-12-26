@@ -124,9 +124,27 @@ class TradingBot:
         self._paper_capital = 10000.0
         self._paper_positions: Dict[str, Dict] = {}
 
+        # Daily trade tracking to prevent duplicates
+        self._trades_today: Dict[str, str] = {}  # signal_type -> timestamp
+
     @property
     def is_paper_mode(self) -> bool:
         return self.config.mode == TradingMode.PAPER
+
+    def _check_duplicate_trade(self, signal_type: str) -> bool:
+        """Check if we've already traded this signal type today."""
+        today = get_et_now().strftime("%Y-%m-%d")
+
+        # Clear stale entries from previous days
+        stale_keys = [k for k, v in self._trades_today.items() if not v.startswith(today)]
+        for k in stale_keys:
+            del self._trades_today[k]
+
+        return signal_type in self._trades_today
+
+    def _record_trade(self, signal_type: str):
+        """Record that we've traded this signal type today."""
+        self._trades_today[signal_type] = get_et_now().isoformat()
 
     def get_today_signal(self) -> TodaySignal:
         """Get today's trading signal."""
@@ -339,6 +357,28 @@ class TradingBot:
                 is_paper=self.is_paper_mode,
             )
 
+        # Check for duplicate trade (already traded this signal type today)
+        if self._check_duplicate_trade(signal.signal.value):
+            logger.warning(f"Duplicate trade blocked: Already traded {signal.signal.value} today")
+            self.db.log_event(
+                "DUPLICATE_BLOCKED",
+                f"Blocked duplicate {signal.signal.value} trade",
+                {
+                    "signal": signal.signal.value,
+                    "etf": signal.etf,
+                    "timestamp": get_et_now().isoformat(),
+                    "previous_trade": self._trades_today.get(signal.signal.value),
+                },
+            )
+            return TradeResult(
+                success=False,
+                signal=signal.signal,
+                etf=signal.etf,
+                action="BUY",
+                error=f"Already traded {signal.signal.value} today - duplicate blocked",
+                is_paper=self.is_paper_mode,
+            )
+
         etf = signal.etf
 
         try:
@@ -367,6 +407,22 @@ class TradingBot:
                 logger.info(
                     f"Requesting Telegram approval for {signal.signal.value}: {shares} {etf}"
                 )
+
+                # Log approval request
+                self.db.log_event(
+                    "APPROVAL_REQUEST",
+                    f"Requesting approval for {signal.signal.value}",
+                    {
+                        "signal": signal.signal.value,
+                        "etf": etf,
+                        "shares": shares,
+                        "price": price,
+                        "position_value": position_value,
+                        "reason": signal.reason,
+                        "timestamp": get_et_now().isoformat(),
+                    },
+                )
+
                 approval = self.telegram.request_approval(
                     signal_type=signal.signal.value,
                     etf=etf,
@@ -374,6 +430,19 @@ class TradingBot:
                     shares=shares,
                     price=price,
                     position_value=position_value,
+                )
+
+                # Log approval response
+                self.db.log_event(
+                    "APPROVAL_RESPONSE",
+                    f"User response: {approval.value}",
+                    {
+                        "signal": signal.signal.value,
+                        "etf": etf,
+                        "shares": shares,
+                        "response": approval.value,
+                        "timestamp": get_et_now().isoformat(),
+                    },
                 )
 
                 if approval == ApprovalResult.REJECTED:
@@ -439,6 +508,9 @@ class TradingBot:
 
             # Send notification (email/desktop)
             if result.success:
+                # Record this trade to prevent duplicates
+                self._record_trade(signal.signal.value)
+
                 self._notify_trade(result, signal)
                 # Also send Telegram confirmation
                 self.telegram.notify_trade_executed(
@@ -727,20 +799,29 @@ class TradingBot:
         self.notifications.send("Trading Bot Error", error, NotificationType.ERROR)
 
     def _log_trade(self, result: TradeResult, signal: TodaySignal):
-        """Log trade to database."""
+        """Log trade to database with comprehensive execution details."""
+        now = get_et_now()
         self.db.log_event(
-            level="TRADE" if result.success else "ERROR",
+            level="TRADE_EXECUTION" if result.success else "TRADE_ERROR",
             event=f"{result.action} {result.shares} {result.etf}",
             details={
+                "timestamp": now.isoformat(),
+                "day_of_week": now.strftime("%A"),
                 "signal": signal.signal.value,
                 "etf": result.etf,
+                "action": result.action,
                 "shares": result.shares,
                 "price": result.price,
                 "total_value": result.total_value,
                 "order_id": result.order_id,
                 "is_paper": result.is_paper,
+                "success": result.success,
                 "error": result.error,
                 "reason": signal.reason,
+                "prev_day_return": signal.prev_day_return,
+                "btc_overnight_pct": signal.btc_overnight.change_pct
+                if signal.btc_overnight
+                else None,
             },
         )
 
