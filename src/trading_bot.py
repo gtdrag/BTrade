@@ -15,7 +15,7 @@ import logging
 import os
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from .data_providers import MarketDataManager, create_data_manager
 from .database import Database, get_database
@@ -145,6 +145,56 @@ class TradingBot:
     def _record_trade(self, signal_type: str):
         """Record that we've traded this signal type today."""
         self._trades_today[signal_type] = get_et_now().isoformat()
+
+    def has_open_position(self) -> bool:
+        """Check if we have any open positions."""
+        if self.is_paper_mode:
+            return len(self._paper_positions) > 0
+        else:
+            if not self.client or not self.client.is_authenticated():
+                return False
+            positions = self.client.get_account_positions(self.config.account_id_key)
+            # Check for positions in our tradeable ETFs
+            for pos in positions:
+                symbol = pos.get("Product", {}).get("symbol", "")
+                if symbol in ["BITU", "SBIT", "BITX"]:
+                    return True
+            return False
+
+    def get_open_positions(self) -> Dict[str, Dict]:
+        """Get all open positions in tradeable ETFs."""
+        if self.is_paper_mode:
+            return self._paper_positions.copy()
+        else:
+            if not self.client or not self.client.is_authenticated():
+                return {}
+            positions = self.client.get_account_positions(self.config.account_id_key)
+            result = {}
+            for pos in positions:
+                symbol = pos.get("Product", {}).get("symbol", "")
+                if symbol in ["BITU", "SBIT", "BITX"]:
+                    result[symbol] = {
+                        "shares": int(pos.get("quantity", 0)),
+                        "entry_price": float(pos.get("costBasis", 0)) / int(pos.get("quantity", 1)),
+                    }
+            return result
+
+    def close_all_positions(self, reason: str = "New signal") -> List[TradeResult]:
+        """Close all open positions before entering a new trade."""
+        results = []
+        positions = self.get_open_positions()
+
+        for etf in list(positions.keys()):
+            logger.info(f"Closing existing {etf} position before new trade: {reason}")
+            self.db.log_event(
+                "POSITION_CLOSE",
+                f"Closing {etf} for new signal",
+                {"etf": etf, "reason": reason, "timestamp": get_et_now().isoformat()},
+            )
+            result = self.close_position(etf)
+            results.append(result)
+
+        return results
 
     def get_today_signal(self) -> TodaySignal:
         """Get today's trading signal."""
@@ -382,6 +432,29 @@ class TradingBot:
         etf = signal.etf
 
         try:
+            # Check if we have existing positions
+            open_positions = self.get_open_positions()
+            needs_reversal = False
+            if open_positions:
+                if etf not in open_positions:
+                    # We need to close existing position(s) and enter new one
+                    needs_reversal = True
+                    logger.info(
+                        f"New signal ({signal.signal.value}) will require closing existing position(s): "
+                        f"{list(open_positions.keys())}"
+                    )
+                else:
+                    # We already hold the ETF we want to buy - skip
+                    logger.info(f"Already holding {etf} - no action needed")
+                    return TradeResult(
+                        success=True,
+                        signal=signal.signal,
+                        etf=etf,
+                        action="HOLD",
+                        error=f"Already holding {etf}",
+                        is_paper=self.is_paper_mode,
+                    )
+
             # Get quote
             quote = self.get_quote(etf)
             price = quote["current_price"]
@@ -423,10 +496,15 @@ class TradingBot:
                     },
                 )
 
+                # Include reversal info in approval request if applicable
+                reversal_note = ""
+                if needs_reversal:
+                    reversal_note = f"\n⚠️ Will CLOSE existing {list(open_positions.keys())} first!"
+
                 approval = self.telegram.request_approval(
                     signal_type=signal.signal.value,
                     etf=etf,
-                    reason=signal.reason,
+                    reason=signal.reason + reversal_note,
                     shares=shares,
                     price=price,
                     position_value=position_value,
@@ -489,16 +567,54 @@ class TradingBot:
 
                 logger.info("Trade approved via Telegram")
 
+                # Close existing positions if this is a reversal (AFTER approval)
+                if needs_reversal:
+                    self.db.log_event(
+                        "SIGNAL_REVERSAL",
+                        f"Executing reversal: closing {list(open_positions.keys())} for {signal.signal.value}",
+                        {
+                            "new_signal": signal.signal.value,
+                            "new_etf": etf,
+                            "existing_positions": list(open_positions.keys()),
+                            "timestamp": get_et_now().isoformat(),
+                        },
+                    )
+                    close_results = self.close_all_positions(
+                        reason=f"Approved reversal for {signal.signal.value} signal"
+                    )
+                    for close_result in close_results:
+                        if close_result.success:
+                            self.telegram.send_message(
+                                f"🔄 *Position Closed*\n\n"
+                                f"Sold: {close_result.shares} {close_result.etf} @ ${close_result.price:.2f}\n"
+                                f"Now entering: {etf}"
+                            )
+
             elif self.config.approval_mode == ApprovalMode.NOTIFY_ONLY:
                 # Send notification but don't wait for response
+                reversal_msg = ""
+                if needs_reversal:
+                    reversal_msg = f"\n⚠️ Closing existing {list(open_positions.keys())} first!"
                 self.telegram.send_message(
                     f"📊 *TRADE EXECUTING*\n\n"
                     f"Signal: {signal.signal.value}\n"
                     f"ETF: {etf}\n"
                     f"Shares: {shares}\n"
                     f"Price: ${price:.2f}\n"
-                    f"Total: ${position_value:.2f}"
+                    f"Total: ${position_value:.2f}{reversal_msg}"
                 )
+
+                # Close existing positions if this is a reversal
+                if needs_reversal:
+                    self.close_all_positions(reason=f"Reversal for {signal.signal.value} signal")
+
+            else:
+                # AUTO_EXECUTE mode - no approval or notification
+                # Still need to handle reversals
+                if needs_reversal:
+                    self.close_all_positions(
+                        reason=f"Auto reversal for {signal.signal.value} signal"
+                    )
 
             # Execute trade
             if self.is_paper_mode:
