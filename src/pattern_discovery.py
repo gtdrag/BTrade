@@ -286,66 +286,81 @@ class PatternRegistry:
 class PatternAnalyzer:
     """Analyzes historical data using LLM to discover patterns."""
 
-    # Default prompt template for pattern discovery
-    DISCOVERY_PROMPT_TEMPLATE = """You are a quantitative analyst. Analyze this market data and discover exploitable trading patterns.
+    # Enhanced prompt template with RAW price data
+    RAW_DATA_PROMPT_TEMPLATE = """You are a quantitative trading analyst. Analyze this raw market data to discover exploitable intraday trading patterns.
 
-### IBIT Day-of-Week Performance (Last {lookback_days} Days)
+## Context
+We trade Bitcoin-related ETFs using 2x leveraged instruments:
+- BITU (2x long Bitcoin) - buy when expecting Bitcoin to rise
+- SBIT (2x short Bitcoin) - buy when expecting Bitcoin to fall
 
-{day_of_week_data}
+We need patterns that:
+- Enter after 9:35 AM ET (market open volatility settles)
+- Exit by 3:55 PM ET (before close)
+- Have a statistical edge based on historical data
 
-### IBIT Hourly Performance
+## Raw Price Data ({lookback_days} trading days)
 
-{hourly_data}
+### IBIT (iShares Bitcoin Trust ETF) - Daily Bars
+{ibit_daily_data}
 
-### BTC Overnight Movement vs Next Day IBIT
+### BTC/USD (Spot Bitcoin) - Daily Bars
+{btc_daily_data}
 
-{overnight_data}
+### BITO (ProShares Bitcoin Futures ETF) - Daily Bars
+{bito_daily_data}
+
+### Cross-Market Analysis Data
+{cross_market_data}
 
 ### Currently Active Patterns
 {active_patterns}
 
-### Your Task
-Analyze this data and output ONLY a JSON object with discovered patterns. Each pattern must have:
-- name: lowercase_with_underscores
-- display_name: Human Readable Name
-- signal: "long" or "short"
-- instrument: "BITU" (for long) or "SBIT" (for short)
-- entry_time: "HH:MM" format
-- exit_time: "HH:MM" format
-- conditions: list of condition strings (can be empty)
-- confidence: win rate as decimal (0.0-1.0)
-- sample_size: number of historical occurrences
-- expected_edge: expected return percentage
-- priority: integer (lower = higher priority, suggest 50-150)
-- notes: brief explanation
+## Your Analysis Task
 
-Only include patterns with:
-- Sample size >= 20
-- Confidence >= 0.52 (52% win rate)
-- Expected edge >= 0.15% per trade
+Analyze the raw data above to find exploitable patterns. Look for:
 
-Output format:
+1. **Day-of-Week Effects** - Do certain days consistently outperform/underperform?
+2. **Overnight Gap Patterns** - How do overnight BTC moves predict next-day IBIT?
+3. **Futures vs Spot Divergence** - Does BITO leading/lagging IBIT signal anything?
+4. **Volatility Patterns** - Do high/low volatility days predict direction?
+5. **Momentum/Mean Reversion** - After big moves, what happens next?
+6. **Cross-Market Correlations** - Patterns between BTC, IBIT, and BITO
+
+For each pattern you discover, calculate:
+- Win rate (% of times the pattern worked)
+- Average return when pattern triggered
+- Sample size (how many times it occurred)
+
+Output ONLY a JSON object with discovered patterns:
+
 ```json
 {{
   "patterns": [
     {{
-      "name": "example_pattern",
-      "display_name": "Example Pattern",
-      "signal": "long",
-      "instrument": "BITU",
-      "entry_time": "09:35",
-      "exit_time": "15:55",
-      "conditions": [],
+      "name": "pattern_name_snake_case",
+      "display_name": "Human Readable Name",
+      "signal": "long" or "short",
+      "instrument": "BITU" (for long) or "SBIT" (for short),
+      "entry_time": "HH:MM",
+      "exit_time": "HH:MM",
+      "conditions": ["condition1", "condition2"],
       "confidence": 0.58,
-      "sample_size": 62,
+      "sample_size": 45,
       "expected_edge": 0.35,
       "priority": 75,
-      "notes": "Explanation of the pattern"
+      "notes": "Explanation of why this pattern works"
     }}
   ],
-  "analysis_notes": "Brief summary of findings"
+  "analysis_notes": "Summary of key findings from the data"
 }}
-```"""
+```
+
+Requirements:
+- Sample size >= 15 occurrences
+- Confidence >= 0.52 (52% win rate)
+- Expected edge >= 0.15% per trade
+- Only include patterns with clear statistical evidence"""
 
     def __init__(
         self,
@@ -587,6 +602,201 @@ Output format:
 
         return patterns
 
+    def _format_bars_as_csv(self, bars: List[Dict], symbol: str) -> str:
+        """Format raw OHLCV bars as CSV for the prompt."""
+        if not bars:
+            return f"No data available for {symbol}"
+
+        lines = ["Date,Day,Open,High,Low,Close,Volume,Change%"]
+        for bar in bars[-60:]:  # Last 60 trading days to fit context
+            timestamp = bar.get("t", "")
+            if isinstance(timestamp, str):
+                dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+            else:
+                dt = timestamp
+
+            date_str = dt.strftime("%Y-%m-%d")
+            day_name = dt.strftime("%a")
+            o = bar.get("o", 0)
+            h = bar.get("h", 0)
+            low = bar.get("l", 0)
+            c = bar.get("c", 0)
+            v = bar.get("v", 0)
+            change = ((c - o) / o * 100) if o > 0 else 0
+
+            lines.append(
+                f"{date_str},{day_name},{o:.2f},{h:.2f},{low:.2f},{c:.2f},{v},{change:+.2f}%"
+            )
+
+        return "\n".join(lines)
+
+    def _calculate_cross_market_data(
+        self, ibit_bars: List[Dict], btc_bars: List[Dict], bito_bars: List[Dict]
+    ) -> str:
+        """Calculate cross-market correlations and patterns."""
+        lines = ["## Cross-Market Analysis\n"]
+
+        # Build price series by date
+        ibit_by_date = {}
+        for bar in ibit_bars:
+            ts = bar.get("t", "")
+            if isinstance(ts, str):
+                dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            else:
+                dt = ts
+            date_str = dt.strftime("%Y-%m-%d")
+            o, c = bar.get("o", 0), bar.get("c", 0)
+            if o > 0:
+                ibit_by_date[date_str] = {"open": o, "close": c, "return": (c - o) / o * 100}
+
+        btc_by_date = {}
+        for bar in btc_bars:
+            ts = bar.get("t", "")
+            if isinstance(ts, str):
+                dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            else:
+                dt = ts
+            date_str = dt.strftime("%Y-%m-%d")
+            o, c = bar.get("o", 0), bar.get("c", 0)
+            if o > 0:
+                btc_by_date[date_str] = {"open": o, "close": c, "return": (c - o) / o * 100}
+
+        bito_by_date = {}
+        for bar in bito_bars:
+            ts = bar.get("t", "")
+            if isinstance(ts, str):
+                dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            else:
+                dt = ts
+            date_str = dt.strftime("%Y-%m-%d")
+            o, c = bar.get("o", 0), bar.get("c", 0)
+            if o > 0:
+                bito_by_date[date_str] = {"open": o, "close": c, "return": (c - o) / o * 100}
+
+        # Calculate overnight gaps and next-day performance
+        lines.append("### Overnight BTC Move vs Next Day IBIT Performance")
+        lines.append("Date,BTC_Overnight%,IBIT_NextDay%,BITO_NextDay%")
+
+        sorted_dates = sorted(ibit_by_date.keys())
+        for i in range(1, len(sorted_dates)):
+            prev_date = sorted_dates[i - 1]
+            curr_date = sorted_dates[i]
+
+            # BTC overnight = current day open vs previous day close (approximation)
+            if prev_date in btc_by_date and curr_date in btc_by_date:
+                prev_btc_close = btc_by_date[prev_date]["close"]
+                curr_btc_open = btc_by_date[curr_date]["open"]
+                if prev_btc_close > 0:
+                    btc_overnight = (curr_btc_open - prev_btc_close) / prev_btc_close * 100
+                else:
+                    btc_overnight = 0
+            else:
+                btc_overnight = 0
+
+            ibit_return = ibit_by_date.get(curr_date, {}).get("return", 0)
+            bito_return = bito_by_date.get(curr_date, {}).get("return", 0)
+
+            lines.append(
+                f"{curr_date},{btc_overnight:+.2f}%,{ibit_return:+.2f}%,{bito_return:+.2f}%"
+            )
+
+        # Add IBIT vs BITO spread analysis
+        lines.append("\n### IBIT vs BITO Daily Spread (Futures Premium/Discount)")
+        lines.append("Date,IBIT_Return%,BITO_Return%,Spread%")
+        for date in sorted_dates[-30:]:  # Last 30 days
+            ibit_ret = ibit_by_date.get(date, {}).get("return", 0)
+            bito_ret = bito_by_date.get(date, {}).get("return", 0)
+            spread = bito_ret - ibit_ret
+            lines.append(f"{date},{ibit_ret:+.2f}%,{bito_ret:+.2f}%,{spread:+.2f}%")
+
+        return "\n".join(lines)
+
+    async def analyze_raw(
+        self,
+        ibit_bars: List[Dict],
+        btc_bars: List[Dict],
+        bito_bars: List[Dict],
+        active_patterns: Optional[List[TradingPattern]] = None,
+    ) -> List[TradingPattern]:
+        """Run LLM analysis on raw OHLCV data.
+
+        Args:
+            ibit_bars: Raw IBIT daily OHLCV bars
+            btc_bars: Raw BTC/USD daily OHLCV bars
+            bito_bars: Raw BITO daily OHLCV bars
+            active_patterns: Currently active patterns
+
+        Returns:
+            List of discovered TradingPattern objects
+        """
+        if not self.api_key:
+            logger.error("Cannot run analysis: no API key configured")
+            return []
+
+        try:
+            import anthropic
+
+            client = anthropic.Anthropic(api_key=self.api_key)
+
+            # Format raw data
+            ibit_csv = self._format_bars_as_csv(ibit_bars, "IBIT")
+            btc_csv = self._format_bars_as_csv(btc_bars, "BTC/USD")
+            bito_csv = self._format_bars_as_csv(bito_bars, "BITO")
+            cross_market = self._calculate_cross_market_data(ibit_bars, btc_bars, bito_bars)
+
+            # Format active patterns
+            if active_patterns:
+                pattern_lines = []
+                for p in active_patterns:
+                    pattern_lines.append(
+                        f"- {p.display_name}: {p.signal.value} {p.instrument} "
+                        f"at {p.entry_time}-{p.exit_time} (edge: {p.expected_edge:.2f}%)"
+                    )
+                active_patterns_str = "\n".join(pattern_lines)
+            else:
+                active_patterns_str = "None currently active"
+
+            prompt = self.RAW_DATA_PROMPT_TEMPLATE.format(
+                lookback_days=self.lookback_days,
+                ibit_daily_data=ibit_csv,
+                btc_daily_data=btc_csv,
+                bito_daily_data=bito_csv,
+                cross_market_data=cross_market,
+                active_patterns=active_patterns_str,
+            )
+
+            logger.info(
+                "Running LLM pattern analysis on raw data",
+                model=self.model,
+                prompt_length=len(prompt),
+            )
+
+            message = client.messages.create(
+                model=self.model,
+                max_tokens=4000,
+                messages=[{"role": "user", "content": prompt}],
+            )
+
+            response_text = message.content[0].text
+
+            # Save to database
+            self._save_analysis_to_db(
+                prompt=prompt,
+                response=response_text,
+                model=self.model,
+            )
+
+            patterns = self._parse_response(response_text)
+            logger.info("Raw data analysis complete", patterns_found=len(patterns))
+            return patterns
+
+        except ImportError:
+            logger.error("anthropic package not installed. Run: pip install anthropic")
+            return []
+        except Exception as e:
+            logger.error("Pattern analysis failed", error=str(e))
+            return []
+
 
 class MarketDataCollector:
     """Collects and aggregates historical market data for pattern analysis."""
@@ -641,6 +851,66 @@ class MarketDataCollector:
             "day_of_week_stats": day_of_week_stats,
             "hourly_stats": hourly_stats,
             "overnight_stats": overnight_stats,
+        }
+
+    def collect_raw_bars(
+        self,
+        alpaca_key: Optional[str] = None,
+        alpaca_secret: Optional[str] = None,
+    ) -> Dict[str, List[Dict]]:
+        """Collect raw OHLCV bars for multiple instruments.
+
+        Returns:
+            Dict with raw bars for each instrument:
+            - ibit_bars: IBIT daily bars
+            - btc_bars: BTC/USD daily bars
+            - bito_bars: BITO daily bars
+        """
+        from .data_providers import AlpacaProvider
+
+        provider = AlpacaProvider(alpaca_key, alpaca_secret)
+        if not provider.is_available():
+            logger.error("Alpaca API not configured")
+            return {}
+
+        # Calculate date range
+        end_date = datetime.now().strftime("%Y-%m-%d")
+        start_date = (datetime.now() - timedelta(days=self.lookback_days)).strftime("%Y-%m-%d")
+
+        logger.info(
+            "Collecting raw bars",
+            start_date=start_date,
+            end_date=end_date,
+            lookback_days=self.lookback_days,
+        )
+
+        # Fetch daily bars for each instrument
+        ibit_bars = provider.get_historical_bars("IBIT", start_date, end_date, "1Day")
+        if not ibit_bars:
+            logger.error("Failed to fetch IBIT historical data")
+            return {}
+
+        btc_bars = provider.get_crypto_bars("BTC/USD", start_date, end_date, "1Day")
+        if not btc_bars:
+            logger.warning("Failed to fetch BTC/USD data, continuing without it")
+            btc_bars = []
+
+        bito_bars = provider.get_historical_bars("BITO", start_date, end_date, "1Day")
+        if not bito_bars:
+            logger.warning("Failed to fetch BITO data, continuing without it")
+            bito_bars = []
+
+        logger.info(
+            "Raw bars collected",
+            ibit_count=len(ibit_bars),
+            btc_count=len(btc_bars),
+            bito_count=len(bito_bars),
+        )
+
+        return {
+            "ibit_bars": ibit_bars,
+            "btc_bars": btc_bars,
+            "bito_bars": bito_bars,
         }
 
     def _calc_day_of_week_stats(self, bars: List[Dict]) -> Dict[str, Dict]:

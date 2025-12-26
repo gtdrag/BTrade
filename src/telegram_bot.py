@@ -671,14 +671,17 @@ class TelegramBot:
             await update.message.reply_text(f"❌ Error fetching logs: {e}")
 
     async def _cmd_analyze(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /analyze command - run pattern discovery analysis."""
+        """Handle /analyze command - run pattern discovery analysis with raw data."""
         if not self._is_authorized(update):
             await self._send_unauthorized_response(update)
             return
 
         await update.message.reply_text(
             "🔍 *Pattern Analysis Starting*\n\n"
-            "Collecting 90 days of market data...\n"
+            "Collecting 90 days of raw market data:\n"
+            "• IBIT (Bitcoin spot ETF)\n"
+            "• BTC/USD (spot crypto)\n"
+            "• BITO (Bitcoin futures ETF)\n\n"
             "This may take 30-60 seconds.",
             parse_mode="Markdown",
         )
@@ -691,37 +694,38 @@ class TelegramBot:
                 get_pattern_registry,
             )
 
-            # Collect data
+            # Collect raw OHLCV data for multiple instruments
             collector = get_data_collector(lookback_days=90)
-            data = collector.collect_from_alpaca()
+            raw_data = collector.collect_raw_bars()
 
-            if not data:
+            if not raw_data or not raw_data.get("ibit_bars"):
                 await update.message.reply_text("❌ Failed to collect market data from Alpaca")
                 return
 
             # Show data summary
-            dow_stats = data.get("day_of_week_stats", {})
-            data_summary = "\n".join(
-                f"  {day}: {stats['avg_return']:+.2f}% ({stats['win_rate']:.0f}% win)"
-                for day, stats in dow_stats.items()
-            )
+            ibit_count = len(raw_data.get("ibit_bars", []))
+            btc_count = len(raw_data.get("btc_bars", []))
+            bito_count = len(raw_data.get("bito_bars", []))
 
             await update.message.reply_text(
-                f"📊 *Data Collected*\n\n"
-                f"Day-of-week performance:\n{data_summary}\n\n"
-                f"Sending to Claude for analysis...",
+                f"📊 *Raw Data Collected*\n\n"
+                f"• IBIT: {ibit_count} daily bars\n"
+                f"• BTC/USD: {btc_count} daily bars\n"
+                f"• BITO: {bito_count} daily bars\n\n"
+                f"Sending raw OHLCV data to Claude for pattern analysis...\n"
+                f"Claude will analyze cross-market correlations.",
                 parse_mode="Markdown",
             )
 
-            # Run analysis
+            # Run analysis with raw data
             registry = get_pattern_registry()
             active_patterns = registry.get_live_patterns()
 
             analyzer = get_pattern_analyzer()
-            new_patterns = await analyzer.analyze(
-                day_of_week_stats=data.get("day_of_week_stats", {}),
-                hourly_stats=data.get("hourly_stats", {}),
-                overnight_stats=data.get("overnight_stats", {}),
+            new_patterns = await analyzer.analyze_raw(
+                ibit_bars=raw_data.get("ibit_bars", []),
+                btc_bars=raw_data.get("btc_bars", []),
+                bito_bars=raw_data.get("bito_bars", []),
                 active_patterns=active_patterns,
             )
 
@@ -729,10 +733,11 @@ class TelegramBot:
                 await update.message.reply_text(
                     "📊 *Analysis Complete*\n\n"
                     "No new patterns discovered that meet quality thresholds:\n"
-                    "• Sample size ≥ 20\n"
+                    "• Sample size ≥ 15\n"
                     "• Win rate ≥ 52%\n"
                     "• Expected edge ≥ 0.15%\n\n"
-                    "This is normal - the system is being conservative.",
+                    "This is normal - the system is being conservative.\n"
+                    "Use /analyses to view Claude's full response.",
                     parse_mode="Markdown",
                 )
             else:
@@ -753,7 +758,8 @@ class TelegramBot:
                     f"Discovered {len(new_patterns)} new pattern(s):\n\n"
                     f"{pattern_list}\n\n"
                     f"Status: CANDIDATE\n"
-                    f"Use /patterns to view all patterns.",
+                    f"Use /patterns to view all patterns.\n"
+                    f"Use /analyses to view Claude's full response.",
                     parse_mode="Markdown",
                 )
 
