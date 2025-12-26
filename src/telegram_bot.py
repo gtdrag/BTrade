@@ -140,6 +140,8 @@ class TelegramBot:
         self._app.add_handler(CommandHandler("signal", self._cmd_signal))
         self._app.add_handler(CommandHandler("jobs", self._cmd_jobs))
         self._app.add_handler(CommandHandler("logs", self._cmd_logs))
+        self._app.add_handler(CommandHandler("analyze", self._cmd_analyze))
+        self._app.add_handler(CommandHandler("patterns", self._cmd_patterns))
 
         # Add command handlers - E*TRADE authentication
         self._app.add_handler(CommandHandler("auth", self._cmd_auth))
@@ -270,6 +272,9 @@ class TelegramBot:
             "/signal - Check today's signal\n"
             "/jobs - View scheduled jobs\n"
             "/logs - View recent activity logs\n\n"
+            "🤖 *AI Pattern Discovery:*\n"
+            "/analyze - Run pattern analysis now\n"
+            "/patterns - View discovered patterns\n\n"
             "🔐 E\\*TRADE Auth:\n"
             "/auth - Start E\\*TRADE login\n"
             "/verify CODE - Complete login\n\n"
@@ -662,6 +667,154 @@ class TelegramBot:
 
         except Exception as e:
             await update.message.reply_text(f"❌ Error fetching logs: {e}")
+
+    async def _cmd_analyze(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /analyze command - run pattern discovery analysis."""
+        if not self._is_authorized(update):
+            await self._send_unauthorized_response(update)
+            return
+
+        await update.message.reply_text(
+            "🔍 *Pattern Analysis Starting*\n\n"
+            "Collecting 90 days of market data...\n"
+            "This may take 30-60 seconds.",
+            parse_mode="Markdown",
+        )
+
+        try:
+            from .pattern_discovery import (
+                PatternStatus,
+                get_data_collector,
+                get_pattern_analyzer,
+                get_pattern_registry,
+            )
+
+            # Collect data
+            collector = get_data_collector(lookback_days=90)
+            data = collector.collect_from_alpaca()
+
+            if not data:
+                await update.message.reply_text("❌ Failed to collect market data from Alpaca")
+                return
+
+            # Show data summary
+            dow_stats = data.get("day_of_week_stats", {})
+            data_summary = "\n".join(
+                f"  {day}: {stats['avg_return']:+.2f}% ({stats['win_rate']:.0f}% win)"
+                for day, stats in dow_stats.items()
+            )
+
+            await update.message.reply_text(
+                f"📊 *Data Collected*\n\n"
+                f"Day-of-week performance:\n{data_summary}\n\n"
+                f"Sending to Claude for analysis...",
+                parse_mode="Markdown",
+            )
+
+            # Run analysis
+            registry = get_pattern_registry()
+            active_patterns = registry.get_live_patterns()
+
+            analyzer = get_pattern_analyzer()
+            new_patterns = await analyzer.analyze(
+                day_of_week_stats=data.get("day_of_week_stats", {}),
+                hourly_stats=data.get("hourly_stats", {}),
+                overnight_stats=data.get("overnight_stats", {}),
+                active_patterns=active_patterns,
+            )
+
+            if not new_patterns:
+                await update.message.reply_text(
+                    "📊 *Analysis Complete*\n\n"
+                    "No new patterns discovered that meet quality thresholds:\n"
+                    "• Sample size ≥ 20\n"
+                    "• Win rate ≥ 52%\n"
+                    "• Expected edge ≥ 0.15%\n\n"
+                    "This is normal - the system is being conservative.",
+                    parse_mode="Markdown",
+                )
+            else:
+                # Add patterns as candidates
+                for pattern in new_patterns:
+                    pattern.status = PatternStatus.CANDIDATE
+                    registry.add_pattern(pattern)
+
+                pattern_list = "\n".join(
+                    f"• *{p.display_name}*\n"
+                    f"  {p.signal.value.upper()} {p.instrument} @ {p.entry_time}-{p.exit_time}\n"
+                    f"  {p.confidence:.0%} win rate, {p.expected_edge:.2f}% edge"
+                    for p in new_patterns
+                )
+
+                await update.message.reply_text(
+                    f"🎯 *Analysis Complete*\n\n"
+                    f"Discovered {len(new_patterns)} new pattern(s):\n\n"
+                    f"{pattern_list}\n\n"
+                    f"Status: CANDIDATE\n"
+                    f"Use /patterns to view all patterns.",
+                    parse_mode="Markdown",
+                )
+
+        except Exception as e:
+            await update.message.reply_text(f"❌ Analysis failed: {e}")
+
+    async def _cmd_patterns(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /patterns command - view discovered patterns."""
+        if not self._is_authorized(update):
+            await self._send_unauthorized_response(update)
+            return
+
+        try:
+            from .pattern_discovery import get_pattern_registry
+
+            registry = get_pattern_registry()
+
+            if not registry.patterns:
+                await update.message.reply_text(
+                    "📋 *Pattern Registry*\n\n"
+                    "No patterns discovered yet.\n"
+                    "Use /analyze to run pattern discovery.",
+                    parse_mode="Markdown",
+                )
+                return
+
+            # Group by status
+            live = registry.get_live_patterns()
+            paper = registry.get_paper_patterns()
+            candidates = registry.get_candidate_patterns()
+
+            lines = ["📋 *Pattern Registry*\n"]
+
+            if live:
+                lines.append("\n🟢 *LIVE* (actively trading):")
+                for p in live:
+                    lines.append(
+                        f"  • {p.display_name}\n"
+                        f"    {p.signal.value.upper()} {p.instrument} @ {p.entry_time}"
+                    )
+
+            if paper:
+                lines.append("\n🟡 *PAPER* (validation):")
+                for p in paper:
+                    lines.append(
+                        f"  • {p.display_name}\n"
+                        f"    {p.validation_trades} trades, ${p.validation_pnl:.2f} P&L"
+                    )
+
+            if candidates:
+                lines.append("\n⚪ *CANDIDATE* (pending validation):")
+                for p in candidates:
+                    lines.append(
+                        f"  • {p.display_name}\n"
+                        f"    {p.confidence:.0%} conf, {p.expected_edge:.2f}% edge"
+                    )
+
+            lines.append(f"\nTotal: {len(registry.patterns)} pattern(s)")
+
+            await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+        except Exception as e:
+            await update.message.reply_text(f"❌ Error: {e}")
 
     # ========== E*TRADE Authentication Commands ==========
 
