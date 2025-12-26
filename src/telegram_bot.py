@@ -142,6 +142,7 @@ class TelegramBot:
         self._app.add_handler(CommandHandler("logs", self._cmd_logs))
         self._app.add_handler(CommandHandler("analyze", self._cmd_analyze))
         self._app.add_handler(CommandHandler("patterns", self._cmd_patterns))
+        self._app.add_handler(CommandHandler("analyses", self._cmd_analyses))
 
         # Add command handlers - E*TRADE authentication
         self._app.add_handler(CommandHandler("auth", self._cmd_auth))
@@ -274,7 +275,8 @@ class TelegramBot:
             "/logs - View recent activity logs\n\n"
             "🤖 *AI Pattern Discovery:*\n"
             "/analyze - Run pattern analysis now\n"
-            "/patterns - View discovered patterns\n\n"
+            "/patterns - View discovered patterns\n"
+            "/analyses - View past Claude analyses\n\n"
             "🔐 E\\*TRADE Auth:\n"
             "/auth - Start E\\*TRADE login\n"
             "/verify CODE - Complete login\n\n"
@@ -810,6 +812,68 @@ class TelegramBot:
                     )
 
             lines.append(f"\nTotal: {len(registry.patterns)} pattern(s)")
+
+            await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+        except Exception as e:
+            await update.message.reply_text(f"❌ Error: {e}")
+
+    async def _cmd_analyses(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /analyses command - view past Claude pattern analyses."""
+        if not self._is_authorized(update):
+            await self._send_unauthorized_response(update)
+            return
+
+        import json
+
+        from .database import get_database
+
+        try:
+            db = get_database()
+
+            # Get PATTERN_ANALYSIS events
+            events = db.get_events(level="PATTERN_ANALYSIS", limit=5)
+
+            if not events:
+                await update.message.reply_text(
+                    "🔬 *Claude Analyses*\n\n"
+                    "No pattern analyses found.\n"
+                    "Use /analyze to run pattern discovery.",
+                    parse_mode="Markdown",
+                )
+                return
+
+            lines = ["🔬 *Claude Analyses*\n"]
+
+            for i, event in enumerate(events, 1):
+                timestamp = event.get("timestamp", "")
+                details_str = event.get("details", "{}")
+
+                try:
+                    details = json.loads(details_str) if details_str else {}
+                except Exception:
+                    details = {}
+
+                # Parse timestamp
+                try:
+                    from datetime import datetime
+
+                    ts = datetime.fromisoformat(timestamp)
+                    date_str = ts.strftime("%b %d, %I:%M %p")
+                except Exception:
+                    date_str = timestamp[:16] if timestamp else "?"
+
+                model = details.get("model", "unknown")
+                lookback = details.get("lookback_days", "?")
+                response = details.get("response", "")
+
+                # Truncate response for display
+                if len(response) > 500:
+                    response = response[:500] + "..."
+
+                lines.append(f"\n*{i}. {date_str}*")
+                lines.append(f"Model: `{model}` | Lookback: {lookback} days")
+                lines.append(f"```\n{response}\n```")
 
             await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
