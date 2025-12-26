@@ -88,6 +88,37 @@ class TelegramBot:
         self._approval_result: Optional[ApprovalResult] = None
         self._is_running = False
 
+    def _is_authorized(self, update: Update) -> bool:
+        """
+        Check if the sender is authorized to use this bot.
+
+        Security: Only the configured chat_id can execute commands.
+        This prevents unauthorized users from controlling the trading bot.
+        """
+        if not self.chat_id:
+            # No chat_id configured - deny all (fail secure)
+            logger.warning("Authorization check failed: No chat_id configured")
+            return False
+
+        sender_chat_id = str(update.effective_chat.id)
+        authorized = sender_chat_id == str(self.chat_id)
+
+        if not authorized:
+            logger.warning(
+                f"Unauthorized access attempt from chat_id: {sender_chat_id} "
+                f"(expected: {self.chat_id})"
+            )
+
+        return authorized
+
+    async def _send_unauthorized_response(self, update: Update):
+        """Send a response to unauthorized users."""
+        await update.message.reply_text(
+            "🚫 Unauthorized\n\n"
+            "You are not authorized to control this bot.\n"
+            "This incident has been logged."
+        )
+
     async def initialize(self):
         """Initialize the bot application."""
         self._app = Application.builder().token(self.token).build()
@@ -139,21 +170,37 @@ class TelegramBot:
             logger.info("Telegram bot stopped")
 
     async def _cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /start command."""
+        """Handle /start command - shows chat_id for setup (available to anyone)."""
         chat_id = update.effective_chat.id
-        await update.message.reply_text(
-            f"🤖 *IBIT Trading Bot*\n\n"
-            f"Your Chat ID: `{chat_id}`\n\n"
-            f"Add this to your `.env` file:\n"
-            f"`TELEGRAM_CHAT_ID={chat_id}`\n\n"
-            f"Commands:\n"
-            f"/status - Check bot status\n"
-            f"/help - Show help",
-            parse_mode="Markdown",
-        )
+        is_authorized = self._is_authorized(update)
+
+        if is_authorized:
+            await update.message.reply_text(
+                f"🤖 *IBIT Trading Bot*\n\n"
+                f"✅ You are authorized\n"
+                f"Your Chat ID: `{chat_id}`\n\n"
+                f"Commands:\n"
+                f"/status - Check bot status\n"
+                f"/help - Show all commands",
+                parse_mode="Markdown",
+            )
+        else:
+            # Show chat_id for setup purposes, but indicate not authorized
+            await update.message.reply_text(
+                f"🤖 *IBIT Trading Bot*\n\n"
+                f"🚫 Not authorized for this bot\n\n"
+                f"Your Chat ID: `{chat_id}`\n\n"
+                f"If you are the owner, add this to your environment:\n"
+                f"`TELEGRAM_CHAT_ID={chat_id}`",
+                parse_mode="Markdown",
+            )
 
     async def _cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /status command - comprehensive bot status."""
+        if not self._is_authorized(update):
+            await self._send_unauthorized_response(update)
+            return
+
         from .utils import get_et_now
 
         now = get_et_now()
@@ -205,6 +252,10 @@ class TelegramBot:
 
     async def _cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /help command."""
+        if not self._is_authorized(update):
+            await self._send_unauthorized_response(update)
+            return
+
         await update.message.reply_text(
             "*IBIT Trading Bot Help*\n\n"
             "📱 *Bot Control:*\n"
@@ -232,6 +283,10 @@ class TelegramBot:
 
     async def _cmd_test(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /test command - sends a mock approval request."""
+        if not self._is_authorized(update):
+            await self._send_unauthorized_response(update)
+            return
+
         callback_id = f"test_{datetime.now().strftime('%H%M%S')}"
 
         message = (
@@ -265,6 +320,10 @@ class TelegramBot:
 
     async def _cmd_mode(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /mode command - switch between paper and live mode."""
+        if not self._is_authorized(update):
+            await self._send_unauthorized_response(update)
+            return
+
         # Deferred import to avoid circular dependency
         from .trading_bot import TradingMode
 
@@ -326,6 +385,10 @@ class TelegramBot:
 
     async def _cmd_pause(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /pause command - pause the scheduler."""
+        if not self._is_authorized(update):
+            await self._send_unauthorized_response(update)
+            return
+
         if self._is_paused:
             await update.message.reply_text("⏸ Already paused.")
             return
@@ -345,6 +408,10 @@ class TelegramBot:
 
     async def _cmd_resume(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /resume command - resume the scheduler."""
+        if not self._is_authorized(update):
+            await self._send_unauthorized_response(update)
+            return
+
         if not self._is_paused:
             await update.message.reply_text("▶️ Already running.")
             return
@@ -364,6 +431,10 @@ class TelegramBot:
 
     async def _cmd_balance(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /balance command - show account balance."""
+        if not self._is_authorized(update):
+            await self._send_unauthorized_response(update)
+            return
+
         if not self.trading_bot:
             await update.message.reply_text("❌ Trading bot not available.")
             return
@@ -390,6 +461,10 @@ class TelegramBot:
 
     async def _cmd_positions(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /positions command - show current positions."""
+        if not self._is_authorized(update):
+            await self._send_unauthorized_response(update)
+            return
+
         if not self.trading_bot:
             await update.message.reply_text("❌ Trading bot not available.")
             return
@@ -431,6 +506,10 @@ class TelegramBot:
 
     async def _cmd_signal(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /signal command - check today's signal."""
+        if not self._is_authorized(update):
+            await self._send_unauthorized_response(update)
+            return
+
         if not self.trading_bot:
             await update.message.reply_text("❌ Trading bot not available.")
             return
@@ -475,6 +554,10 @@ class TelegramBot:
 
     async def _cmd_jobs(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /jobs command - list scheduled jobs."""
+        if not self._is_authorized(update):
+            await self._send_unauthorized_response(update)
+            return
+
         if not self.scheduler:
             await update.message.reply_text("❌ Scheduler not available.")
             return
@@ -508,6 +591,10 @@ class TelegramBot:
 
     async def _cmd_auth(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /auth command - start E*TRADE OAuth flow."""
+        if not self._is_authorized(update):
+            await self._send_unauthorized_response(update)
+            return
+
         if not self.trading_bot:
             await update.message.reply_text("❌ Trading bot not available.")
             return
@@ -587,6 +674,10 @@ class TelegramBot:
 
     async def _cmd_verify(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /verify command - complete E*TRADE OAuth with verifier code."""
+        if not self._is_authorized(update):
+            await self._send_unauthorized_response(update)
+            return
+
         args = context.args
 
         if not args:
@@ -663,6 +754,15 @@ class TelegramBot:
 
     async def _handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle inline button callbacks."""
+        # Security: Verify the callback is from an authorized user
+        if not self._is_authorized(update):
+            query = update.callback_query
+            await query.answer("🚫 Unauthorized", show_alert=True)
+            logger.warning(
+                f"Unauthorized callback attempt from chat_id: {update.effective_chat.id}"
+            )
+            return
+
         query = update.callback_query
         await query.answer()
 
