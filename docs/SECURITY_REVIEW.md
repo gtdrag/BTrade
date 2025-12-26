@@ -66,6 +66,14 @@ A comprehensive security review was conducted on the IBIT Trading Bot before pro
 | config.json in git | PASS | Contains only empty/default values |
 | Error messages sanitized | ACCEPTABLE | Only visible to authenticated owner |
 
+### Trade Execution Safety
+
+| Item | Status | Notes |
+|------|--------|-------|
+| Live trades require approval | FIXED | Fail-secure: blocks live trades if Telegram fails |
+| Paper trades on Telegram error | PASS | Fail-open acceptable (no real money) |
+| Approval timeout handling | PASS | Returns error, doesn't execute |
+
 ### Dependencies
 
 | Item | Status | Notes |
@@ -132,3 +140,4 @@ For security issues, contact the repository owner.
 | 2025-12-25 | Initial security review | - |
 | 2025-12-25 | Fixed Telegram authorization | `1d86948` |
 | 2025-12-25 | Pinned filelock for CVE-2025-68146 | `aabbbea` |
+| 2025-12-25 | Made Telegram approval fail-secure in live mode | `f912db0` |
