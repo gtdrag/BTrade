@@ -1616,8 +1616,7 @@ class TelegramBot:
                 await update.message.reply_text(
                     "❌ *Email not configured*\n\n"
                     "Set these environment variables:\n"
-                    "• `SMTP_USER` - Gmail address\n"
-                    "• `SMTP_PASSWORD` - Gmail app password\n"
+                    "• `RESEND_API_KEY` - API key from resend.com\n"
                     "• `REPORT_EMAIL` - Recipient email",
                     parse_mode="Markdown",
                 )

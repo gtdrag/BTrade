@@ -1,35 +1,28 @@
 """
 Email Reports - Send simulation and strategy reports via email.
 
-Uses Gmail SMTP for simplicity. Requires environment variables:
-- SMTP_USER: Gmail address
-- SMTP_PASSWORD: Gmail app password
+Uses Resend API (HTTP-based) since SMTP ports are blocked on Railway.
+Requires environment variable:
+- RESEND_API_KEY: API key from resend.com
 - REPORT_EMAIL: Recipient email address
 """
 
 import logging
 import os
-import smtplib
-import traceback
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
 from typing import TYPE_CHECKING
+
+import resend
 
 if TYPE_CHECKING:
     from .historical_simulator import SimulationResult
 
 logger = logging.getLogger(__name__)
 
-# Gmail SMTP settings (using SSL port 465 - port 587 blocked on some cloud providers)
-SMTP_HOST = "smtp.gmail.com"
-SMTP_PORT = 465
-
 
 def get_email_config() -> dict:
     """Get email configuration from environment."""
     return {
-        "smtp_user": os.environ.get("SMTP_USER"),
-        "smtp_password": os.environ.get("SMTP_PASSWORD"),
+        "resend_api_key": os.environ.get("RESEND_API_KEY"),
         "report_email": os.environ.get("REPORT_EMAIL"),
     }
 
@@ -37,12 +30,12 @@ def get_email_config() -> dict:
 def is_email_configured() -> bool:
     """Check if email is properly configured."""
     config = get_email_config()
-    return all([config["smtp_user"], config["smtp_password"], config["report_email"]])
+    return all([config["resend_api_key"], config["report_email"]])
 
 
 def send_email(subject: str, html_body: str, text_body: str = None) -> bool:
     """
-    Send an email using Gmail SMTP.
+    Send an email using Resend API.
 
     Args:
         subject: Email subject
@@ -55,52 +48,31 @@ def send_email(subject: str, html_body: str, text_body: str = None) -> bool:
     config = get_email_config()
 
     if not is_email_configured():
-        logger.error("Email not configured. Set SMTP_USER, SMTP_PASSWORD, REPORT_EMAIL")
+        logger.error("Email not configured. Set RESEND_API_KEY and REPORT_EMAIL")
         return False
 
     try:
-        logger.info(
-            f"Attempting to send email to {config['report_email']} from {config['smtp_user']}"
-        )
+        resend.api_key = config["resend_api_key"]
 
-        msg = MIMEMultipart("alternative")
-        msg["Subject"] = subject
-        msg["From"] = config["smtp_user"]
-        msg["To"] = config["report_email"]
+        logger.info(f"Sending email to {config['report_email']} via Resend...")
 
-        # Add plain text version if provided
+        params = {
+            "from": "BTrade <onboarding@resend.dev>",
+            "to": [config["report_email"]],
+            "subject": subject,
+            "html": html_body,
+        }
+
         if text_body:
-            msg.attach(MIMEText(text_body, "plain"))
+            params["text"] = text_body
 
-        # Add HTML version
-        msg.attach(MIMEText(html_body, "html"))
+        response = resend.Emails.send(params)
 
-        # Connect and send using SSL (port 465)
-        logger.info(f"Connecting to {SMTP_HOST}:{SMTP_PORT} via SSL...")
-        with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=30) as server:
-            logger.info("SSL connection established, logging in...")
-            server.login(config["smtp_user"], config["smtp_password"])
-            logger.info("Login successful, sending email...")
-            server.sendmail(
-                config["smtp_user"],
-                config["report_email"],
-                msg.as_string(),
-            )
-
-        logger.info(f"Email sent successfully to {config['report_email']}")
+        logger.info(f"Email sent successfully. ID: {response.get('id', 'unknown')}")
         return True
 
-    except smtplib.SMTPAuthenticationError as e:
-        logger.error(f"SMTP Authentication failed: {e}. Check SMTP_USER and SMTP_PASSWORD.")
-        logger.error(f"Traceback: {traceback.format_exc()}")
-        return False
-    except smtplib.SMTPException as e:
-        logger.error(f"SMTP error: {e}")
-        logger.error(f"Traceback: {traceback.format_exc()}")
-        return False
     except Exception as e:
         logger.error(f"Failed to send email: {type(e).__name__}: {e}")
-        logger.error(f"Traceback: {traceback.format_exc()}")
         return False
 
 
@@ -240,7 +212,7 @@ def format_simulation_email(result: "SimulationResult") -> tuple:
 </head>
 <body>
     <div class="container">
-        <h1>📊 Historical Simulation Report</h1>
+        <h1>Historical Simulation Report</h1>
 
         <div class="summary-box">
             <h3>Performance Summary</h3>
