@@ -58,3 +58,7 @@ filelock>=3.20.1; python_version >= "3.10"
 # === AI Pattern Discovery (Monthly LLM Analysis) ===
 # Anthropic API for Claude-powered pattern discovery
 anthropic>=0.75.0
+
+# === Market Data ===
+# Alpaca API for historical stock data (IBIT, etc.)
+alpaca-py>=0.20.0
