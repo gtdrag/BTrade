@@ -20,9 +20,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Gmail SMTP settings
+# Gmail SMTP settings (using SSL port 465 - port 587 blocked on some cloud providers)
 SMTP_HOST = "smtp.gmail.com"
-SMTP_PORT = 587
+SMTP_PORT = 465
 
 
 def get_email_config() -> dict:
@@ -75,11 +75,10 @@ def send_email(subject: str, html_body: str, text_body: str = None) -> bool:
         # Add HTML version
         msg.attach(MIMEText(html_body, "html"))
 
-        # Connect and send (30 second timeout)
-        logger.info(f"Connecting to {SMTP_HOST}:{SMTP_PORT}...")
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30) as server:
-            server.starttls()
-            logger.info("TLS started, logging in...")
+        # Connect and send using SSL (port 465)
+        logger.info(f"Connecting to {SMTP_HOST}:{SMTP_PORT} via SSL...")
+        with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=30) as server:
+            logger.info("SSL connection established, logging in...")
             server.login(config["smtp_user"], config["smtp_password"])
             logger.info("Login successful, sending email...")
             server.sendmail(
