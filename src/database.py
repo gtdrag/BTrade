@@ -138,6 +138,21 @@ class Database:
             """
             )
 
+            # Strategy parameters table - stores approved Claude recommendations
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS strategy_params (
+                    param_name TEXT PRIMARY KEY,
+                    param_value REAL NOT NULL,
+                    previous_value REAL,
+                    reason TEXT,
+                    confidence TEXT,
+                    applied_at TEXT NOT NULL,
+                    applied_by TEXT DEFAULT 'claude_recommendation'
+                )
+            """
+            )
+
             # Initialize bot state if not exists
             cursor.execute(
                 """
@@ -459,6 +474,98 @@ class Database:
                 )
 
         return curve
+
+    # ==================== Strategy Parameters ====================
+
+    def save_strategy_param(
+        self,
+        param_name: str,
+        param_value: float,
+        previous_value: Optional[float] = None,
+        reason: Optional[str] = None,
+        confidence: Optional[str] = None,
+    ) -> bool:
+        """Save or update a strategy parameter.
+
+        Args:
+            param_name: Name of the parameter (e.g., 'mr_threshold')
+            param_value: The new value
+            previous_value: The value before this change
+            reason: Why this change was made
+            confidence: Confidence level ('low', 'medium', 'high')
+
+        Returns:
+            True if saved successfully
+        """
+        now = get_et_now()
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    INSERT OR REPLACE INTO strategy_params
+                    (param_name, param_value, previous_value, reason, confidence, applied_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                    (
+                        param_name,
+                        param_value,
+                        previous_value,
+                        reason,
+                        confidence,
+                        now.isoformat(),
+                    ),
+                )
+            return True
+        except Exception:
+            return False
+
+    def get_strategy_param(self, param_name: str) -> Optional[float]:
+        """Get a single strategy parameter value.
+
+        Args:
+            param_name: Name of the parameter
+
+        Returns:
+            The parameter value, or None if not found
+        """
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT param_value FROM strategy_params WHERE param_name = ?",
+                (param_name,),
+            )
+            row = cursor.fetchone()
+            return row["param_value"] if row else None
+
+    def get_all_strategy_params(self) -> Dict[str, float]:
+        """Get all saved strategy parameters.
+
+        Returns:
+            Dict mapping param_name to param_value
+        """
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT param_name, param_value FROM strategy_params")
+            return {row["param_name"]: row["param_value"] for row in cursor.fetchall()}
+
+    def get_strategy_param_history(self, param_name: str) -> Optional[Dict[str, Any]]:
+        """Get full details of a strategy parameter including history.
+
+        Args:
+            param_name: Name of the parameter
+
+        Returns:
+            Dict with param details, or None if not found
+        """
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT * FROM strategy_params WHERE param_name = ?",
+                (param_name,),
+            )
+            row = cursor.fetchone()
+            return dict(row) if row else None
 
 
 # Singleton instance

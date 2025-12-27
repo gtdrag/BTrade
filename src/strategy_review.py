@@ -194,13 +194,20 @@ class StrategyReviewer:
         self.client = anthropic.Anthropic(api_key=self.api_key)
         self.db = get_database()
 
-        # Current strategy parameters
+        # Default strategy parameters
         self.current_params = {
             "mr_threshold": -2.0,
             "reversal_threshold": -2.0,
             "crash_threshold": -2.0,
             "pump_threshold": 2.0,
         }
+
+        # Load any persisted parameters from database (override defaults)
+        saved_params = self.db.get_all_strategy_params()
+        for param, value in saved_params.items():
+            if param in self.current_params:
+                self.current_params[param] = value
+                logger.info(f"Loaded saved parameter: {param} = {value}")
 
     def _fetch_market_data(self, days: int = 90) -> Dict[str, List[Dict]]:
         """Fetch market data from Alpaca."""
@@ -573,8 +580,18 @@ class StrategyReviewer:
 
         try:
             # Update our internal tracking
+            old_value = self.current_params[param]
             self.current_params[param] = new_value
             recommendation.applied = True
+
+            # Persist to database for survival across restarts
+            self.db.save_strategy_param(
+                param_name=param,
+                param_value=new_value,
+                previous_value=old_value,
+                reason=recommendation.reason,
+                confidence=recommendation.confidence,
+            )
 
             # Log the change
             self.db.log_event(
@@ -582,7 +599,7 @@ class StrategyReviewer:
                 f"Applied recommendation: {param} → {new_value}",
                 {
                     "parameter": param,
-                    "old_value": recommendation.current_value,
+                    "old_value": old_value,
                     "new_value": new_value,
                     "reason": recommendation.reason,
                     "confidence": recommendation.confidence,
@@ -592,7 +609,7 @@ class StrategyReviewer:
 
             logger.info(
                 f"Applied parameter change: {param} = {new_value} "
-                f"(was {recommendation.current_value})"
+                f"(was {old_value}) - persisted to database"
             )
 
             return True

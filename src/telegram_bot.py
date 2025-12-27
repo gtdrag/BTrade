@@ -1487,9 +1487,8 @@ class TelegramBot:
                         f"✅ *Parameter Updated!*\n\n"
                         f"*{rec.to_display_name()}*\n"
                         f"`{rec.current_value}` → `{rec.recommended_value}`\n\n"
-                        f"_Change applied successfully._\n\n"
-                        f"⚠️ Note: This updates the bot's runtime config. "
-                        f"For permanent changes, update the code."
+                        f"_Change applied and saved to database._\n\n"
+                        f"💾 This change persists across restarts."
                     ),
                     parse_mode="Markdown",
                 )
