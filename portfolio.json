@@ -46,11 +46,11 @@
   "diagrams": [
     {
       "label": "System Overview",
-      "mermaid": "%%{init: {'theme': 'base', 'themeVariables': { 'primaryColor': 'rgba(212,168,71,0.15)', 'primaryTextColor': '#d4a847', 'primaryBorderColor': 'rgba(212,168,71,0.4)', 'lineColor': 'rgba(212,168,71,0.5)', 'background': 'transparent', 'mainBkg': 'rgba(212,168,71,0.1)', 'nodeBorder': 'rgba(212,168,71,0.4)'}}}%%\nflowchart TB\n    subgraph CLOUD[\"RAILWAY\"]\n        SCHED[\"Scheduler\"]\n        STRAT[\"Strategy\"]\n        DB[\"SQLite\"]\n    end\n    subgraph DATA[\"DATA\"]\n        ALPACA[\"Alpaca\"]\n        COIN[\"Coinbase\"]\n    end\n    subgraph UI[\"INTERFACE\"]\n        TG[\"Telegram\"]\n    end\n    subgraph EXEC[\"BROKER\"]\n        ET[\"E*TRADE\"]\n    end\n    subgraph AI[\"AI\"]\n        CL[\"Claude\"]\n    end\n    DATA --> STRAT\n    SCHED --> STRAT\n    STRAT --> DB\n    STRAT <--> TG\n    TG --> ET\n    STRAT <--> CL"
+      "mermaid": "flowchart TB\n    subgraph CLOUD[RAILWAY]\n        SCHED[Scheduler]\n        STRAT[Strategy]\n        DB[SQLite]\n    end\n    subgraph DATA[DATA]\n        ALPACA[Alpaca]\n        COIN[Coinbase]\n    end\n    subgraph UI[INTERFACE]\n        TG[Telegram]\n    end\n    subgraph EXEC[BROKER]\n        ET[E-TRADE]\n    end\n    subgraph AI[AI]\n        CL[Claude]\n    end\n    DATA --> STRAT\n    SCHED --> STRAT\n    STRAT --> DB\n    STRAT <--> TG\n    TG --> ET\n    STRAT <--> CL"
     },
     {
       "label": "Optimization Loop",
-      "mermaid": "%%{init: {'theme': 'base', 'themeVariables': { 'primaryColor': 'rgba(212,168,71,0.15)', 'primaryTextColor': '#d4a847', 'primaryBorderColor': 'rgba(212,168,71,0.4)', 'lineColor': 'rgba(212,168,71,0.5)', 'background': 'transparent', 'mainBkg': 'rgba(212,168,71,0.1)', 'nodeBorder': 'rgba(212,168,71,0.4)'}}}%%\nflowchart LR\n    A[\"Trade\"] --> B[\"Collect\"]\n    B --> C[\"Analyze\"]\n    C --> D[\"Recommend\"]\n    D --> E[\"Approve?\"]\n    E -->|Yes| F[\"Update\"]\n    F --> A\n    E -->|No| A"
+      "mermaid": "flowchart LR\n    A[Trade] --> B[Collect]\n    B --> C[Analyze]\n    C --> D[Recommend]\n    D --> E[Approve?]\n    E -->|Yes| F[Update]\n    F --> A\n    E -->|No| A"
     }
   ],
 
