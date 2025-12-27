@@ -28,8 +28,10 @@ PARAMETER_CHANGE_TOOL = {
     "name": "recommend_parameter_change",
     "description": (
         "Recommend a change to a strategy parameter based on backtest analysis. "
-        "Only call this tool if the data strongly supports a parameter change. "
-        "Do not call if current parameters are optimal."
+        "CRITICAL: You may ONLY recommend values that were actually tested in the "
+        "parameter sensitivity analysis. Do NOT extrapolate or guess untested values. "
+        "Only call this tool if backtest data strongly supports a specific tested value. "
+        "Do not call if current parameters are optimal or if no tested value is clearly better."
     ),
     "input_schema": {
         "type": "object",
@@ -45,23 +47,37 @@ PARAMETER_CHANGE_TOOL = {
             },
             "recommended_value": {
                 "type": "number",
-                "description": "The recommended new value",
+                "description": (
+                    "The recommended new value. MUST be one of the values from the "
+                    "parameter sensitivity tests shown above - never extrapolate."
+                ),
+            },
+            "backtest_return": {
+                "type": "number",
+                "description": "The exact return percentage from the backtest for this value",
             },
             "expected_improvement": {
                 "type": "string",
-                "description": "Expected improvement (e.g., '+5% return, +2% win rate')",
+                "description": "Expected improvement based on backtest (e.g., '+5% return vs current')",
             },
             "confidence": {
                 "type": "string",
                 "enum": ["low", "medium", "high"],
-                "description": "Confidence level in this recommendation",
+                "description": "Confidence level - high only if backtest clearly shows improvement",
             },
             "reason": {
                 "type": "string",
-                "description": "Brief explanation for why this change is recommended",
+                "description": "Brief explanation referencing the specific backtest results",
             },
         },
-        "required": ["parameter", "current_value", "recommended_value", "reason", "confidence"],
+        "required": [
+            "parameter",
+            "current_value",
+            "recommended_value",
+            "backtest_return",
+            "reason",
+            "confidence",
+        ],
     },
 }
 
@@ -90,6 +106,9 @@ All positions close at 3:55 PM ET (never hold overnight).
 ### Parameter Sensitivity Analysis
 {parameter_tests}
 
+**Tested Values (you may ONLY recommend from these):**
+{tested_values}
+
 ### Raw Market Data Summary
 {market_summary}
 
@@ -117,7 +136,11 @@ Analyze this data and provide:
 
 Format your response as a clear report suitable for a Telegram message (use markdown, keep it under 2000 characters).
 
-**IMPORTANT**: If you recommend any parameter changes, you MUST use the `recommend_parameter_change` tool to submit each recommendation. This allows the system to automatically apply your suggestions with user approval. Only use the tool for changes that are strongly supported by the data.
+**CRITICAL RULES FOR RECOMMENDATIONS:**
+1. You may ONLY recommend values that appear in the "Tested Values" list above
+2. Do NOT extrapolate or guess values that weren't tested (e.g., if -1.5 and -2.0 were tested, do NOT recommend -1.0)
+3. When using the `recommend_parameter_change` tool, the `backtest_return` MUST match the exact return shown in the sensitivity analysis
+4. If no tested value clearly outperforms the current setting, respond with "NO CHANGES NEEDED"
 """
 
 
@@ -144,6 +167,7 @@ class ParameterRecommendation:
     recommended_value: float
     reason: str
     confidence: str  # "low", "medium", "high"
+    backtest_return: Optional[float] = None  # Return % from actual backtest
     expected_improvement: Optional[str] = None
     applied: bool = False  # True if user approved and applied
 
@@ -435,26 +459,57 @@ class StrategyReviewer:
             name="Current Strategy",
         )
 
-        # 3. Test alternative parameters
+        # 3. Test alternative parameters with DYNAMIC ranges around current values
         parameter_tests = []
+        tested_values: Dict[str, List[float]] = {
+            "mr_threshold": [],
+            "reversal_threshold": [],
+        }
 
-        # Test different reversal thresholds
-        for rev_thresh in [-1.5, -2.0, -2.5, -3.0]:
-            result = self._run_backtest(
-                ibit_data,
-                mr_threshold=-2.0,
-                reversal_threshold=rev_thresh,
-                name=f"Reversal @ {rev_thresh}%",
+        # Generate test values around current MR threshold (±0.5, ±1.0)
+        current_mr = self.current_params["mr_threshold"]
+        mr_test_values = sorted(
+            set(
+                [current_mr - 1.0, current_mr - 0.5, current_mr, current_mr + 0.5, current_mr + 1.0]
             )
-            parameter_tests.append(result)
+        )
+        # Keep values in reasonable range (not too close to 0, not too extreme)
+        mr_test_values = [v for v in mr_test_values if -4.0 <= v <= -0.5]
+        tested_values["mr_threshold"] = mr_test_values
 
-        # Test different MR thresholds
-        for mr_thresh in [-1.5, -2.0, -2.5, -3.0]:
+        # Generate test values around current reversal threshold
+        current_rev = self.current_params["reversal_threshold"]
+        rev_test_values = sorted(
+            set(
+                [
+                    current_rev - 1.0,
+                    current_rev - 0.5,
+                    current_rev,
+                    current_rev + 0.5,
+                    current_rev + 1.0,
+                ]
+            )
+        )
+        rev_test_values = [v for v in rev_test_values if -4.0 <= v <= -0.5]
+        tested_values["reversal_threshold"] = rev_test_values
+
+        # Test MR thresholds (using CURRENT reversal as baseline)
+        for mr_thresh in mr_test_values:
             result = self._run_backtest(
                 ibit_data,
                 mr_threshold=mr_thresh,
-                reversal_threshold=-2.0,
-                name=f"MR Threshold @ {mr_thresh}%",
+                reversal_threshold=self.current_params["reversal_threshold"],  # Use current!
+                name=f"MR @ {mr_thresh}%",
+            )
+            parameter_tests.append(result)
+
+        # Test reversal thresholds (using CURRENT MR as baseline)
+        for rev_thresh in rev_test_values:
+            result = self._run_backtest(
+                ibit_data,
+                mr_threshold=self.current_params["mr_threshold"],  # Use current!
+                reversal_threshold=rev_thresh,
+                name=f"Reversal @ {rev_thresh}%",
             )
             parameter_tests.append(result)
 
@@ -462,6 +517,12 @@ class StrategyReviewer:
         current_backtest = self._format_backtest_result(current_result)
         param_tests_str = "\n\n".join(self._format_backtest_result(r) for r in parameter_tests)
         market_summary = self._generate_market_summary(ibit_data)
+
+        # Build explicit tested values list for Claude
+        tested_values_str = (
+            f"- mr_threshold: {tested_values['mr_threshold']}\n"
+            f"- reversal_threshold: {tested_values['reversal_threshold']}"
+        )
 
         # 5. Build prompt
         prompt = STRATEGY_REVIEW_PROMPT.format(
@@ -471,6 +532,7 @@ class StrategyReviewer:
             pump_threshold=self.current_params["pump_threshold"],
             current_backtest=current_backtest,
             parameter_tests=param_tests_str,
+            tested_values=tested_values_str,
             market_summary=market_summary,
         )
 
@@ -501,13 +563,26 @@ class StrategyReviewer:
                         recommended_value=rec_data["recommended_value"],
                         reason=rec_data["reason"],
                         confidence=rec_data.get("confidence", "medium"),
+                        backtest_return=rec_data.get("backtest_return"),
                         expected_improvement=rec_data.get("expected_improvement"),
                     )
+
+                    # Validate: recommended value should be in tested values
+                    param = rec.parameter
+                    if param in tested_values:
+                        if rec.recommended_value not in tested_values[param]:
+                            logger.warning(
+                                f"Claude recommended untested value {rec.recommended_value} "
+                                f"for {param}. Tested values: {tested_values[param]}"
+                            )
+                            # Still include it but log the warning
+                            rec.confidence = "low"  # Downgrade confidence
+
                     recommendations.append(rec)
                     logger.info(
                         f"Claude recommends: {rec.parameter} "
                         f"{rec.current_value} → {rec.recommended_value} "
-                        f"(confidence: {rec.confidence})"
+                        f"(backtest: {rec.backtest_return}%, confidence: {rec.confidence})"
                     )
 
             has_recs = len(recommendations) > 0

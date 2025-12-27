@@ -1121,8 +1121,12 @@ class TelegramBot:
                         f"_{rec.reason}_"
                     )
 
+                    # Show backtest return if available (proves it was actually tested)
+                    if rec.backtest_return is not None:
+                        rec_msg += f"\n\n📊 Backtest Return: `{rec.backtest_return:+.2f}%`"
+
                     if rec.expected_improvement:
-                        rec_msg += f"\n\n📈 Expected: {rec.expected_improvement}"
+                        rec_msg += f"\n📈 Expected: {rec.expected_improvement}"
 
                     keyboard = InlineKeyboardMarkup(
                         [
