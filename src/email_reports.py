@@ -58,6 +58,10 @@ def send_email(subject: str, html_body: str, text_body: str = None) -> bool:
         return False
 
     try:
+        logger.info(
+            f"Attempting to send email to {config['report_email']} from {config['smtp_user']}"
+        )
+
         msg = MIMEMultipart("alternative")
         msg["Subject"] = subject
         msg["From"] = config["smtp_user"]
@@ -71,9 +75,12 @@ def send_email(subject: str, html_body: str, text_body: str = None) -> bool:
         msg.attach(MIMEText(html_body, "html"))
 
         # Connect and send
+        logger.info(f"Connecting to {SMTP_HOST}:{SMTP_PORT}...")
         with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
             server.starttls()
+            logger.info("TLS started, logging in...")
             server.login(config["smtp_user"], config["smtp_password"])
+            logger.info("Login successful, sending email...")
             server.sendmail(
                 config["smtp_user"],
                 config["report_email"],
@@ -83,8 +90,14 @@ def send_email(subject: str, html_body: str, text_body: str = None) -> bool:
         logger.info(f"Email sent successfully to {config['report_email']}")
         return True
 
+    except smtplib.SMTPAuthenticationError as e:
+        logger.error(f"SMTP Authentication failed: {e}. Check SMTP_USER and SMTP_PASSWORD.")
+        return False
+    except smtplib.SMTPException as e:
+        logger.error(f"SMTP error: {e}")
+        return False
     except Exception as e:
-        logger.error(f"Failed to send email: {e}")
+        logger.error(f"Failed to send email: {type(e).__name__}: {e}")
         return False
 
 
