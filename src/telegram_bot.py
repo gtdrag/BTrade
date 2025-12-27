@@ -152,6 +152,9 @@ class TelegramBot:
         self._app.add_handler(CommandHandler("auth", self._cmd_auth))
         self._app.add_handler(CommandHandler("verify", self._cmd_verify))
 
+        # Add command handlers - backtesting
+        self._app.add_handler(CommandHandler("backtest", self._cmd_backtest))
+
         # Add callback handler for inline buttons
         self._app.add_handler(CallbackQueryHandler(self._handle_callback))
 
@@ -286,6 +289,9 @@ class TelegramBot:
             "🛡️ *Risk Management:*\n"
             "/hedge - Trailing hedge status/control\n"
             "/review - Run monthly strategy review now\n\n"
+            "📈 *Backtesting:*\n"
+            "/backtest - Run strategy backtest\n"
+            "  Examples: `/backtest 3 months`, `/backtest 1 week`\n\n"
             "🔐 E\\*TRADE Auth:\n"
             "/auth - Start E\\*TRADE login\n"
             "/verify CODE - Complete login\n\n"
@@ -1217,6 +1223,172 @@ class TelegramBot:
             )
         else:
             await update.message.reply_text(f"❌ Failed to retire pattern `{pattern_name}`.")
+
+    # ========== Backtesting Commands ==========
+
+    def _parse_time_range(self, args: list) -> tuple:
+        """
+        Parse natural language time range into days.
+
+        Examples:
+            "3 months" -> 90 days
+            "1 week" -> 7 days
+            "30 days" -> 30 days
+            "6m" -> 180 days
+            "2w" -> 14 days
+
+        Returns:
+            Tuple of (days, description) or (None, error_message)
+        """
+        if not args:
+            return 90, "3 months"  # Default
+
+        # Join args and normalize
+        text = " ".join(args).lower().strip()
+
+        # Handle shorthand like "3m", "2w", "30d"
+        import re
+
+        shorthand = re.match(r"^(\d+)\s*([mwd])$", text)
+        if shorthand:
+            num = int(shorthand.group(1))
+            unit = shorthand.group(2)
+            if unit == "m":
+                return num * 30, f"{num} month{'s' if num > 1 else ''}"
+            elif unit == "w":
+                return num * 7, f"{num} week{'s' if num > 1 else ''}"
+            elif unit == "d":
+                return num, f"{num} day{'s' if num > 1 else ''}"
+
+        # Handle full words
+        match = re.match(r"^(\d+)\s*(month|months|week|weeks|day|days)$", text)
+        if match:
+            num = int(match.group(1))
+            unit = match.group(2)
+            if "month" in unit:
+                return num * 30, f"{num} month{'s' if num > 1 else ''}"
+            elif "week" in unit:
+                return num * 7, f"{num} week{'s' if num > 1 else ''}"
+            elif "day" in unit:
+                return num, f"{num} day{'s' if num > 1 else ''}"
+
+        # Handle just a number (assume days)
+        if text.isdigit():
+            num = int(text)
+            return num, f"{num} days"
+
+        return None, f"Could not parse '{text}'. Try: `3 months`, `2 weeks`, `30 days`"
+
+    async def _cmd_backtest(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /backtest command - run strategy backtests."""
+        if not self._is_authorized(update):
+            await self._send_unauthorized_response(update)
+            return
+
+        # Parse time range
+        days, description = self._parse_time_range(context.args)
+
+        if days is None:
+            await update.message.reply_text(
+                f"❌ {description}\n\n"
+                "*Usage:*\n"
+                "`/backtest 3 months`\n"
+                "`/backtest 2 weeks`\n"
+                "`/backtest 30 days`\n"
+                "`/backtest 6m`\n"
+                "`/backtest` (defaults to 3 months)",
+                parse_mode="Markdown",
+            )
+            return
+
+        await update.message.reply_text(
+            f"📊 *Running Backtest*\n\n"
+            f"Period: {description} ({days} days)\n"
+            f"Loading IBIT data from Yahoo Finance...\n\n"
+            f"This may take 10-30 seconds.",
+            parse_mode="Markdown",
+        )
+
+        try:
+            from datetime import date, timedelta
+
+            from .multi_strategy_backtester import MultiStrategyBacktester
+
+            # Calculate date range
+            end_date = date.today()
+            start_date = end_date - timedelta(days=days)
+
+            # Run backtests
+            backtester = MultiStrategyBacktester(initial_capital=10000.0)
+            backtester.load_data(start_date, end_date)
+
+            # Run each strategy
+            mean_rev = backtester.backtest_mean_reversion(threshold=-2.0, skip_thursday=True)
+            short_thu = backtester.backtest_short_thursday()
+            combined = backtester.backtest_combined(
+                mean_reversion_threshold=-2.0, enable_short_thursday=True
+            )
+
+            # Format results
+            lines = [
+                "📈 *Backtest Results*",
+                f"_{start_date} to {end_date}_\n",
+            ]
+
+            # Mean Reversion results
+            lines.append("*1️⃣ Mean Reversion* (buy after -2% days)")
+            lines.append(f"   Trades: {mean_rev.total_trades}")
+            lines.append(f"   Win Rate: {mean_rev.win_rate:.1f}%")
+            lines.append(f"   Return: {mean_rev.total_return_pct:+.1f}%")
+            lines.append(f"   Avg Trade: {mean_rev.avg_return_pct:+.2f}%")
+            lines.append("")
+
+            # Short Thursday results
+            lines.append("*2️⃣ Short Thursday* (short every Thursday)")
+            lines.append(f"   Trades: {short_thu.total_trades}")
+            lines.append(f"   Win Rate: {short_thu.win_rate:.1f}%")
+            lines.append(f"   Return: {short_thu.total_return_pct:+.1f}%")
+            lines.append(f"   Avg Trade: {short_thu.avg_return_pct:+.2f}%")
+            lines.append("")
+
+            # Combined results
+            lines.append("*3️⃣ Combined Strategy*")
+            lines.append(f"   Trades: {combined.total_trades}")
+            lines.append(f"   Win Rate: {combined.win_rate:.1f}%")
+            lines.append(f"   Return: {combined.total_return_pct:+.1f}%")
+            lines.append(f"   Sharpe: {combined.sharpe_ratio:.2f}")
+            lines.append(f"   Max DD: {combined.max_drawdown_pct:.1f}%")
+            lines.append("")
+
+            # Buy & Hold comparison
+            lines.append("*📊 Comparison*")
+            lines.append(f"   Buy & Hold: {combined.buy_hold_return_pct:+.1f}%")
+            lines.append(
+                f"   Strategy vs B&H: {combined.total_return_pct - combined.buy_hold_return_pct:+.1f}%"
+            )
+
+            # Best strategy
+            best = max(
+                [
+                    ("Mean Reversion", mean_rev),
+                    ("Short Thursday", short_thu),
+                    ("Combined", combined),
+                ],
+                key=lambda x: x[1].total_return_pct,
+            )
+            lines.append("")
+            lines.append(f"🏆 *Best:* {best[0]} ({best[1].total_return_pct:+.1f}%)")
+
+            await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+        except ImportError as e:
+            await update.message.reply_text(
+                f"❌ Missing dependency: {e}\n\n" "Install with: `pip install yfinance`",
+                parse_mode="Markdown",
+            )
+        except Exception as e:
+            logger.error(f"Backtest failed: {e}")
+            await update.message.reply_text(f"❌ Backtest failed: {e}")
 
     # ========== E*TRADE Authentication Commands ==========
 
