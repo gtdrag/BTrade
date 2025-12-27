@@ -1582,12 +1582,12 @@ class TelegramBot:
             await update.message.reply_text(
                 f"❌ {description}\n\n"
                 "*Usage:*\n"
-                "`/simulate 2024` \\- Full year\n"
-                "`/simulate 6 months` \\- Last 6 months\n"
-                "`/simulate 2024 email` \\- Send report via email\n"
-                "`/simulate Jan 2024 to Jun 2024` \\- Month range\n"
-                "`/simulate 2024-01-01 to 2024-06-30` \\- Date range\n",
-                parse_mode="MarkdownV2",
+                "`/simulate 2024` - Full year\n"
+                "`/simulate 6 months` - Last 6 months\n"
+                "`/simulate 2024 email` - Send report via email\n"
+                "`/simulate Jan 2024 to Jun 2024` - Month range\n"
+                "`/simulate 2024-01-01 to 2024-06-30` - Date range\n",
+                parse_mode="Markdown",
             )
             return
 
@@ -1616,23 +1616,23 @@ class TelegramBot:
                 await update.message.reply_text(
                     "❌ *Email not configured*\n\n"
                     "Set these environment variables:\n"
-                    "• `SMTP_USER` \\- Gmail address\n"
-                    "• `SMTP_PASSWORD` \\- Gmail app password\n"
-                    "• `REPORT_EMAIL` \\- Recipient email",
-                    parse_mode="MarkdownV2",
+                    "• `SMTP_USER` - Gmail address\n"
+                    "• `SMTP_PASSWORD` - Gmail app password\n"
+                    "• `REPORT_EMAIL` - Recipient email",
+                    parse_mode="Markdown",
                 )
                 return
 
         # Send initial status
-        email_note = " \\(email report\\)" if send_email else ""
+        email_note = " (email report)" if send_email else ""
         status_msg = await update.message.reply_text(
             f"🔬 *Starting Historical Simulation*{email_note}\n\n"
             f"Period: {description}\n"
             f"Reviews: ~{estimated_reviews}\n"
-            f"Est\\. Cost: ~${estimated_cost:.2f}\n\n"
-            f"⏳ Running simulation\\.\\.\\.\n"
-            f"This may take a few minutes\\.",
-            parse_mode="MarkdownV2",
+            f"Est. Cost: ~${estimated_cost:.2f}\n\n"
+            f"⏳ Running simulation...\n"
+            f"This may take a few minutes.",
+            parse_mode="Markdown",
         )
 
         try:
@@ -1656,20 +1656,20 @@ class TelegramBot:
                     diff_str = f"+{diff:.1f}%" if diff > 0 else f"{diff:.1f}%"
                     await status_msg.edit_text(
                         f"✅ *Simulation Complete*\n\n"
-                        f"📧 Report sent to your email\\!\n\n"
+                        f"📧 Report sent to your email!\n\n"
                         f"*Quick Summary:*\n"
                         f"• Reviews: {len(result.reviews)}\n"
                         f"• Static: {result.static_performance:+.1f}%\n"
                         f"• Evolved: {result.evolved_performance:+.1f}%\n"
                         f"• Difference: {diff_str}\n"
                         f"• Changes: {result.param_changes_count()}",
-                        parse_mode="MarkdownV2",
+                        parse_mode="Markdown",
                     )
                 else:
                     await status_msg.edit_text(
                         "❌ *Simulation completed but email failed*\n\n"
-                        "Check SMTP configuration and logs\\.",
-                        parse_mode="MarkdownV2",
+                        "Check SMTP configuration and logs.",
+                        parse_mode="Markdown",
                     )
             else:
                 # Send via Telegram
@@ -1689,8 +1689,8 @@ class TelegramBot:
         except Exception as e:
             logger.error(f"Simulation failed: {e}")
             await status_msg.edit_text(
-                f"❌ *Simulation Failed*\n\nError: {e}\n\nCheck logs for details\\.",
-                parse_mode="MarkdownV2",
+                f"❌ *Simulation Failed*\n\nError: {e}\n\nCheck logs for details.",
+                parse_mode="Markdown",
             )
 
     # ========== E*TRADE Authentication Commands ==========
