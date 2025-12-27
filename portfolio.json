@@ -1,0 +1,83 @@
+{
+  "badge": "Python · Claude AI · E*TRADE",
+  "tagline": "AI-powered Bitcoin ETF trading bot with regime detection, Telegram approvals, and recursive self-optimization. Intraday only — never holds overnight.",
+
+  "stats": [
+    { "value": "84%", "label": "Win Rate" },
+    { "value": "5", "label": "Signals" },
+    { "value": "24/7", "label": "Uptime" }
+  ],
+
+  "featuresLabel": "Trading Signals",
+  "featuresTitle": "Five Setups",
+  "features": [
+    {
+      "name": "Mean Reversion",
+      "trigger": "IBIT −2% prev day + BTC ↑ overnight",
+      "description": "Buy the bounce. Overnight BTC filter yields 84% win rate.",
+      "badge": "BITU 2× Long"
+    },
+    {
+      "name": "Short Thursday",
+      "trigger": "Every Thursday",
+      "description": "Bitcoin's historically weakest day. Consistent edge.",
+      "badge": "SBIT 2× Short"
+    },
+    {
+      "name": "Crash Day",
+      "trigger": "IBIT −2% intraday before noon",
+      "description": "Momentum short on major drops. Early detection.",
+      "badge": "SBIT 2× Short"
+    },
+    {
+      "name": "Pump Day",
+      "trigger": "IBIT +2% intraday before noon",
+      "description": "Momentum long on surges. Leverage amplifies.",
+      "badge": "BITU 2× Long"
+    },
+    {
+      "name": "AI Review",
+      "trigger": "Bi-weekly Claude analysis",
+      "description": "Detects regime shifts, recommends parameter changes.",
+      "badge": "Recursive"
+    }
+  ],
+
+  "diagrams": [
+    {
+      "label": "System Overview",
+      "mermaid": "%%{init: {'theme': 'base', 'themeVariables': { 'primaryColor': 'rgba(212,168,71,0.15)', 'primaryTextColor': '#d4a847', 'primaryBorderColor': 'rgba(212,168,71,0.4)', 'lineColor': 'rgba(212,168,71,0.5)', 'background': 'transparent', 'mainBkg': 'rgba(212,168,71,0.1)', 'nodeBorder': 'rgba(212,168,71,0.4)'}}}%%\nflowchart TB\n    subgraph CLOUD[\"RAILWAY\"]\n        SCHED[\"Scheduler\"]\n        STRAT[\"Strategy\"]\n        DB[\"SQLite\"]\n    end\n    subgraph DATA[\"DATA\"]\n        ALPACA[\"Alpaca\"]\n        COIN[\"Coinbase\"]\n    end\n    subgraph UI[\"INTERFACE\"]\n        TG[\"Telegram\"]\n    end\n    subgraph EXEC[\"BROKER\"]\n        ET[\"E*TRADE\"]\n    end\n    subgraph AI[\"AI\"]\n        CL[\"Claude\"]\n    end\n    DATA --> STRAT\n    SCHED --> STRAT\n    STRAT --> DB\n    STRAT <--> TG\n    TG --> ET\n    STRAT <--> CL"
+    },
+    {
+      "label": "Optimization Loop",
+      "mermaid": "%%{init: {'theme': 'base', 'themeVariables': { 'primaryColor': 'rgba(212,168,71,0.15)', 'primaryTextColor': '#d4a847', 'primaryBorderColor': 'rgba(212,168,71,0.4)', 'lineColor': 'rgba(212,168,71,0.5)', 'background': 'transparent', 'mainBkg': 'rgba(212,168,71,0.1)', 'nodeBorder': 'rgba(212,168,71,0.4)'}}}%%\nflowchart LR\n    A[\"Trade\"] --> B[\"Collect\"]\n    B --> C[\"Analyze\"]\n    C --> D[\"Recommend\"]\n    D --> E[\"Approve?\"]\n    E -->|Yes| F[\"Update\"]\n    F --> A\n    E -->|No| A"
+    }
+  ],
+
+  "techStack": [
+    { "name": "Python 3.10", "role": "Runtime", "icon": "⚙" },
+    { "name": "Claude API", "role": "AI Analysis", "icon": "◎" },
+    { "name": "Alpaca", "role": "Market Data", "icon": "◈" },
+    { "name": "E*TRADE", "role": "Execution", "icon": "◇" },
+    { "name": "Telegram", "role": "Interface", "icon": "▷" },
+    { "name": "Railway", "role": "Hosting", "icon": "▢" }
+  ],
+
+  "scheduleLabel": "Automation",
+  "scheduleTitle": "Daily Flow",
+  "schedule": [
+    { "time": "8:30 AM", "title": "Health Check", "description": "Token refresh, system status" },
+    { "time": "9:15 AM", "title": "Pre-Market", "description": "Signal preview for the day" },
+    { "time": "9:35 AM", "title": "Morning Signal", "description": "Mean Reversion + Short Thursday check" },
+    { "time": "9:45–12", "title": "Intraday Monitor", "description": "15-min intervals for Crash/Pump" },
+    { "time": "3:55 PM", "title": "Close All", "description": "Flat by market close — never overnight" }
+  ],
+
+  "footerLinks": [
+    { "label": "GitHub", "url": "https://github.com/gtdrag/BTrade" },
+    { "label": "Strategy", "url": "https://github.com/gtdrag/BTrade/blob/main/docs/STRATEGY_GUIDE.md" },
+    { "label": "Docs", "url": "https://github.com/gtdrag/BTrade/blob/main/docs/architecture.md" }
+  ],
+
+  "disclaimer": "Educational purposes only · Not financial advice"
+}
