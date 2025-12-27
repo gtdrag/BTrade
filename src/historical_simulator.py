@@ -139,6 +139,23 @@ class SimulationResult:
             ]
         )
 
+        # Handle case when no reviews ran
+        if not self.reviews:
+            lines.append("\n⚠️ *No reviews executed*")
+            lines.append("Possible reasons:")
+            lines.append("• No market data available for this period")
+            lines.append("• IBIT ETF launched Jan 2024 - earlier dates won't work")
+            lines.append("• Period too short (need 14+ days)")
+            lines.extend(
+                [
+                    "",
+                    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+                    f"API Calls: {self.total_api_calls}",
+                    f"Est. Cost: ${self.estimated_cost:.2f}",
+                ]
+            )
+            return "\n".join(lines)
+
         # Show each review
         for review in self.reviews:
             date_str = review.review_date.strftime("%b %d")
@@ -715,6 +732,37 @@ class HistoricalSimulator:
         Returns:
             SimulationResult with complete simulation data
         """
+        # Cap end_date to today if it's in the future (can't simulate future data)
+        today = datetime.now()
+        if end_date > today:
+            logger.info(f"Capping end_date from {end_date.strftime('%Y-%m-%d')} to today")
+            end_date = today
+
+        # Ensure we have at least 14 days to simulate
+        if (end_date - start_date).days < 14:
+            logger.error("Simulation period too short (need at least 14 days)")
+            return SimulationResult(
+                start_date=start_date,
+                end_date=end_date,
+                initial_params={
+                    "mr_threshold": -2.0,
+                    "reversal_threshold": -2.0,
+                    "crash_threshold": -2.0,
+                    "pump_threshold": 2.0,
+                },
+                final_params={
+                    "mr_threshold": -2.0,
+                    "reversal_threshold": -2.0,
+                    "crash_threshold": -2.0,
+                    "pump_threshold": 2.0,
+                },
+                reviews=[],
+                static_performance=0,
+                evolved_performance=0,
+                total_api_calls=0,
+                estimated_cost=0,
+            )
+
         logger.info(
             f"Starting simulation: {start_date.strftime('%Y-%m-%d')} → "
             f"{end_date.strftime('%Y-%m-%d')}"
@@ -742,7 +790,10 @@ class HistoricalSimulator:
         all_data = self._fetch_market_data(data_start, end_date)
 
         if not all_data:
-            logger.error("No market data available for simulation period")
+            logger.error(
+                f"No market data available for {start_date.strftime('%Y-%m-%d')} to "
+                f"{end_date.strftime('%Y-%m-%d')}"
+            )
             return SimulationResult(
                 start_date=start_date,
                 end_date=end_date,
@@ -754,6 +805,8 @@ class HistoricalSimulator:
                 total_api_calls=0,
                 estimated_cost=0,
             )
+
+        logger.info(f"Fetched {len(all_data)} days of market data")
 
         # Generate review dates
         review_dates = []
