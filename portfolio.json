@@ -1,6 +1,5 @@
 {
   "logo": "https://raw.githubusercontent.com/gtdrag/BTrade/main/assets/logo.svg",
-  "badge": "Python · Claude AI · E*TRADE",
   "tagline": "AI-powered Bitcoin ETF trading bot with regime detection, Telegram approvals, and recursive self-optimization. Intraday only — never holds overnight.",
 
   "diagrams": [
@@ -21,16 +20,6 @@
     { "name": "E*TRADE", "role": "Execution", "icon": "◇" },
     { "name": "Telegram", "role": "Interface", "icon": "▷" },
     { "name": "Railway", "role": "Hosting", "icon": "▢" }
-  ],
-
-  "scheduleLabel": "Automation",
-  "scheduleTitle": "Daily Flow",
-  "schedule": [
-    { "time": "8:30 AM", "title": "Health Check", "description": "Token refresh, system status" },
-    { "time": "9:15 AM", "title": "Pre-Market", "description": "Signal preview for the day" },
-    { "time": "9:35 AM", "title": "Morning Signal", "description": "Mean Reversion + Short Thursday check" },
-    { "time": "9:45–12", "title": "Intraday Monitor", "description": "15-min intervals for Crash/Pump" },
-    { "time": "3:55 PM", "title": "Close All", "description": "Flat by market close — never overnight" }
   ],
 
   "footerLinks": [
