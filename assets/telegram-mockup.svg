@@ -1,0 +1,85 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 380 700" fill="none">
+  <!-- Phone Frame -->
+  <rect x="0" y="0" width="380" height="700" rx="40" fill="#1a1a1a"/>
+  <rect x="8" y="8" width="364" height="684" rx="36" fill="#0e1621"/>
+
+  <!-- Status Bar -->
+  <text x="30" y="40" font-family="SF Pro, Arial, sans-serif" font-size="14" fill="#fff">9:41</text>
+  <g fill="#fff" transform="translate(300, 28)">
+    <rect x="0" y="4" width="4" height="8" rx="1"/>
+    <rect x="6" y="2" width="4" height="10" rx="1"/>
+    <rect x="12" y="0" width="4" height="12" rx="1"/>
+    <rect x="18" y="2" width="4" height="10" rx="1"/>
+    <rect x="28" y="2" width="22" height="10" rx="3" stroke="#fff" stroke-width="1" fill="none"/>
+    <rect x="30" y="4" width="14" height="6" rx="1" fill="#4cd964"/>
+  </g>
+
+  <!-- Header -->
+  <rect x="8" y="55" width="364" height="60" fill="#17212b"/>
+  <text x="190" y="85" font-family="SF Pro, Arial, sans-serif" font-size="17" font-weight="600" fill="#fff" text-anchor="middle">BTrade</text>
+  <text x="190" y="103" font-family="SF Pro, Arial, sans-serif" font-size="13" fill="#708499" text-anchor="middle">bot</text>
+
+  <!-- Bot Avatar -->
+  <circle cx="340" cy="85" r="20" fill="#0a0806" stroke="#d4a847" stroke-width="2"/>
+  <text x="340" y="92" font-family="Arial" font-size="18" font-weight="bold" fill="#d4a847" text-anchor="middle">₿</text>
+
+  <!-- Back Arrow -->
+  <path d="M30 85 L40 75 M30 85 L40 95" stroke="#5eaade" stroke-width="2.5" stroke-linecap="round"/>
+
+  <!-- Chat Area Background -->
+  <rect x="8" y="115" width="364" height="520" fill="#0e1621"/>
+
+  <!-- Time Stamp -->
+  <rect x="150" y="130" width="80" height="24" rx="12" fill="#182533"/>
+  <text x="190" y="147" font-family="SF Pro, Arial, sans-serif" font-size="12" fill="#708499" text-anchor="middle">Today</text>
+
+  <!-- Trade Signal Message (Bot) -->
+  <g transform="translate(20, 170)">
+    <rect x="0" y="0" width="280" height="200" rx="16" fill="#182533"/>
+    <text x="15" y="28" font-family="SF Pro, Arial, sans-serif" font-size="14" font-weight="600" fill="#fff">🚨 Trade Signal Detected</text>
+
+    <text x="15" y="55" font-family="SF Pro, Arial, sans-serif" font-size="13" fill="#d4a847">MEAN REVERSION</text>
+
+    <text x="15" y="80" font-family="SF Pro, Arial, sans-serif" font-size="12" fill="#aaa">IBIT dropped 2.3% yesterday</text>
+    <text x="15" y="98" font-family="SF Pro, Arial, sans-serif" font-size="12" fill="#aaa">BTC up 1.8% overnight ✓</text>
+
+    <line x1="15" y1="115" x2="265" y2="115" stroke="#2a3f4f" stroke-width="1"/>
+
+    <text x="15" y="138" font-family="SF Pro, Arial, sans-serif" font-size="13" fill="#fff">Action: BUY BITU (2x Long)</text>
+    <text x="15" y="158" font-family="SF Pro, Arial, sans-serif" font-size="13" fill="#fff">Amount: $2,500</text>
+
+    <text x="250" y="188" font-family="SF Pro, Arial, sans-serif" font-size="11" fill="#708499">9:35 AM</text>
+  </g>
+
+  <!-- Approve/Reject Buttons -->
+  <g transform="translate(20, 385)">
+    <rect x="0" y="0" width="280" height="50" rx="12" fill="#182533"/>
+    <rect x="15" y="10" width="120" height="32" rx="8" fill="#4cd964"/>
+    <text x="75" y="32" font-family="SF Pro, Arial, sans-serif" font-size="14" font-weight="600" fill="#fff" text-anchor="middle">✓ Approve</text>
+    <rect x="145" y="10" width="120" height="32" rx="8" fill="#ff3b30"/>
+    <text x="205" y="32" font-family="SF Pro, Arial, sans-serif" font-size="14" font-weight="600" fill="#fff" text-anchor="middle">✗ Reject</text>
+  </g>
+
+  <!-- Confirmation Message (Bot) -->
+  <g transform="translate(20, 450)">
+    <rect x="0" y="0" width="260" height="80" rx="16" fill="#182533"/>
+    <text x="15" y="28" font-family="SF Pro, Arial, sans-serif" font-size="14" fill="#4cd964">✓ Trade Approved</text>
+    <text x="15" y="50" font-family="SF Pro, Arial, sans-serif" font-size="12" fill="#aaa">Bought 56 shares BITU @ $44.62</text>
+    <text x="15" y="68" font-family="SF Pro, Arial, sans-serif" font-size="12" fill="#aaa">Position opened successfully</text>
+    <text x="230" y="68" font-family="SF Pro, Arial, sans-serif" font-size="11" fill="#708499">9:36 AM</text>
+  </g>
+
+  <!-- Status Message (Bot) -->
+  <g transform="translate(20, 545)">
+    <rect x="0" y="0" width="240" height="55" rx="16" fill="#182533"/>
+    <text x="15" y="25" font-family="SF Pro, Arial, sans-serif" font-size="13" fill="#d4a847">📊 P/L: +$127.40 (+5.1%)</text>
+    <text x="15" y="45" font-family="SF Pro, Arial, sans-serif" font-size="11" fill="#708499">Will close at 3:55 PM</text>
+  </g>
+
+  <!-- Input Bar -->
+  <rect x="8" y="635" width="364" height="57" fill="#17212b"/>
+  <rect x="20" y="647" width="280" height="36" rx="18" fill="#242f3d"/>
+  <text x="40" y="670" font-family="SF Pro, Arial, sans-serif" font-size="14" fill="#708499">Message</text>
+  <circle cx="330" cy="665" r="16" fill="#5eaade"/>
+  <path d="M325 665 L335 665 M330 660 L330 670" stroke="#fff" stroke-width="2" stroke-linecap="round"/>
+</svg>
