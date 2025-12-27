@@ -110,6 +110,34 @@ class SimulationResult:
             count += len(review.recommendations)
         return count
 
+    @staticmethod
+    def _escape_markdown(text: str) -> str:
+        """Escape special Telegram markdown characters."""
+        # Characters that need escaping in Telegram Markdown
+        special_chars = [
+            "_",
+            "*",
+            "[",
+            "]",
+            "(",
+            ")",
+            "~",
+            "`",
+            ">",
+            "#",
+            "+",
+            "-",
+            "=",
+            "|",
+            "{",
+            "}",
+            ".",
+            "!",
+        ]
+        for char in special_chars:
+            text = text.replace(char, f"\\{char}")
+        return text
+
     def format_report(self) -> str:
         """Generate formatted simulation report for Telegram."""
         lines = [
@@ -176,12 +204,13 @@ class SimulationResult:
                     old = rec.get("old_value", "?")
                     new = rec.get("new_value", "?")
                     conf = rec.get("confidence", "?")
-                    lines.append(f"  → {param}: {old} → {new} [{conf}]")
+                    lines.append(f"  → {param}: {old} → {new} \\[{conf}\\]")
                     reason = rec.get("reason", "")
                     if reason:
-                        # Truncate long reasons
+                        # Truncate long reasons and escape markdown
                         reason = reason[:60] + "..." if len(reason) > 60 else reason
-                        lines.append(f"    _{reason}_")
+                        reason = self._escape_markdown(reason)
+                        lines.append(f"    {reason}")
             else:
                 lines.append("  → No changes")
 
@@ -189,7 +218,8 @@ class SimulationResult:
                 for item in review.watch_items:
                     cat = item.get("category", "?")
                     desc = item.get("description", "?")[:40]
-                    lines.append(f"  ⚠️ [{cat}] {desc}")
+                    desc = self._escape_markdown(desc)
+                    lines.append(f"  ⚠️ \\[{cat}\\] {desc}")
 
         lines.extend(
             [
