@@ -10,6 +10,7 @@ Uses Gmail SMTP for simplicity. Requires environment variables:
 import logging
 import os
 import smtplib
+import traceback
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from typing import TYPE_CHECKING
@@ -74,9 +75,9 @@ def send_email(subject: str, html_body: str, text_body: str = None) -> bool:
         # Add HTML version
         msg.attach(MIMEText(html_body, "html"))
 
-        # Connect and send
+        # Connect and send (30 second timeout)
         logger.info(f"Connecting to {SMTP_HOST}:{SMTP_PORT}...")
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30) as server:
             server.starttls()
             logger.info("TLS started, logging in...")
             server.login(config["smtp_user"], config["smtp_password"])
@@ -92,12 +93,15 @@ def send_email(subject: str, html_body: str, text_body: str = None) -> bool:
 
     except smtplib.SMTPAuthenticationError as e:
         logger.error(f"SMTP Authentication failed: {e}. Check SMTP_USER and SMTP_PASSWORD.")
+        logger.error(f"Traceback: {traceback.format_exc()}")
         return False
     except smtplib.SMTPException as e:
         logger.error(f"SMTP error: {e}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
         return False
     except Exception as e:
         logger.error(f"Failed to send email: {type(e).__name__}: {e}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
         return False
 
 
