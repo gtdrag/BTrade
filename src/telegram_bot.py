@@ -297,8 +297,8 @@ class TelegramBot:
             "  Examples: `/backtest 3 months`, `/backtest 1 week`\n"
             "/simulate - Historical AI evolution simulation\n"
             "  `/simulate 2024` - Full year\n"
-            "  `/simulate Jan 2024 to Jun 2024` - Month range\n"
-            "  `/simulate 2024-01-01 to 2024-06-30` - Date range\n\n"
+            "  `/simulate 2024 email` - Send via email\n"
+            "  `/simulate Jan 2024 to Jun 2024` - Month range\n\n"
             "🔐 E\\*TRADE Auth:\n"
             "/auth - Start E\\*TRADE login\n"
             "/verify CODE - Complete login\n\n"
@@ -1568,19 +1568,26 @@ class TelegramBot:
             await self._send_unauthorized_response(update)
             return
 
+        # Check for email flag
+        args = list(context.args) if context.args else []
+        send_email = False
+        if "email" in [a.lower() for a in args]:
+            send_email = True
+            args = [a for a in args if a.lower() != "email"]
+
         # Parse simulation period
-        start_date, end_date, description = self._parse_simulation_period(context.args)
+        start_date, end_date, description = self._parse_simulation_period(args)
 
         if start_date is None:
             await update.message.reply_text(
                 f"❌ {description}\n\n"
                 "*Usage:*\n"
-                "`/simulate 2024` - Full year\n"
-                "`/simulate 6 months` - Last 6 months\n"
-                "`/simulate Jan 2024 to Jun 2024` - Month range\n"
-                "`/simulate 2024-01-01 to 2024-06-30` - Date range\n"
-                "`/simulate Mar 2024` - Single month\n",
-                parse_mode="Markdown",
+                "`/simulate 2024` \\- Full year\n"
+                "`/simulate 6 months` \\- Last 6 months\n"
+                "`/simulate 2024 email` \\- Send report via email\n"
+                "`/simulate Jan 2024 to Jun 2024` \\- Month range\n"
+                "`/simulate 2024-01-01 to 2024-06-30` \\- Date range\n",
+                parse_mode="MarkdownV2",
             )
             return
 
@@ -1601,16 +1608,31 @@ class TelegramBot:
                 parse_mode="Markdown",
             )
 
+        # Check email configuration if requested
+        if send_email:
+            from .email_reports import is_email_configured
+
+            if not is_email_configured():
+                await update.message.reply_text(
+                    "❌ *Email not configured*\n\n"
+                    "Set these environment variables:\n"
+                    "• `SMTP_USER` \\- Gmail address\n"
+                    "• `SMTP_PASSWORD` \\- Gmail app password\n"
+                    "• `REPORT_EMAIL` \\- Recipient email",
+                    parse_mode="MarkdownV2",
+                )
+                return
+
         # Send initial status
+        email_note = " \\(email report\\)" if send_email else ""
         status_msg = await update.message.reply_text(
-            f"🔬 *Starting Historical Simulation*\n\n"
+            f"🔬 *Starting Historical Simulation*{email_note}\n\n"
             f"Period: {description}\n"
-            f"({start_date.strftime('%Y-%m-%d')} → {end_date.strftime('%Y-%m-%d')})\n\n"
             f"Reviews: ~{estimated_reviews}\n"
-            f"Est. Cost: ~${estimated_cost:.2f}\n\n"
-            f"⏳ Running simulation...\n"
-            f"This may take a few minutes.",
-            parse_mode="Markdown",
+            f"Est\\. Cost: ~${estimated_cost:.2f}\n\n"
+            f"⏳ Running simulation\\.\\.\\.\n"
+            f"This may take a few minutes\\.",
+            parse_mode="MarkdownV2",
         )
 
         try:
@@ -1624,26 +1646,51 @@ class TelegramBot:
                 lookback_days=60,
             )
 
-            # Generate and send report
-            report = result.format_report()
+            if send_email:
+                # Send via email
+                from .email_reports import send_simulation_report
 
-            # Split if too long for Telegram
-            if len(report) > 4000:
-                # Send in parts
-                parts = [report[i : i + 4000] for i in range(0, len(report), 4000)]
-                for i, part in enumerate(parts):
-                    if i == 0:
-                        await status_msg.edit_text(part, parse_mode="Markdown")
-                    else:
-                        await update.message.reply_text(part, parse_mode="Markdown")
+                success = send_simulation_report(result)
+                if success:
+                    diff = result.evolved_performance - result.static_performance
+                    diff_str = f"+{diff:.1f}%" if diff > 0 else f"{diff:.1f}%"
+                    await status_msg.edit_text(
+                        f"✅ *Simulation Complete*\n\n"
+                        f"📧 Report sent to your email\\!\n\n"
+                        f"*Quick Summary:*\n"
+                        f"• Reviews: {len(result.reviews)}\n"
+                        f"• Static: {result.static_performance:+.1f}%\n"
+                        f"• Evolved: {result.evolved_performance:+.1f}%\n"
+                        f"• Difference: {diff_str}\n"
+                        f"• Changes: {result.param_changes_count()}",
+                        parse_mode="MarkdownV2",
+                    )
+                else:
+                    await status_msg.edit_text(
+                        "❌ *Simulation completed but email failed*\n\n"
+                        "Check SMTP configuration and logs\\.",
+                        parse_mode="MarkdownV2",
+                    )
             else:
-                await status_msg.edit_text(report, parse_mode="Markdown")
+                # Send via Telegram
+                report = result.format_report()
+
+                # Split if too long for Telegram
+                if len(report) > 4000:
+                    parts = [report[i : i + 4000] for i in range(0, len(report), 4000)]
+                    for i, part in enumerate(parts):
+                        if i == 0:
+                            await status_msg.edit_text(part, parse_mode="Markdown")
+                        else:
+                            await update.message.reply_text(part, parse_mode="Markdown")
+                else:
+                    await status_msg.edit_text(report, parse_mode="Markdown")
 
         except Exception as e:
             logger.error(f"Simulation failed: {e}")
             await status_msg.edit_text(
-                f"❌ *Simulation Failed*\n\n" f"Error: {e}\n\n" f"Check logs for details.",
-                parse_mode="Markdown",
+                f"❌ *Simulation Failed*\n\nError: {e}\n\nCheck logs for details\\.",
+                parse_mode="MarkdownV2",
             )
 
     # ========== E*TRADE Authentication Commands ==========
