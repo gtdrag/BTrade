@@ -146,6 +146,7 @@ class TelegramBot:
         self._app.add_handler(CommandHandler("promote", self._cmd_promote))
         self._app.add_handler(CommandHandler("retire", self._cmd_retire))
         self._app.add_handler(CommandHandler("hedge", self._cmd_hedge))
+        self._app.add_handler(CommandHandler("review", self._cmd_review))
 
         # Add command handlers - E*TRADE authentication
         self._app.add_handler(CommandHandler("auth", self._cmd_auth))
@@ -283,7 +284,8 @@ class TelegramBot:
             "/promote - Promote pattern to paper/live\n"
             "/retire - Retire a pattern\n\n"
             "🛡️ *Risk Management:*\n"
-            "/hedge - Trailing hedge status/control\n\n"
+            "/hedge - Trailing hedge status/control\n"
+            "/review - Run monthly strategy review now\n\n"
             "🔐 E\\*TRADE Auth:\n"
             "/auth - Start E\\*TRADE login\n"
             "/verify CODE - Complete login\n\n"
@@ -1064,6 +1066,48 @@ class TelegramBot:
                 "`/hedge on` - Enable hedging\n"
                 "`/hedge off` - Disable hedging",
                 parse_mode="Markdown",
+            )
+
+    async def _cmd_review(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /review command - run strategy review with Claude analysis."""
+        if not self._is_authorized(update):
+            await self._send_unauthorized_response(update)
+            return
+
+        await update.message.reply_text(
+            "📊 *Strategy Review Starting*\n\n"
+            "Collecting 90 days of IBIT market data...\n"
+            "Running backtests with different parameters...\n"
+            "Sending to Claude for analysis...\n\n"
+            "This may take 30-60 seconds.",
+            parse_mode="Markdown",
+        )
+
+        try:
+            from .strategy_review import get_strategy_reviewer
+
+            reviewer = get_strategy_reviewer()
+            recommendation = await reviewer.run_monthly_review()
+
+            # Build response message
+            if recommendation.has_recommendations:
+                header = "📊 *Strategy Review Complete*\n⚠️ Recommendations Detected!\n\n"
+            else:
+                header = "📊 *Strategy Review Complete*\n✅ No changes needed\n\n"
+
+            message = header + recommendation.full_report
+
+            # Truncate if too long for Telegram (max 4096 chars)
+            if len(message) > 4000:
+                message = message[:3950] + "\n\n... (truncated)"
+
+            await update.message.reply_text(message, parse_mode="Markdown")
+
+        except Exception as e:
+            logger.error(f"Strategy review failed: {e}")
+            await update.message.reply_text(
+                f"❌ Strategy review failed: {e}",
+                parse_mode=None,  # Avoid markdown parsing issues with error messages
             )
 
     async def _cmd_retire(self, update: Update, context: ContextTypes.DEFAULT_TYPE):

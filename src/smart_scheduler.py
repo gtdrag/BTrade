@@ -262,6 +262,16 @@ class SmartScheduler:
             misfire_grace_time=3600,  # 1 hour grace period
         )
 
+        # Monthly strategy review - 1st of each month at 7:00 AM ET
+        # Backtests current strategy, tests alternatives, sends Claude for analysis
+        self.scheduler.add_job(
+            self._job_strategy_review,
+            CronTrigger(day=1, hour=7, minute=0, timezone=ET),
+            id="strategy_review",
+            name="Monthly Strategy Review",
+            misfire_grace_time=3600,
+        )
+
         logger.info("Scheduler jobs configured")
 
     def _job_auth_reminder(self):
@@ -1179,6 +1189,58 @@ class SmartScheduler:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
         loop.run_until_complete(_run_analysis())
+
+    def _job_strategy_review(self):
+        """Monthly strategy review - backtests parameters and sends Claude analysis."""
+        import asyncio
+
+        from .strategy_review import get_strategy_reviewer
+
+        logger.info("Starting monthly strategy review")
+
+        async def _run_review():
+            try:
+                reviewer = get_strategy_reviewer()
+                recommendation = await reviewer.run_monthly_review()
+
+                # Build Telegram message
+                if recommendation.has_recommendations:
+                    header = "📊 *Monthly Strategy Review*\n⚠️ Recommendations Detected!\n\n"
+                else:
+                    header = "📊 *Monthly Strategy Review*\n✅ No changes needed\n\n"
+
+                # The full report is already formatted by Claude
+                message = header + recommendation.full_report
+
+                # Truncate if too long for Telegram (max 4096 chars)
+                if len(message) > 4000:
+                    message = message[:3950] + "\n\n... (truncated)"
+
+                # Send via Telegram
+                bot = TelegramBot()
+                await bot.initialize()
+                await bot.send_message(message, parse_mode="Markdown")
+
+                logger.info(
+                    f"Strategy review complete: recommendations={recommendation.has_recommendations}"
+                )
+
+            except Exception as e:
+                logger.error(f"Strategy review failed: {e}")
+                # Send error notification
+                try:
+                    bot = TelegramBot()
+                    await bot.initialize()
+                    await bot.send_message(f"❌ Strategy review failed: {e}")
+                except Exception:
+                    pass
+
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        loop.run_until_complete(_run_review())
 
     def start(self):
         """Start the scheduler."""
