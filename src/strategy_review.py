@@ -953,6 +953,33 @@ class StrategyReviewer:
             # Create summary (first paragraph)
             summary = full_report.split("\n\n")[0][:200] if full_report else "Review complete"
 
+            # Build regime header to prepend to report (so user always sees detected regime)
+            regime_emoji = {
+                "strong_bull": "🚀",
+                "bull": "📈",
+                "neutral": "➡️",
+                "bear": "📉",
+                "strong_bear": "💥",
+                "unknown": "❓",
+            }
+            regime_name = regime_data.get("regime", "unknown")
+            regime_conf = regime_data.get("confidence", "low")
+            indicators = regime_data.get("indicators", {})
+
+            regime_header = (
+                f"**Market Regime**: {regime_emoji.get(regime_name, '')} {regime_name.upper()} "
+                f"({regime_conf} confidence)\n"
+                f"📊 MA Slope: {indicators.get('ma_20_slope_pct', 0):+.1f}% | "
+                f"Vol: {indicators.get('volatility_20d', 0):.1f}% | "
+                f"Last 10d: {indicators.get('up_days_last_10', 0)}↑/{indicators.get('down_days_last_10', 0)}↓"
+            )
+            if indicators.get("volatility_compressed"):
+                regime_header += " | ⚠️ Vol Compressed"
+            regime_header += "\n\n---\n\n"
+
+            # Prepend regime header to full report
+            full_report = regime_header + full_report
+
             # Save full review for recursive memory
             review_id = self.db.save_strategy_review(
                 full_report=full_report,
