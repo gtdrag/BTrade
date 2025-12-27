@@ -12,7 +12,7 @@ Runs monthly to:
 import logging
 import os
 import statistics
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 
@@ -21,6 +21,49 @@ import anthropic
 from .database import get_database
 
 logger = logging.getLogger(__name__)
+
+
+# Tool definition for Claude to recommend parameter changes
+PARAMETER_CHANGE_TOOL = {
+    "name": "recommend_parameter_change",
+    "description": (
+        "Recommend a change to a strategy parameter based on backtest analysis. "
+        "Only call this tool if the data strongly supports a parameter change. "
+        "Do not call if current parameters are optimal."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "parameter": {
+                "type": "string",
+                "enum": ["mr_threshold", "reversal_threshold", "crash_threshold", "pump_threshold"],
+                "description": "The parameter to change",
+            },
+            "current_value": {
+                "type": "number",
+                "description": "The current value of the parameter",
+            },
+            "recommended_value": {
+                "type": "number",
+                "description": "The recommended new value",
+            },
+            "expected_improvement": {
+                "type": "string",
+                "description": "Expected improvement (e.g., '+5% return, +2% win rate')",
+            },
+            "confidence": {
+                "type": "string",
+                "enum": ["low", "medium", "high"],
+                "description": "Confidence level in this recommendation",
+            },
+            "reason": {
+                "type": "string",
+                "description": "Brief explanation for why this change is recommended",
+            },
+        },
+        "required": ["parameter", "current_value", "recommended_value", "reason", "confidence"],
+    },
+}
 
 # Claude prompt for strategy review
 STRATEGY_REVIEW_PROMPT = """You are a quantitative trading strategist reviewing the performance of a Bitcoin ETF trading strategy.
@@ -73,6 +116,8 @@ Analyze this data and provide:
    - Include "NO CHANGES NEEDED" if current parameters are optimal
 
 Format your response as a clear report suitable for a Telegram message (use markdown, keep it under 2000 characters).
+
+**IMPORTANT**: If you recommend any parameter changes, you MUST use the `recommend_parameter_change` tool to submit each recommendation. This allows the system to automatically apply your suggestions with user approval. Only use the tool for changes that are strongly supported by the data.
 """
 
 
@@ -91,15 +136,44 @@ class BacktestResult:
 
 
 @dataclass
+class ParameterRecommendation:
+    """A single parameter change recommendation from Claude."""
+
+    parameter: str  # e.g., "mr_threshold"
+    current_value: float
+    recommended_value: float
+    reason: str
+    confidence: str  # "low", "medium", "high"
+    expected_improvement: Optional[str] = None
+    applied: bool = False  # True if user approved and applied
+
+    def to_display_name(self) -> str:
+        """Get human-readable parameter name."""
+        names = {
+            "mr_threshold": "Mean Reversion Threshold",
+            "reversal_threshold": "Position Reversal Threshold",
+            "crash_threshold": "Crash Day Threshold",
+            "pump_threshold": "Pump Day Threshold",
+        }
+        return names.get(self.parameter, self.parameter)
+
+
+@dataclass
 class StrategyRecommendation:
     """Recommendation from Claude analysis."""
 
     summary: str  # Brief summary
     full_report: str  # Full markdown report
     has_recommendations: bool  # True if changes suggested
-    recommended_params: Dict[str, float]  # Suggested parameter changes
-    risk_level: str  # "low", "medium", "high"
-    timestamp: str
+    recommendations: List[ParameterRecommendation] = field(default_factory=list)
+    risk_level: str = "low"  # "low", "medium", "high"
+    timestamp: str = ""
+
+    # Legacy field for backwards compatibility
+    @property
+    def recommended_params(self) -> Dict[str, float]:
+        """Get recommended params as dict (legacy compatibility)."""
+        return {r.parameter: r.recommended_value for r in self.recommendations}
 
 
 class StrategyReviewer:
@@ -393,7 +467,7 @@ class StrategyReviewer:
             market_summary=market_summary,
         )
 
-        # 6. Call Claude
+        # 6. Call Claude with tool use
         logger.info("Sending data to Claude for analysis...")
 
         try:
@@ -401,12 +475,35 @@ class StrategyReviewer:
                 model="claude-sonnet-4-20250514",
                 max_tokens=2000,
                 messages=[{"role": "user", "content": prompt}],
+                tools=[PARAMETER_CHANGE_TOOL],
             )
 
-            full_report = response.content[0].text
+            # Parse response - extract both text and tool use
+            full_report = ""
+            recommendations: List[ParameterRecommendation] = []
 
-            # Determine if there are recommendations
-            has_recs = "NO CHANGES NEEDED" not in full_report.upper()
+            for block in response.content:
+                if block.type == "text":
+                    full_report += block.text
+                elif block.type == "tool_use" and block.name == "recommend_parameter_change":
+                    # Parse the structured recommendation
+                    rec_data = block.input
+                    rec = ParameterRecommendation(
+                        parameter=rec_data["parameter"],
+                        current_value=rec_data["current_value"],
+                        recommended_value=rec_data["recommended_value"],
+                        reason=rec_data["reason"],
+                        confidence=rec_data.get("confidence", "medium"),
+                        expected_improvement=rec_data.get("expected_improvement"),
+                    )
+                    recommendations.append(rec)
+                    logger.info(
+                        f"Claude recommends: {rec.parameter} "
+                        f"{rec.current_value} → {rec.recommended_value} "
+                        f"(confidence: {rec.confidence})"
+                    )
+
+            has_recs = len(recommendations) > 0
 
             # Log to database
             self.db.log_event(
@@ -416,6 +513,11 @@ class StrategyReviewer:
                     "model": "claude-sonnet-4-20250514",
                     "current_return": current_result.total_return_pct,
                     "has_recommendations": has_recs,
+                    "num_recommendations": len(recommendations),
+                    "recommendations": [
+                        {"param": r.parameter, "from": r.current_value, "to": r.recommended_value}
+                        for r in recommendations
+                    ],
                     "response_length": len(full_report),
                     "timestamp": datetime.now().isoformat(),
                 },
@@ -428,8 +530,12 @@ class StrategyReviewer:
                 summary=summary,
                 full_report=full_report,
                 has_recommendations=has_recs,
-                recommended_params={},  # Could parse from response
-                risk_level="medium" if has_recs else "low",
+                recommendations=recommendations,
+                risk_level="high"
+                if any(r.confidence == "high" for r in recommendations)
+                else "medium"
+                if has_recs
+                else "low",
                 timestamp=datetime.now().isoformat(),
             )
 
@@ -439,14 +545,68 @@ class StrategyReviewer:
                 summary=f"Review failed: {e}",
                 full_report=f"Error calling Claude API: {e}",
                 has_recommendations=False,
-                recommended_params={},
+                recommendations=[],
                 risk_level="unknown",
                 timestamp=datetime.now().isoformat(),
             )
 
+    def apply_recommendation(self, recommendation: ParameterRecommendation) -> bool:
+        """
+        Apply a parameter recommendation to the strategy config.
+
+        This updates the live strategy configuration file.
+
+        Args:
+            recommendation: The recommendation to apply
+
+        Returns:
+            True if applied successfully
+        """
+        param = recommendation.parameter
+        new_value = recommendation.recommended_value
+
+        # Validate the parameter exists
+        valid_params = ["mr_threshold", "reversal_threshold", "crash_threshold", "pump_threshold"]
+        if param not in valid_params:
+            logger.error(f"Invalid parameter: {param}")
+            return False
+
+        try:
+            # Update our internal tracking
+            self.current_params[param] = new_value
+            recommendation.applied = True
+
+            # Log the change
+            self.db.log_event(
+                "PARAMETER_CHANGE",
+                f"Applied recommendation: {param} → {new_value}",
+                {
+                    "parameter": param,
+                    "old_value": recommendation.current_value,
+                    "new_value": new_value,
+                    "reason": recommendation.reason,
+                    "confidence": recommendation.confidence,
+                    "timestamp": datetime.now().isoformat(),
+                },
+            )
+
+            logger.info(
+                f"Applied parameter change: {param} = {new_value} "
+                f"(was {recommendation.current_value})"
+            )
+
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to apply recommendation: {e}")
+            return False
+
 
 # Singleton instance
 _reviewer: Optional[StrategyReviewer] = None
+
+# Store pending recommendations for Telegram approval flow
+_pending_recommendations: List[ParameterRecommendation] = []
 
 
 def get_strategy_reviewer() -> StrategyReviewer:
@@ -455,3 +615,20 @@ def get_strategy_reviewer() -> StrategyReviewer:
     if _reviewer is None:
         _reviewer = StrategyReviewer()
     return _reviewer
+
+
+def get_pending_recommendations() -> List[ParameterRecommendation]:
+    """Get recommendations pending user approval."""
+    return _pending_recommendations
+
+
+def set_pending_recommendations(recommendations: List[ParameterRecommendation]):
+    """Store recommendations for user approval via Telegram."""
+    global _pending_recommendations
+    _pending_recommendations = recommendations
+
+
+def clear_pending_recommendations():
+    """Clear pending recommendations."""
+    global _pending_recommendations
+    _pending_recommendations = []

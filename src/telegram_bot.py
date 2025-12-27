@@ -1084,24 +1084,64 @@ class TelegramBot:
         )
 
         try:
-            from .strategy_review import get_strategy_reviewer
+            from .strategy_review import (
+                get_strategy_reviewer,
+                set_pending_recommendations,
+            )
 
             reviewer = get_strategy_reviewer()
-            recommendation = await reviewer.run_monthly_review()
+            result = await reviewer.run_monthly_review()
 
             # Build response message
-            if recommendation.has_recommendations:
+            if result.has_recommendations:
                 header = "📊 *Strategy Review Complete*\n⚠️ Recommendations Detected!\n\n"
             else:
                 header = "📊 *Strategy Review Complete*\n✅ No changes needed\n\n"
 
-            message = header + recommendation.full_report
+            message = header + result.full_report
 
             # Truncate if too long for Telegram (max 4096 chars)
             if len(message) > 4000:
                 message = message[:3950] + "\n\n... (truncated)"
 
             await update.message.reply_text(message, parse_mode="Markdown")
+
+            # If there are recommendations, show approval buttons
+            if result.recommendations:
+                set_pending_recommendations(result.recommendations)
+
+                for i, rec in enumerate(result.recommendations):
+                    # Build recommendation message with approval buttons
+                    rec_msg = (
+                        f"🔧 *Parameter Change Recommendation {i + 1}*\n\n"
+                        f"*{rec.to_display_name()}*\n"
+                        f"Current: `{rec.current_value}`\n"
+                        f"Recommended: `{rec.recommended_value}`\n"
+                        f"Confidence: {rec.confidence.upper()}\n\n"
+                        f"_{rec.reason}_"
+                    )
+
+                    if rec.expected_improvement:
+                        rec_msg += f"\n\n📈 Expected: {rec.expected_improvement}"
+
+                    keyboard = InlineKeyboardMarkup(
+                        [
+                            [
+                                InlineKeyboardButton(
+                                    "✅ Apply Change", callback_data=f"apply_param_{i}"
+                                ),
+                                InlineKeyboardButton(
+                                    "❌ Reject", callback_data=f"reject_param_{i}"
+                                ),
+                            ]
+                        ]
+                    )
+
+                    await update.message.reply_text(
+                        rec_msg,
+                        parse_mode="Markdown",
+                        reply_markup=keyboard,
+                    )
 
         except Exception as e:
             logger.error(f"Strategy review failed: {e}")
@@ -1359,6 +1399,11 @@ class TelegramBot:
         # Check if this is a test callback
         is_test = "_test_" in data
 
+        # Handle parameter recommendation approval/rejection
+        if data.startswith("apply_param_") or data.startswith("reject_param_"):
+            await self._handle_param_recommendation(query, data)
+            return
+
         if data.startswith("approve_"):
             self._approval_result = ApprovalResult.APPROVED
             if is_test:
@@ -1403,6 +1448,66 @@ class TelegramBot:
         # Signal that we got a response
         if self._approval_event:
             self._approval_event.set()
+
+    async def _handle_param_recommendation(self, query, data: str):
+        """Handle parameter recommendation approval/rejection."""
+        from .strategy_review import (
+            get_pending_recommendations,
+            get_strategy_reviewer,
+        )
+
+        # Extract recommendation index
+        try:
+            idx = int(data.split("_")[-1])
+        except (ValueError, IndexError):
+            await query.edit_message_text(
+                text="❌ Invalid recommendation reference.",
+                parse_mode="Markdown",
+            )
+            return
+
+        recommendations = get_pending_recommendations()
+        if idx >= len(recommendations):
+            await query.edit_message_text(
+                text="❌ Recommendation no longer available.",
+                parse_mode="Markdown",
+            )
+            return
+
+        rec = recommendations[idx]
+
+        if data.startswith("apply_param_"):
+            # Apply the recommendation
+            reviewer = get_strategy_reviewer()
+            success = reviewer.apply_recommendation(rec)
+
+            if success:
+                await query.edit_message_text(
+                    text=(
+                        f"✅ *Parameter Updated!*\n\n"
+                        f"*{rec.to_display_name()}*\n"
+                        f"`{rec.current_value}` → `{rec.recommended_value}`\n\n"
+                        f"_Change applied successfully._\n\n"
+                        f"⚠️ Note: This updates the bot's runtime config. "
+                        f"For permanent changes, update the code."
+                    ),
+                    parse_mode="Markdown",
+                )
+            else:
+                await query.edit_message_text(
+                    text="❌ Failed to apply parameter change.",
+                    parse_mode="Markdown",
+                )
+
+        elif data.startswith("reject_param_"):
+            await query.edit_message_text(
+                text=(
+                    f"❌ *Recommendation Rejected*\n\n"
+                    f"*{rec.to_display_name()}*\n"
+                    f"Keeping current value: `{rec.current_value}`"
+                ),
+                parse_mode="Markdown",
+            )
 
     async def send_message(self, text: str, parse_mode: str = "Markdown") -> bool:
         """Send a simple text message."""
