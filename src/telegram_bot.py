@@ -296,7 +296,9 @@ class TelegramBot:
             "/backtest - Run strategy backtest\n"
             "  Examples: `/backtest 3 months`, `/backtest 1 week`\n"
             "/simulate - Historical AI evolution simulation\n"
-            "  Examples: `/simulate 2024`, `/simulate 6 months`\n\n"
+            "  `/simulate 2024` - Full year\n"
+            "  `/simulate Jan 2024 to Jun 2024` - Month range\n"
+            "  `/simulate 2024-01-01 to 2024-06-30` - Date range\n\n"
             "🔐 E\\*TRADE Auth:\n"
             "/auth - Start E\\*TRADE login\n"
             "/verify CODE - Complete login\n\n"
@@ -1405,11 +1407,58 @@ class TelegramBot:
             "2024" -> (Jan 1 2024, Dec 31 2024)
             "6 months" -> (6 months ago, today)
             "1 year" -> (1 year ago, today)
+            "2024-01-01 to 2024-06-30" -> explicit date range
+            "Jan 2024 to Jun 2024" -> month-year range
 
         Returns:
             Tuple of (start_date, end_date, description) or (None, None, error_message)
         """
+        import calendar
+        import re
         from datetime import datetime, timedelta
+
+        # Month name mapping
+        month_map = {
+            "jan": 1,
+            "january": 1,
+            "feb": 2,
+            "february": 2,
+            "mar": 3,
+            "march": 3,
+            "apr": 4,
+            "april": 4,
+            "may": 5,
+            "jun": 6,
+            "june": 6,
+            "jul": 7,
+            "july": 7,
+            "aug": 8,
+            "august": 8,
+            "sep": 9,
+            "sept": 9,
+            "september": 9,
+            "oct": 10,
+            "october": 10,
+            "nov": 11,
+            "november": 11,
+            "dec": 12,
+            "december": 12,
+        }
+
+        def parse_month_year(text: str) -> tuple:
+            """Parse 'Jan 2024' or 'January 2024' into (year, month)."""
+            text = text.strip().lower()
+            for month_name, month_num in month_map.items():
+                if text.startswith(month_name):
+                    # Extract year
+                    year_match = re.search(r"(\d{4})", text)
+                    if year_match:
+                        return int(year_match.group(1)), month_num
+            return None, None
+
+        def last_day_of_month(year: int, month: int) -> int:
+            """Get the last day of a month."""
+            return calendar.monthrange(year, month)[1]
 
         if not args:
             # Default to current year
@@ -1420,11 +1469,54 @@ class TelegramBot:
                 f"{now.year}",
             )
 
-        text = " ".join(args).lower().strip()
+        text = " ".join(args).strip()
+        text_lower = text.lower()
+
+        # Handle explicit date range with "to" or "-"
+        # Pattern: "2024-01-01 to 2024-06-30" or "2024-01-01 - 2024-06-30"
+        iso_range = re.match(
+            r"^(\d{4}-\d{2}-\d{2})\s*(?:to|-)\s*(\d{4}-\d{2}-\d{2})$",
+            text_lower,
+        )
+        if iso_range:
+            try:
+                start_date = datetime.strptime(iso_range.group(1), "%Y-%m-%d")
+                end_date = datetime.strptime(iso_range.group(2), "%Y-%m-%d")
+                desc = f"{start_date.strftime('%b %d, %Y')} to {end_date.strftime('%b %d, %Y')}"
+                return (start_date, end_date, desc)
+            except ValueError:
+                pass
+
+        # Handle month-year range: "Jan 2024 to Jun 2024"
+        if " to " in text_lower:
+            parts = text_lower.split(" to ")
+            if len(parts) == 2:
+                start_year, start_month = parse_month_year(parts[0])
+                end_year, end_month = parse_month_year(parts[1])
+
+                if start_year and start_month and end_year and end_month:
+                    start_date = datetime(start_year, start_month, 1)
+                    end_date = datetime(end_year, end_month, last_day_of_month(end_year, end_month))
+                    # Get month names for description
+                    start_name = calendar.month_abbr[start_month]
+                    end_name = calendar.month_abbr[end_month]
+                    desc = f"{start_name} {start_year} to {end_name} {end_year}"
+                    return (start_date, end_date, desc)
+
+        # Handle single month-year: "Jan 2024" -> full month
+        single_year, single_month = parse_month_year(text_lower)
+        if single_year and single_month:
+            start_date = datetime(single_year, single_month, 1)
+            end_date = datetime(
+                single_year, single_month, last_day_of_month(single_year, single_month)
+            )
+            month_name = calendar.month_name[single_month]
+            desc = f"{month_name} {single_year}"
+            return (start_date, end_date, desc)
 
         # Handle year like "2024"
-        if text.isdigit() and len(text) == 4:
-            year = int(text)
+        if text_lower.isdigit() and len(text_lower) == 4:
+            year = int(text_lower)
             return (
                 datetime(year, 1, 1),
                 datetime(year, 12, 31),
@@ -1432,9 +1524,7 @@ class TelegramBot:
             )
 
         # Handle relative periods like "6 months", "1 year"
-        import re
-
-        match = re.match(r"^(\d+)\s*(month|months|year|years)$", text)
+        match = re.match(r"^(\d+)\s*(month|months|year|years)$", text_lower)
         if match:
             num = int(match.group(1))
             unit = match.group(2)
@@ -1450,7 +1540,7 @@ class TelegramBot:
             return (start_date, end_date, desc)
 
         # Handle shorthand like "6m", "1y"
-        shorthand = re.match(r"^(\d+)\s*([my])$", text)
+        shorthand = re.match(r"^(\d+)\s*([my])$", text_lower)
         if shorthand:
             num = int(shorthand.group(1))
             unit = shorthand.group(2)
@@ -1465,7 +1555,12 @@ class TelegramBot:
 
             return (start_date, end_date, desc)
 
-        return (None, None, f"Could not parse '{text}'. Try: `2024`, `6 months`, `1 year`")
+        return (
+            None,
+            None,
+            f"Could not parse '{text}'.\n"
+            "Try: `2024`, `6 months`, `Jan 2024 to Jun 2024`, `2024-01-01 to 2024-06-30`",
+        )
 
     async def _cmd_simulate(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /simulate command - run historical AI evolution simulation."""
@@ -1480,9 +1575,11 @@ class TelegramBot:
             await update.message.reply_text(
                 f"❌ {description}\n\n"
                 "*Usage:*\n"
-                "`/simulate 2024` - Simulate full year\n"
-                "`/simulate 6 months` - Simulate last 6 months\n"
-                "`/simulate 1 year` - Simulate last year\n",
+                "`/simulate 2024` - Full year\n"
+                "`/simulate 6 months` - Last 6 months\n"
+                "`/simulate Jan 2024 to Jun 2024` - Month range\n"
+                "`/simulate 2024-01-01 to 2024-06-30` - Date range\n"
+                "`/simulate Mar 2024` - Single month\n",
                 parse_mode="Markdown",
             )
             return
