@@ -262,13 +262,14 @@ class SmartScheduler:
             misfire_grace_time=3600,  # 1 hour grace period
         )
 
-        # Monthly strategy review - 1st of each month at 7:00 AM ET
-        # Backtests current strategy, tests alternatives, sends Claude for analysis
+        # Bi-weekly strategy review - 1st and 15th of each month at 7:00 AM ET
+        # Runs every 2 weeks to catch market regime shifts faster
+        # Backtests current strategy, detects regime, sends Claude for analysis
         self.scheduler.add_job(
             self._job_strategy_review,
-            CronTrigger(day=1, hour=7, minute=0, timezone=ET),
+            CronTrigger(day="1,15", hour=7, minute=0, timezone=ET),
             id="strategy_review",
-            name="Monthly Strategy Review",
+            name="Bi-weekly Strategy Review",
             misfire_grace_time=3600,
         )
 
@@ -1191,12 +1192,12 @@ class SmartScheduler:
         loop.run_until_complete(_run_analysis())
 
     def _job_strategy_review(self):
-        """Monthly strategy review - backtests parameters and sends Claude analysis."""
+        """Bi-weekly strategy review - backtests parameters and sends Claude analysis."""
         import asyncio
 
         from .strategy_review import get_strategy_reviewer
 
-        logger.info("Starting monthly strategy review")
+        logger.info("Starting bi-weekly strategy review")
 
         async def _run_review():
             try:
@@ -1205,9 +1206,9 @@ class SmartScheduler:
 
                 # Build Telegram message
                 if recommendation.has_recommendations:
-                    header = "📊 *Monthly Strategy Review*\n⚠️ Recommendations Detected!\n\n"
+                    header = "📊 *Strategy Review*\n⚠️ Recommendations Detected!\n\n"
                 else:
-                    header = "📊 *Monthly Strategy Review*\n✅ No changes needed\n\n"
+                    header = "📊 *Strategy Review*\n✅ No changes needed\n\n"
 
                 # The full report is already formatted by Claude
                 message = header + recommendation.full_report

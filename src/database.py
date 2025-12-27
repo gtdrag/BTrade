@@ -165,6 +165,7 @@ class Database:
                     backtest_return REAL,
                     recommendations TEXT,
                     watch_items TEXT,
+                    market_regime TEXT,
                     market_conditions TEXT,
                     created_at TEXT NOT NULL
                 )
@@ -595,6 +596,7 @@ class Database:
         backtest_return: float,
         recommendations: List[Dict[str, Any]],
         watch_items: List[Dict[str, Any]],
+        market_regime: Optional[Dict[str, Any]] = None,
         market_conditions: Optional[str] = None,
     ) -> int:
         """Save a complete strategy review for future reference.
@@ -606,6 +608,7 @@ class Database:
             backtest_return: Current strategy return from backtest
             recommendations: List of parameter recommendations made
             watch_items: List of things Claude flagged to monitor
+            market_regime: Detected market regime data
             market_conditions: Optional market context summary
 
         Returns:
@@ -619,8 +622,8 @@ class Database:
                     """
                     INSERT INTO strategy_reviews
                     (review_date, full_report, summary, current_params, backtest_return,
-                     recommendations, watch_items, market_conditions, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     recommendations, watch_items, market_regime, market_conditions, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                     (
                         now[:10],  # Just the date part
@@ -630,6 +633,7 @@ class Database:
                         backtest_return,
                         json.dumps(recommendations),
                         json.dumps(watch_items),
+                        json.dumps(market_regime) if market_regime else None,
                         market_conditions,
                         now,
                     ),
@@ -655,7 +659,8 @@ class Database:
             cursor.execute(
                 """
                 SELECT id, review_date, full_report, summary, current_params,
-                       backtest_return, recommendations, watch_items, market_conditions
+                       backtest_return, recommendations, watch_items, market_regime,
+                       market_conditions
                 FROM strategy_reviews
                 ORDER BY created_at DESC
                 LIMIT ?
@@ -672,6 +677,8 @@ class Database:
                     review["recommendations"] = json.loads(review["recommendations"])
                 if review.get("watch_items"):
                     review["watch_items"] = json.loads(review["watch_items"])
+                if review.get("market_regime"):
+                    review["market_regime"] = json.loads(review["market_regime"])
                 reviews.append(review)
             return reviews
 
