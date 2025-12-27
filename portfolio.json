@@ -1,5 +1,6 @@
 {
   "logo": "https://raw.githubusercontent.com/gtdrag/BTrade/main/assets/logo.svg",
+  "heroImage": "https://raw.githubusercontent.com/gtdrag/BTrade/main/assets/telegram-mockup.svg",
   "badge": "Python · Claude AI · E*TRADE",
   "tagline": "AI-powered Bitcoin ETF trading bot with regime detection, Telegram approvals, and recursive self-optimization. Intraday only — never holds overnight.",
 
