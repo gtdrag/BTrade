@@ -3,47 +3,6 @@
   "badge": "Python · Claude AI · E*TRADE",
   "tagline": "AI-powered Bitcoin ETF trading bot with regime detection, Telegram approvals, and recursive self-optimization. Intraday only — never holds overnight.",
 
-  "stats": [
-    { "value": "84%", "label": "Win Rate" },
-    { "value": "5", "label": "Signals" },
-    { "value": "24/7", "label": "Uptime" }
-  ],
-
-  "featuresLabel": "Trading Signals",
-  "featuresTitle": "Five Setups",
-  "features": [
-    {
-      "name": "Mean Reversion",
-      "trigger": "IBIT −2% prev day + BTC ↑ overnight",
-      "description": "Buy the bounce. Overnight BTC filter yields 84% win rate.",
-      "badge": "BITU 2× Long"
-    },
-    {
-      "name": "Short Thursday",
-      "trigger": "Every Thursday",
-      "description": "Bitcoin's historically weakest day. Consistent edge.",
-      "badge": "SBIT 2× Short"
-    },
-    {
-      "name": "Crash Day",
-      "trigger": "IBIT −2% intraday before noon",
-      "description": "Momentum short on major drops. Early detection.",
-      "badge": "SBIT 2× Short"
-    },
-    {
-      "name": "Pump Day",
-      "trigger": "IBIT +2% intraday before noon",
-      "description": "Momentum long on surges. Leverage amplifies.",
-      "badge": "BITU 2× Long"
-    },
-    {
-      "name": "AI Review",
-      "trigger": "Bi-weekly Claude analysis",
-      "description": "Detects regime shifts, recommends parameter changes.",
-      "badge": "Recursive"
-    }
-  ],
-
   "diagrams": [
     {
       "label": "System Overview",
