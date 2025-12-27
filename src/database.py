@@ -153,6 +153,24 @@ class Database:
             """
             )
 
+            # Strategy reviews table - stores full review history for recursive learning
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS strategy_reviews (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    review_date TEXT NOT NULL,
+                    full_report TEXT NOT NULL,
+                    summary TEXT,
+                    current_params TEXT,
+                    backtest_return REAL,
+                    recommendations TEXT,
+                    watch_items TEXT,
+                    market_conditions TEXT,
+                    created_at TEXT NOT NULL
+                )
+            """
+            )
+
             # Initialize bot state if not exists
             cursor.execute(
                 """
@@ -566,6 +584,116 @@ class Database:
             )
             row = cursor.fetchone()
             return dict(row) if row else None
+
+    # ==================== Strategy Review Operations ====================
+
+    def save_strategy_review(
+        self,
+        full_report: str,
+        summary: str,
+        current_params: Dict[str, float],
+        backtest_return: float,
+        recommendations: List[Dict[str, Any]],
+        watch_items: List[Dict[str, Any]],
+        market_conditions: Optional[str] = None,
+    ) -> int:
+        """Save a complete strategy review for future reference.
+
+        Args:
+            full_report: Claude's complete analysis text
+            summary: Brief summary of the review
+            current_params: Parameters at time of review
+            backtest_return: Current strategy return from backtest
+            recommendations: List of parameter recommendations made
+            watch_items: List of things Claude flagged to monitor
+            market_conditions: Optional market context summary
+
+        Returns:
+            The ID of the saved review
+        """
+        now = get_et_now().isoformat()
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    INSERT INTO strategy_reviews
+                    (review_date, full_report, summary, current_params, backtest_return,
+                     recommendations, watch_items, market_conditions, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                    (
+                        now[:10],  # Just the date part
+                        full_report,
+                        summary,
+                        json.dumps(current_params),
+                        backtest_return,
+                        json.dumps(recommendations),
+                        json.dumps(watch_items),
+                        market_conditions,
+                        now,
+                    ),
+                )
+                review_id = cursor.lastrowid
+                conn.commit()
+                return review_id
+        except Exception as e:
+            print(f"Error saving strategy review: {e}")
+            return -1
+
+    def get_previous_reviews(self, limit: int = 2) -> List[Dict[str, Any]]:
+        """Get the most recent strategy reviews for context.
+
+        Args:
+            limit: Maximum number of reviews to return (default 2)
+
+        Returns:
+            List of review dicts, most recent first
+        """
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT id, review_date, full_report, summary, current_params,
+                       backtest_return, recommendations, watch_items, market_conditions
+                FROM strategy_reviews
+                ORDER BY created_at DESC
+                LIMIT ?
+            """,
+                (limit,),
+            )
+            reviews = []
+            for row in cursor.fetchall():
+                review = dict(row)
+                # Parse JSON fields
+                if review.get("current_params"):
+                    review["current_params"] = json.loads(review["current_params"])
+                if review.get("recommendations"):
+                    review["recommendations"] = json.loads(review["recommendations"])
+                if review.get("watch_items"):
+                    review["watch_items"] = json.loads(review["watch_items"])
+                reviews.append(review)
+            return reviews
+
+    def get_all_watch_items(self, resolved: bool = False) -> List[Dict[str, Any]]:
+        """Get all active watch items from recent reviews.
+
+        Args:
+            resolved: If True, include resolved items; if False, only active
+
+        Returns:
+            List of watch items with their source review dates
+        """
+        reviews = self.get_previous_reviews(limit=5)
+        watch_items = []
+        for review in reviews:
+            items = review.get("watch_items", [])
+            for item in items:
+                item["from_review_date"] = review["review_date"]
+                if not resolved and item.get("resolved"):
+                    continue
+                watch_items.append(item)
+        return watch_items
 
 
 # Singleton instance

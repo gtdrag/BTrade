@@ -14,7 +14,7 @@ import os
 import statistics
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import anthropic
 
@@ -81,6 +81,48 @@ PARAMETER_CHANGE_TOOL = {
     },
 }
 
+# Tool for Claude to flag things to watch/monitor for next review
+WATCH_ITEM_TOOL = {
+    "name": "flag_watch_item",
+    "description": (
+        "Flag something important to monitor in future reviews. Use this to create "
+        "a record of patterns, concerns, or observations that should be tracked over time. "
+        "These items will be shown in the next review so you can follow up on them."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "category": {
+                "type": "string",
+                "enum": ["pattern", "risk", "opportunity", "anomaly", "prediction"],
+                "description": "Type of watch item",
+            },
+            "description": {
+                "type": "string",
+                "description": "What to watch for (be specific and measurable)",
+            },
+            "metric": {
+                "type": "string",
+                "description": "The specific metric or indicator to track (e.g., 'Thursday win rate', 'drawdown frequency')",
+            },
+            "current_value": {
+                "type": "string",
+                "description": "Current state of this metric (e.g., '45% win rate', '3 drawdowns > 5%')",
+            },
+            "threshold": {
+                "type": "string",
+                "description": "When should this trigger concern? (e.g., 'if drops below 40%', 'if exceeds 5 occurrences')",
+            },
+            "priority": {
+                "type": "string",
+                "enum": ["low", "medium", "high"],
+                "description": "How important is this to monitor",
+            },
+        },
+        "required": ["category", "description", "metric", "priority"],
+    },
+}
+
 # Claude prompt for strategy review
 STRATEGY_REVIEW_PROMPT = """You are a quantitative trading strategist reviewing the performance of a Bitcoin ETF trading strategy.
 
@@ -97,6 +139,8 @@ The bot trades IBIT (Bitcoin ETF) using leveraged ETFs:
 4. **Pump Day**: Buy BITU if IBIT rises ≥{pump_threshold}% intraday
 
 All positions close at 3:55 PM ET (never hold overnight).
+
+{previous_review_context}
 
 ## Recent Performance Data (Last 3 Months)
 
@@ -119,18 +163,22 @@ Analyze this data and provide:
 1. **Performance Assessment** (2-3 sentences)
    - Is the strategy working? What's the trend?
 
-2. **Parameter Recommendations** (if any)
+2. **Follow-up on Previous Watch Items** (if any exist above)
+   - Check the status of each flagged item
+   - Has the concern materialized or resolved?
+
+3. **Parameter Recommendations** (if any)
    - Should we adjust thresholds? Be specific with numbers.
    - Only recommend changes if data strongly supports it.
 
-3. **Pattern Observations**
+4. **Pattern Observations**
    - Any new patterns emerging in the data?
    - Day-of-week effects, time-of-day patterns, cross-market correlations?
 
-4. **Risk Concerns**
+5. **Risk Concerns**
    - Any warning signs? Increasing drawdowns? Deteriorating win rate?
 
-5. **Action Items** (bullet list)
+6. **Action Items** (bullet list)
    - Specific, actionable recommendations
    - Include "NO CHANGES NEEDED" if current parameters are optimal
 
@@ -141,6 +189,14 @@ Format your response as a clear report suitable for a Telegram message (use mark
 2. Do NOT extrapolate or guess values that weren't tested (e.g., if -1.5 and -2.0 were tested, do NOT recommend -1.0)
 3. When using the `recommend_parameter_change` tool, the `backtest_return` MUST match the exact return shown in the sensitivity analysis
 4. If no tested value clearly outperforms the current setting, respond with "NO CHANGES NEEDED"
+
+**WATCH ITEMS:**
+Use the `flag_watch_item` tool to flag anything important to monitor in future reviews:
+- Emerging patterns that need more data to confirm
+- Metrics that are approaching concerning thresholds
+- Anomalies worth tracking over time
+- Predictions you want to verify next month
+These items will be shown to you in the next review so you can follow up on them.
 """
 
 
@@ -428,6 +484,45 @@ class StrategyReviewer:
             f"**Day-of-Week Performance**:\n" + "\n".join(dow_summary)
         )
 
+    def _build_previous_review_context(self, previous_reviews: List[Dict]) -> str:
+        """Build context section from previous reviews for recursive learning."""
+        if not previous_reviews:
+            return ""
+
+        sections = ["## Previous Review Context (Memory)"]
+
+        for i, review in enumerate(previous_reviews):
+            review_date = review.get("review_date", "Unknown")
+            backtest_return = review.get("backtest_return", 0)
+            summary = review.get("summary", "No summary available")
+
+            sections.append(f"\n### Review from {review_date}")
+            sections.append(f"**Performance at that time**: {backtest_return:+.2f}% return")
+            sections.append(f"**Summary**: {summary[:300]}")
+
+            # Include recommendations that were made
+            recs = review.get("recommendations", [])
+            if recs:
+                sections.append("\n**Recommendations made:**")
+                for rec in recs:
+                    sections.append(f"- {rec.get('param')}: {rec.get('from')} → {rec.get('to')}")
+
+            # Include watch items that were flagged
+            watch_items = review.get("watch_items", [])
+            if watch_items:
+                sections.append("\n**Watch items flagged (FOLLOW UP ON THESE):**")
+                for item in watch_items:
+                    status = "✓ Resolved" if item.get("resolved") else "⚠️ Active"
+                    sections.append(
+                        f"- [{item.get('category', 'unknown').upper()}] {item.get('description', 'No description')}\n"
+                        f"  Metric: {item.get('metric', 'N/A')} | "
+                        f"Current: {item.get('current_value', 'N/A')} | "
+                        f"Threshold: {item.get('threshold', 'N/A')} | "
+                        f"Status: {status}"
+                    )
+
+        return "\n".join(sections)
+
     async def run_monthly_review(self) -> StrategyRecommendation:
         """
         Run the monthly strategy review.
@@ -524,12 +619,17 @@ class StrategyReviewer:
             f"- reversal_threshold: {tested_values['reversal_threshold']}"
         )
 
+        # 4.5 Load previous reviews for context (recursive memory)
+        previous_reviews = self.db.get_previous_reviews(limit=2)
+        previous_review_context = self._build_previous_review_context(previous_reviews)
+
         # 5. Build prompt
         prompt = STRATEGY_REVIEW_PROMPT.format(
             mr_threshold=self.current_params["mr_threshold"],
             reversal_threshold=self.current_params["reversal_threshold"],
             crash_threshold=self.current_params["crash_threshold"],
             pump_threshold=self.current_params["pump_threshold"],
+            previous_review_context=previous_review_context,
             current_backtest=current_backtest,
             parameter_tests=param_tests_str,
             tested_values=tested_values_str,
@@ -544,16 +644,35 @@ class StrategyReviewer:
                 model="claude-sonnet-4-20250514",
                 max_tokens=2000,
                 messages=[{"role": "user", "content": prompt}],
-                tools=[PARAMETER_CHANGE_TOOL],
+                tools=[PARAMETER_CHANGE_TOOL, WATCH_ITEM_TOOL],
             )
 
-            # Parse response - extract both text and tool use
+            # Parse response - extract text, recommendations, and watch items
             full_report = ""
             recommendations: List[ParameterRecommendation] = []
+            watch_items: List[Dict[str, Any]] = []
 
             for block in response.content:
                 if block.type == "text":
                     full_report += block.text
+                elif block.type == "tool_use" and block.name == "flag_watch_item":
+                    # Parse watch item
+                    item_data = block.input
+                    watch_items.append(
+                        {
+                            "category": item_data.get("category"),
+                            "description": item_data.get("description"),
+                            "metric": item_data.get("metric"),
+                            "current_value": item_data.get("current_value"),
+                            "threshold": item_data.get("threshold"),
+                            "priority": item_data.get("priority", "medium"),
+                            "resolved": False,
+                        }
+                    )
+                    logger.info(
+                        f"Claude flagged watch item: [{item_data.get('category')}] "
+                        f"{item_data.get('description')}"
+                    )
                 elif block.type == "tool_use" and block.name == "recommend_parameter_change":
                     # Parse the structured recommendation
                     rec_data = block.input
@@ -600,6 +719,7 @@ class StrategyReviewer:
                         {"param": r.parameter, "from": r.current_value, "to": r.recommended_value}
                         for r in recommendations
                     ],
+                    "num_watch_items": len(watch_items),
                     "response_length": len(full_report),
                     "timestamp": datetime.now().isoformat(),
                 },
@@ -607,6 +727,21 @@ class StrategyReviewer:
 
             # Create summary (first paragraph)
             summary = full_report.split("\n\n")[0][:200] if full_report else "Review complete"
+
+            # Save full review for recursive memory
+            review_id = self.db.save_strategy_review(
+                full_report=full_report,
+                summary=summary,
+                current_params=self.current_params.copy(),
+                backtest_return=current_result.total_return_pct,
+                recommendations=[
+                    {"param": r.parameter, "from": r.current_value, "to": r.recommended_value}
+                    for r in recommendations
+                ],
+                watch_items=watch_items,
+                market_conditions=market_summary,
+            )
+            logger.info(f"Saved strategy review #{review_id} with {len(watch_items)} watch items")
 
             return StrategyRecommendation(
                 summary=summary,
