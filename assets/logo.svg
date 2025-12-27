@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" fill="none">
+  <!-- Outer ring -->
+  <circle cx="50" cy="50" r="46" stroke="#d4a847" stroke-width="2" fill="none"/>
+
+  <!-- Inner background -->
+  <circle cx="50" cy="50" r="42" fill="#0a0806"/>
+
+  <!-- Bitcoin symbol ₿ -->
+  <text x="50" y="62"
+        font-family="Arial, sans-serif"
+        font-size="42"
+        font-weight="bold"
+        fill="#d4a847"
+        text-anchor="middle">₿</text>
+
+  <!-- Upward trend line -->
+  <path d="M22 72 L38 58 L52 64 L68 42 L78 28"
+        stroke="#d4a847"
+        stroke-width="3"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        fill="none"
+        opacity="0.8"/>
+
+  <!-- Arrow tip -->
+  <polygon points="78,28 72,36 82,38" fill="#d4a847" opacity="0.8"/>
+</svg>
