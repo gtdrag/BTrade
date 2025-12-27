@@ -172,6 +172,12 @@ class Database:
             """
             )
 
+            # Migration: Add market_regime column if it doesn't exist (for existing databases)
+            cursor.execute("PRAGMA table_info(strategy_reviews)")
+            columns = [row[1] for row in cursor.fetchall()]
+            if "market_regime" not in columns:
+                cursor.execute("ALTER TABLE strategy_reviews ADD COLUMN market_regime TEXT")
+
             # Initialize bot state if not exists
             cursor.execute(
                 """
