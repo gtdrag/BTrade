@@ -155,6 +155,9 @@ class TelegramBot:
         # Add command handlers - backtesting
         self._app.add_handler(CommandHandler("backtest", self._cmd_backtest))
 
+        # Add command handlers - simulation
+        self._app.add_handler(CommandHandler("simulate", self._cmd_simulate))
+
         # Add callback handler for inline buttons
         self._app.add_handler(CallbackQueryHandler(self._handle_callback))
 
@@ -289,9 +292,11 @@ class TelegramBot:
             "🛡️ *Risk Management:*\n"
             "/hedge - Trailing hedge status/control\n"
             "/review - Run monthly strategy review now\n\n"
-            "📈 *Backtesting:*\n"
+            "📈 *Backtesting & Simulation:*\n"
             "/backtest - Run strategy backtest\n"
-            "  Examples: `/backtest 3 months`, `/backtest 1 week`\n\n"
+            "  Examples: `/backtest 3 months`, `/backtest 1 week`\n"
+            "/simulate - Historical AI evolution simulation\n"
+            "  Examples: `/simulate 2024`, `/simulate 6 months`\n\n"
             "🔐 E\\*TRADE Auth:\n"
             "/auth - Start E\\*TRADE login\n"
             "/verify CODE - Complete login\n\n"
@@ -1389,6 +1394,160 @@ class TelegramBot:
         except Exception as e:
             logger.error(f"Backtest failed: {e}")
             await update.message.reply_text(f"❌ Backtest failed: {e}")
+
+    # ========== Historical Simulation Commands ==========
+
+    def _parse_simulation_period(self, args: list) -> tuple:
+        """
+        Parse simulation period from command arguments.
+
+        Examples:
+            "2024" -> (Jan 1 2024, Dec 31 2024)
+            "6 months" -> (6 months ago, today)
+            "1 year" -> (1 year ago, today)
+
+        Returns:
+            Tuple of (start_date, end_date, description) or (None, None, error_message)
+        """
+        from datetime import datetime, timedelta
+
+        if not args:
+            # Default to current year
+            now = datetime.now()
+            return (
+                datetime(now.year, 1, 1),
+                datetime(now.year, 12, 31),
+                f"{now.year}",
+            )
+
+        text = " ".join(args).lower().strip()
+
+        # Handle year like "2024"
+        if text.isdigit() and len(text) == 4:
+            year = int(text)
+            return (
+                datetime(year, 1, 1),
+                datetime(year, 12, 31),
+                f"{year}",
+            )
+
+        # Handle relative periods like "6 months", "1 year"
+        import re
+
+        match = re.match(r"^(\d+)\s*(month|months|year|years)$", text)
+        if match:
+            num = int(match.group(1))
+            unit = match.group(2)
+            end_date = datetime.now()
+
+            if "year" in unit:
+                start_date = datetime(end_date.year - num, end_date.month, end_date.day)
+                desc = f"{num} year{'s' if num > 1 else ''}"
+            else:
+                start_date = end_date - timedelta(days=num * 30)
+                desc = f"{num} month{'s' if num > 1 else ''}"
+
+            return (start_date, end_date, desc)
+
+        # Handle shorthand like "6m", "1y"
+        shorthand = re.match(r"^(\d+)\s*([my])$", text)
+        if shorthand:
+            num = int(shorthand.group(1))
+            unit = shorthand.group(2)
+            end_date = datetime.now()
+
+            if unit == "y":
+                start_date = datetime(end_date.year - num, end_date.month, end_date.day)
+                desc = f"{num} year{'s' if num > 1 else ''}"
+            else:
+                start_date = end_date - timedelta(days=num * 30)
+                desc = f"{num} month{'s' if num > 1 else ''}"
+
+            return (start_date, end_date, desc)
+
+        return (None, None, f"Could not parse '{text}'. Try: `2024`, `6 months`, `1 year`")
+
+    async def _cmd_simulate(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /simulate command - run historical AI evolution simulation."""
+        if not self._is_authorized(update):
+            await self._send_unauthorized_response(update)
+            return
+
+        # Parse simulation period
+        start_date, end_date, description = self._parse_simulation_period(context.args)
+
+        if start_date is None:
+            await update.message.reply_text(
+                f"❌ {description}\n\n"
+                "*Usage:*\n"
+                "`/simulate 2024` - Simulate full year\n"
+                "`/simulate 6 months` - Simulate last 6 months\n"
+                "`/simulate 1 year` - Simulate last year\n",
+                parse_mode="Markdown",
+            )
+            return
+
+        # Check if period is reasonable
+        days = (end_date - start_date).days
+        estimated_reviews = days // 14
+        estimated_cost = estimated_reviews * 0.08
+
+        # Warn about long simulations
+        if estimated_reviews > 30:
+            await update.message.reply_text(
+                f"⚠️ *Long Simulation Warning*\n\n"
+                f"Period: {description}\n"
+                f"Reviews: ~{estimated_reviews}\n"
+                f"Est. Cost: ~${estimated_cost:.2f}\n"
+                f"Est. Time: ~{estimated_reviews * 3} seconds\n\n"
+                f"Proceeding anyway...",
+                parse_mode="Markdown",
+            )
+
+        # Send initial status
+        status_msg = await update.message.reply_text(
+            f"🔬 *Starting Historical Simulation*\n\n"
+            f"Period: {description}\n"
+            f"({start_date.strftime('%Y-%m-%d')} → {end_date.strftime('%Y-%m-%d')})\n\n"
+            f"Reviews: ~{estimated_reviews}\n"
+            f"Est. Cost: ~${estimated_cost:.2f}\n\n"
+            f"⏳ Running simulation...\n"
+            f"This may take a few minutes.",
+            parse_mode="Markdown",
+        )
+
+        try:
+            from .historical_simulator import HistoricalSimulator
+
+            simulator = HistoricalSimulator()
+            result = await simulator.run_simulation(
+                start_date=start_date,
+                end_date=end_date,
+                review_interval_days=14,
+                lookback_days=60,
+            )
+
+            # Generate and send report
+            report = result.format_report()
+
+            # Split if too long for Telegram
+            if len(report) > 4000:
+                # Send in parts
+                parts = [report[i : i + 4000] for i in range(0, len(report), 4000)]
+                for i, part in enumerate(parts):
+                    if i == 0:
+                        await status_msg.edit_text(part, parse_mode="Markdown")
+                    else:
+                        await update.message.reply_text(part, parse_mode="Markdown")
+            else:
+                await status_msg.edit_text(report, parse_mode="Markdown")
+
+        except Exception as e:
+            logger.error(f"Simulation failed: {e}")
+            await status_msg.edit_text(
+                f"❌ *Simulation Failed*\n\n" f"Error: {e}\n\n" f"Check logs for details.",
+                parse_mode="Markdown",
+            )
 
     # ========== E*TRADE Authentication Commands ==========
 
