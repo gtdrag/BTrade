@@ -287,6 +287,9 @@ class ETradeClient:
         """
         Renew access token (must be done daily for production).
         Tokens expire at midnight ET if not renewed.
+
+        Note: E*TRADE's renew endpoint returns new oauth_token and oauth_token_secret
+        that must be parsed and stored for subsequent requests.
         """
         if not self.is_authenticated():
             raise ETradeAuthError("Not authenticated")
@@ -296,10 +299,27 @@ class ETradeClient:
             response = self.session.get(url)
 
             if response.status_code == 200:
-                logger.info("Access token renewed successfully")
+                # Parse new tokens from response (format: oauth_token=XXX&oauth_token_secret=YYY)
+                from urllib.parse import parse_qs
+
+                token_data = parse_qs(response.text)
+
+                new_token = token_data.get("oauth_token", [None])[0]
+                new_secret = token_data.get("oauth_token_secret", [None])[0]
+
+                if new_token and new_secret:
+                    self.access_token = new_token
+                    self.access_token_secret = new_secret
+                    self._create_session()
+                    self._save_tokens()
+                    logger.info("Access token renewed and saved successfully")
+                else:
+                    # Some E*TRADE responses don't include new tokens (token extended, not replaced)
+                    logger.info("Access token renewed (token extended, no new credentials)")
+
                 return True
             else:
-                logger.warning(f"Token renewal failed: {response.status_code}")
+                logger.warning(f"Token renewal failed: {response.status_code} - {response.text}")
                 return False
 
         except Exception as e:
