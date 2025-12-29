@@ -53,6 +53,7 @@ class TradingWorker:
         self.approval_mode = os.environ.get("APPROVAL_MODE", "required")
         self.approval_timeout = int(os.environ.get("APPROVAL_TIMEOUT_MINUTES", "10"))
         self.max_position_pct = float(os.environ.get("MAX_POSITION_PCT", "75"))
+        self.account_id_key = os.environ.get("ETRADE_ACCOUNT_ID", "")
 
     def setup(self):
         """Initialize all components."""
@@ -71,6 +72,7 @@ class TradingWorker:
             max_position_pct=self.max_position_pct,
             approval_mode=self.approval_mode,
             approval_timeout_minutes=self.approval_timeout,
+            account_id_key=self.account_id_key,
         )
 
         # Create scheduler
