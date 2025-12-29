@@ -1263,7 +1263,7 @@ class TradingBot:
                 "error": result.error,
                 "reason": signal.reason,
                 "prev_day_return": signal.prev_day_return,
-                "btc_overnight_pct": signal.btc_overnight.change_pct
+                "btc_overnight_pct": signal.btc_overnight.overnight_change_pct
                 if signal.btc_overnight
                 else None,
             },

@@ -415,9 +415,20 @@ class ETradeClient:
         Args:
             account_id_key: The accountIdKey from list_accounts()
         """
+        if not account_id_key:
+            logger.error("get_account_balance: No account_id_key provided")
+            raise ETradeAPIError("account_id_key is required")
+
         params = {"instType": "BROKERAGE", "realTimeNAV": "true"}
         response = self._request("GET", f"/v1/accounts/{account_id_key}/balance", params=params)
-        return response.get("BalanceResponse", {})
+        balance = response.get("BalanceResponse", {})
+
+        if not balance:
+            logger.warning(
+                f"get_account_balance: No BalanceResponse in response. Keys: {list(response.keys())}"
+            )
+
+        return balance
 
     def get_account_positions(self, account_id_key: str) -> List[Dict[str, Any]]:
         """
@@ -445,8 +456,18 @@ class ETradeClient:
         """Get cash available for trading in IRA account."""
         balance = self.get_account_balance(account_id_key)
 
+        # Validate we got a proper response
+        if not balance:
+            logger.error("get_cash_available: Empty balance response from E*TRADE API")
+            raise ETradeAPIError("Empty balance response - check authentication")
+
         # For IRA accounts, look at cashAvailableForInvestment
         computed = balance.get("Computed", {})
+        if not computed:
+            logger.warning(
+                f"get_cash_available: No 'Computed' field in balance response. Keys: {list(balance.keys())}"
+            )
+
         cash = computed.get("cashAvailableForInvestment", 0)
 
         # Fallback to other cash fields
@@ -454,6 +475,13 @@ class ETradeClient:
             cash = computed.get("cashBuyingPower", 0)
         if not cash:
             cash = computed.get("settledCashForInvestment", 0)
+
+        # Log warning if cash is exactly 0 (suspicious)
+        if cash == 0:
+            logger.warning(
+                f"get_cash_available: Cash is $0.00 - this may indicate API issue. "
+                f"Balance keys: {list(balance.keys())}, Computed keys: {list(computed.keys())}"
+            )
 
         return float(cash)
 

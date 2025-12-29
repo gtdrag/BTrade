@@ -73,8 +73,8 @@ class SmartScheduler:
         # Add BTC overnight data if available
         if signal.btc_overnight:
             details["btc_overnight"] = {
-                "change_pct": signal.btc_overnight.change_pct,
-                "is_positive": signal.btc_overnight.is_positive,
+                "change_pct": signal.btc_overnight.overnight_change_pct,
+                "is_positive": signal.btc_overnight.is_up,
                 "message": signal.btc_overnight.message,
             }
 
