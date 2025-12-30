@@ -399,20 +399,27 @@ class TelegramBot:
                 return
 
             self.trading_bot.config.mode = TradingMode.LIVE
+            # Persist mode change so it survives restarts
+            self.trading_bot.db.set_trading_mode("live")
             await update.message.reply_text(
                 "💰 *Switched to LIVE MODE*\n\n"
                 "⚠️ Real money trades will be executed!\n"
-                "All trades require your approval.",
+                "All trades require your approval.\n\n"
+                "_Mode persisted - will survive restarts._",
                 parse_mode="Markdown",
             )
         else:
             self.trading_bot.config.mode = TradingMode.PAPER
+            # Persist mode change so it survives restarts
+            self.trading_bot.db.set_trading_mode("paper")
             await update.message.reply_text(
-                "📝 *Switched to PAPER MODE*\n\nSimulated trades only. No real money at risk.",
+                "📝 *Switched to PAPER MODE*\n\n"
+                "Simulated trades only. No real money at risk.\n\n"
+                "_Mode persisted - will survive restarts._",
                 parse_mode="Markdown",
             )
 
-        logger.info(f"Mode switched to {new_mode.upper()}")
+        logger.info(f"Mode switched to {new_mode.upper()} (persisted to database)")
 
     async def _cmd_pause(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /pause command - pause the scheduler."""

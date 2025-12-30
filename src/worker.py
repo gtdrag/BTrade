@@ -21,6 +21,7 @@ from dotenv import load_dotenv
 # Load environment variables
 load_dotenv()
 
+from .database import get_database  # noqa: E402
 from .smart_scheduler import SmartScheduler  # noqa: E402
 from .telegram_bot import TelegramBot  # noqa: E402
 from .trading_bot import create_trading_bot  # noqa: E402
@@ -47,9 +48,20 @@ class TradingWorker:
         self.scheduler = None
         self.telegram_bot = None
         self.trading_bot = None
+        self.db = get_database()
 
-        # Configuration from environment
-        self.trading_mode = os.environ.get("TRADING_MODE", "paper")
+        # Configuration from environment (with DB persistence override)
+        env_mode = os.environ.get("TRADING_MODE", "paper")
+        # Load persisted mode from database - this survives restarts
+        # Persisted mode from /mode command takes precedence over env variable
+        persisted_mode = self.db.get_trading_mode()
+        # If user explicitly set mode via /mode command, use that
+        # Persisted "live" always takes precedence (explicit user action)
+        # Env var "live" takes precedence over default "paper"
+        if persisted_mode == "live":
+            self.trading_mode = "live"
+        else:
+            self.trading_mode = env_mode  # Use env var (defaults to paper)
         self.approval_mode = os.environ.get("APPROVAL_MODE", "required")
         self.approval_timeout = int(os.environ.get("APPROVAL_TIMEOUT_MINUTES", "10"))
         self.max_position_pct = float(os.environ.get("MAX_POSITION_PCT", "75"))

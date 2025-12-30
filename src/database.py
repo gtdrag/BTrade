@@ -116,10 +116,17 @@ class Database:
                     total_trades INTEGER DEFAULT 0,
                     winning_trades INTEGER DEFAULT 0,
                     total_pnl REAL DEFAULT 0,
+                    trading_mode TEXT DEFAULT 'paper',
                     updated_at TEXT NOT NULL
                 )
             """
             )
+
+            # Migration: Add trading_mode column if it doesn't exist (for existing DBs)
+            cursor.execute("PRAGMA table_info(bot_state)")
+            columns = [col[1] for col in cursor.fetchall()]
+            if "trading_mode" not in columns:
+                cursor.execute("ALTER TABLE bot_state ADD COLUMN trading_mode TEXT DEFAULT 'paper'")
 
             # Daily prices table - stores daily open prices
             cursor.execute(
@@ -374,6 +381,26 @@ class Database:
     def clear_position(self):
         """Clear current position."""
         self.set_position(0, None, None)
+
+    def get_trading_mode(self) -> str:
+        """Get persisted trading mode.
+
+        Returns:
+            'paper' or 'live' - defaults to 'paper' if not set
+        """
+        state = self.get_bot_state()
+        return state.get("trading_mode", "paper") or "paper"
+
+    def set_trading_mode(self, mode: str):
+        """Persist trading mode change.
+
+        Args:
+            mode: 'paper' or 'live'
+        """
+        if mode not in ("paper", "live"):
+            raise ValueError(f"Invalid mode: {mode}. Must be 'paper' or 'live'")
+        self.update_bot_state(trading_mode=mode)
+        self.log_event("MODE_CHANGE", new_mode=mode)
 
     # ==================== Daily Price Operations ====================
 
