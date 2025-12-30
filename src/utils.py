@@ -201,7 +201,7 @@ def format_timedelta(td: datetime.timedelta) -> str:
         return f"{seconds}s"
 
 
-# US Market Holidays (2024-2026) - Update as needed
+# US Market Holidays (2024-2028) - Update as needed
 MARKET_HOLIDAYS = {
     # 2024
     datetime.date(2024, 1, 1),  # New Year's Day
@@ -236,6 +236,27 @@ MARKET_HOLIDAYS = {
     datetime.date(2026, 9, 7),  # Labor Day
     datetime.date(2026, 11, 26),  # Thanksgiving
     datetime.date(2026, 12, 25),  # Christmas
+    # 2027
+    datetime.date(2027, 1, 1),  # New Year's Day
+    datetime.date(2027, 1, 18),  # MLK Day
+    datetime.date(2027, 2, 15),  # Presidents Day
+    datetime.date(2027, 3, 26),  # Good Friday
+    datetime.date(2027, 5, 31),  # Memorial Day
+    datetime.date(2027, 6, 18),  # Juneteenth (observed - 19th is Saturday)
+    datetime.date(2027, 7, 5),  # Independence Day (observed - 4th is Sunday)
+    datetime.date(2027, 9, 6),  # Labor Day
+    datetime.date(2027, 11, 25),  # Thanksgiving
+    datetime.date(2027, 12, 24),  # Christmas (observed - 25th is Saturday)
+    # 2028
+    datetime.date(2028, 1, 17),  # MLK Day
+    datetime.date(2028, 2, 21),  # Presidents Day
+    datetime.date(2028, 4, 14),  # Good Friday
+    datetime.date(2028, 5, 29),  # Memorial Day
+    datetime.date(2028, 6, 19),  # Juneteenth
+    datetime.date(2028, 7, 4),  # Independence Day
+    datetime.date(2028, 9, 4),  # Labor Day
+    datetime.date(2028, 11, 23),  # Thanksgiving
+    datetime.date(2028, 12, 25),  # Christmas
 }
 
 

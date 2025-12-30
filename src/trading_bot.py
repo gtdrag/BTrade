@@ -405,9 +405,11 @@ class TradingBot:
 
             # For live mode, we don't track starting capital the same way
             # Just show unrealized P&L from positions
+            # Note: denominator is yesterday's value (current - today's gain)
+            yesterdays_value = total_position_value - total_days_gain
             days_gain_pct = (
-                (total_days_gain / (total_position_value - total_days_gain) * 100)
-                if (total_position_value - total_days_gain) > 0
+                (total_days_gain / yesterdays_value * 100)
+                if abs(yesterdays_value) > 0.01  # Avoid division by zero/near-zero
                 else 0
             )
 
@@ -777,7 +779,12 @@ class TradingBot:
 
     def _execute_live_trade(self, etf: str, shares: int, signal: TodaySignal) -> TradeResult:
         """Execute a live trade via E*TRADE."""
-        if not self.client or not self.client.is_authenticated():
+        if not self.client:
+            raise ETradeAuthError("E*TRADE client not configured")
+
+        # Ensure token is fresh before starting preview+place sequence
+        # This prevents token expiry between preview and place calls
+        if not self.client.ensure_authenticated():
             raise ETradeAuthError("E*TRADE client not authenticated")
 
         try:
@@ -817,16 +824,31 @@ class TradingBot:
                     logger.warning(
                         f"PARTIAL FILL: Ordered {shares} {etf}, only {filled_shares} filled"
                     )
+                    self.db.log_event(
+                        "PARTIAL_FILL",
+                        order_id=order_id,
+                        symbol=etf,
+                        requested=shares,
+                        filled=filled_shares,
+                        shortfall=shares - filled_shares,
+                        action="BUY",
+                    )
                     self.telegram.notify_error(
                         "Partial Fill Warning",
                         f"Ordered {shares} {etf}, only {filled_shares} filled @ ${fill_price:.2f}",
                     )
             else:
-                # Fall back to estimate if polling fails
+                # Fall back to estimate if polling fails - ALERT USER
                 logger.warning(f"Using estimated fill price for order {order_id}")
                 fill_price = estimated_value / shares if shares > 0 else 0
                 filled_shares = shares
                 total_value = estimated_value
+                # Alert user that we're using estimated price (actual may differ)
+                self.telegram.notify_error(
+                    "Fill Price Unconfirmed",
+                    f"Order {order_id}: Using estimated price ${fill_price:.2f}. "
+                    f"Check E*TRADE for actual fill price.",
+                )
 
             # Register with hedge manager for trailing hedge tracking
             self.hedge_manager.register_position(
@@ -949,6 +971,10 @@ class TradingBot:
         if not self.client:
             raise ETradeAuthError("E*TRADE client not configured")
 
+        # Ensure token is fresh before starting preview+place sequence
+        if not self.client.ensure_authenticated():
+            raise ETradeAuthError("E*TRADE client not authenticated")
+
         # Get current positions
         positions = self.client.get_account_positions(self.config.account_id_key)
 
@@ -1004,15 +1030,30 @@ class TradingBot:
                     logger.warning(
                         f"PARTIAL FILL: Ordered SELL {shares} {etf}, only {filled_shares} filled"
                     )
+                    self.db.log_event(
+                        "PARTIAL_FILL",
+                        order_id=order_id,
+                        symbol=etf,
+                        requested=shares,
+                        filled=filled_shares,
+                        shortfall=shares - filled_shares,
+                        action="SELL",
+                    )
                     self.telegram.notify_error(
                         "Partial Fill Warning",
                         f"Sell order: {shares} {etf} requested, only {filled_shares} filled",
                     )
             else:
-                # Fall back to requested shares if polling fails
+                # Fall back to requested shares if polling fails - ALERT USER
                 logger.warning(f"Using requested shares for sell order {order_id}")
                 filled_shares = shares
-                fill_price = 0.0
+                fill_price = 0.0  # Unknown - user should check E*TRADE
+                # Alert user that we couldn't confirm the fill
+                self.telegram.notify_error(
+                    "Sell Fill Unconfirmed",
+                    f"Order {order_id}: Could not confirm fill for {shares} {etf}. "
+                    f"Check E*TRADE for actual execution.",
+                )
 
             # Clear hedge manager tracking
             self.hedge_manager.clear_position()
@@ -1049,6 +1090,8 @@ class TradingBot:
 
         Called periodically during market hours to monitor position gains
         and add inverse positions to lock in profits.
+
+        Thread-safe: Uses position lock to prevent concurrent modifications.
 
         Returns:
             TradeResult if hedge was executed, None otherwise
@@ -1089,103 +1132,125 @@ class TradingBot:
             position_gain_pct=f"{hedge_order['position_gain_pct']:.2f}%",
         )
 
-        if self.is_paper_mode:
-            # Paper trade the hedge
-            self._paper_capital -= hedge_shares * hedge_price
-            if hedge_instrument not in self._paper_positions:
-                self._paper_positions[hedge_instrument] = {
-                    "shares": hedge_shares,
-                    "entry_price": hedge_price,
-                    "entry_time": get_et_now(),
-                    "signal": "HEDGE",
-                }
-            else:
-                # Add to existing hedge position
-                self._paper_positions[hedge_instrument]["shares"] += hedge_shares
-
-            # Update hedge manager
-            self.hedge_manager.update_hedge_shares(hedge_shares)
-
-            return TradeResult(
-                success=True,
-                signal=Signal.CASH,
-                etf=hedge_instrument,
-                action="BUY",
-                shares=hedge_shares,
-                price=hedge_price,
-                total_value=hedge_shares * hedge_price,
-                order_id=f"HEDGE-{get_et_now().strftime('%Y%m%d%H%M%S')}",
-                is_paper=True,
-            )
-        else:
-            # Live trade the hedge via E*TRADE
-            if not self.client or not self.client.is_authenticated():
-                logger.error("Cannot execute live hedge: E*TRADE not authenticated")
-                return None
-
-            try:
-                # Preview order first (required for production)
-                preview = self.client.preview_order(
-                    account_id_key=self.config.account_id_key,
-                    symbol=hedge_instrument,
-                    action="BUY",
-                    quantity=hedge_shares,
-                    order_type="MARKET",
-                )
-
-                order_response = self.client.place_order(
-                    account_id_key=self.config.account_id_key,
-                    symbol=hedge_instrument,
-                    action="BUY",
-                    quantity=hedge_shares,
-                    order_type="MARKET",
-                    preview_ids=preview.get("PreviewIds", []),
-                )
-
-                order_id = str(order_response.get("OrderId", ""))
-
-                # Poll for actual fill confirmation
-                fill_info = self._wait_for_order_fill(order_id)
-                if fill_info:
-                    filled_shares = fill_info["filled_qty"]
-                    fill_price = fill_info["avg_price"]
-
-                    # Check for partial fill
-                    if filled_shares < hedge_shares:
-                        logger.warning(
-                            f"PARTIAL FILL: Hedge ordered {hedge_shares}, only {filled_shares} filled"
-                        )
-                        self.telegram.notify_error(
-                            "Partial Hedge Fill",
-                            f"Hedge: {hedge_shares} requested, only {filled_shares} filled",
-                        )
+        # Acquire lock for position modification
+        with self._position_lock:
+            if self.is_paper_mode:
+                # Paper trade the hedge
+                self._paper_capital -= hedge_shares * hedge_price
+                if hedge_instrument not in self._paper_positions:
+                    self._paper_positions[hedge_instrument] = {
+                        "shares": hedge_shares,
+                        "entry_price": hedge_price,
+                        "entry_time": get_et_now(),
+                        "signal": "HEDGE",
+                    }
                 else:
-                    # Fall back to requested if polling fails
-                    logger.warning(f"Using requested shares for hedge order {order_id}")
-                    filled_shares = hedge_shares
-                    fill_price = hedge_price
+                    # Add to existing hedge position
+                    self._paper_positions[hedge_instrument]["shares"] += hedge_shares
 
-                self.hedge_manager.update_hedge_shares(filled_shares)
-
-                logger.info(
-                    f"[LIVE] Hedge executed: {filled_shares} {hedge_instrument} @ ${fill_price:.2f} - Order ID: {order_id}"
-                )
+                # Update hedge manager
+                self.hedge_manager.update_hedge_shares(hedge_shares)
 
                 return TradeResult(
                     success=True,
                     signal=Signal.CASH,
                     etf=hedge_instrument,
                     action="BUY",
-                    shares=filled_shares,
-                    price=fill_price,
-                    total_value=filled_shares * fill_price,
-                    order_id=order_id,
-                    is_paper=False,
+                    shares=hedge_shares,
+                    price=hedge_price,
+                    total_value=hedge_shares * hedge_price,
+                    order_id=f"HEDGE-{get_et_now().strftime('%Y%m%d%H%M%S')}",
+                    is_paper=True,
                 )
+            else:
+                # Live trade the hedge via E*TRADE
+                if not self.client:
+                    logger.error("Cannot execute live hedge: E*TRADE client not configured")
+                    return None
 
-            except ETradeAPIError as e:
-                logger.error(f"Failed to execute live hedge: {e}")
-                return None
+                # Ensure token is fresh before starting preview+place sequence
+                if not self.client.ensure_authenticated():
+                    logger.error("Cannot execute live hedge: E*TRADE not authenticated")
+                    return None
+
+                try:
+                    # Preview order first (required for production)
+                    preview = self.client.preview_order(
+                        account_id_key=self.config.account_id_key,
+                        symbol=hedge_instrument,
+                        action="BUY",
+                        quantity=hedge_shares,
+                        order_type="MARKET",
+                    )
+
+                    order_response = self.client.place_order(
+                        account_id_key=self.config.account_id_key,
+                        symbol=hedge_instrument,
+                        action="BUY",
+                        quantity=hedge_shares,
+                        order_type="MARKET",
+                        preview_ids=preview.get("PreviewIds", []),
+                    )
+
+                    order_id = str(order_response.get("OrderId", ""))
+
+                    # Poll for actual fill confirmation
+                    fill_info = self._wait_for_order_fill(order_id)
+                    if fill_info:
+                        filled_shares = fill_info["filled_qty"]
+                        fill_price = fill_info["avg_price"]
+
+                        # Check for partial fill
+                        if filled_shares < hedge_shares:
+                            logger.warning(
+                                f"PARTIAL FILL: Hedge ordered {hedge_shares}, only {filled_shares} filled"
+                            )
+                            self.db.log_event(
+                                "PARTIAL_FILL",
+                                order_id=order_id,
+                                symbol=hedge_instrument,
+                                requested=hedge_shares,
+                                filled=filled_shares,
+                                shortfall=hedge_shares - filled_shares,
+                                action="HEDGE",
+                            )
+                            self.telegram.notify_error(
+                                "Partial Hedge Fill",
+                                f"Hedge: {hedge_shares} requested, only {filled_shares} filled",
+                            )
+                    else:
+                        # Fall back to requested if polling fails - ALERT USER
+                        logger.warning(f"Using requested shares for hedge order {order_id}")
+                        filled_shares = hedge_shares
+                        fill_price = hedge_price
+                        # Alert user that we're using estimated price
+                        self.telegram.notify_error(
+                            "Hedge Fill Unconfirmed",
+                            f"Order {order_id}: Using estimated price ${fill_price:.2f}. "
+                            f"Check E*TRADE for actual fill.",
+                        )
+
+                    self.hedge_manager.update_hedge_shares(filled_shares)
+
+                    logger.info(
+                        f"[LIVE] Hedge executed: {filled_shares} {hedge_instrument} @ ${fill_price:.2f} - Order ID: {order_id}"
+                    )
+
+                    return TradeResult(
+                        success=True,
+                        signal=Signal.CASH,
+                        etf=hedge_instrument,
+                        action="BUY",
+                        shares=filled_shares,
+                        price=fill_price,
+                        total_value=filled_shares * fill_price,
+                        order_id=order_id,
+                        is_paper=False,
+                    )
+
+                except ETradeAPIError as e:
+                    logger.error(f"Failed to execute live hedge: {e}")
+                    return None
 
     def check_and_execute_reversal(self) -> Optional[TradeResult]:
         """
@@ -1330,7 +1395,15 @@ class TradingBot:
                 )
             else:
                 # Live reversal via E*TRADE
-                if not self.client or not self.client.is_authenticated():
+                if not self.client:
+                    logger.error("Cannot execute live reversal: E*TRADE client not configured")
+                    self._alert_reversal_partial_failure(
+                        "E*TRADE client not configured", shares, pnl_pct
+                    )
+                    return close_result
+
+                # Ensure token is fresh before starting preview+place sequence
+                if not self.client.ensure_authenticated():
                     logger.error("Cannot execute live reversal: E*TRADE not authenticated")
                     # CRITICAL: BITU is closed but we can't open SBIT - alert user!
                     self._alert_reversal_partial_failure(
@@ -1370,15 +1443,30 @@ class TradingBot:
                             logger.warning(
                                 f"PARTIAL FILL: Reversal ordered {sbit_shares} SBIT, only {filled_shares} filled"
                             )
+                            self.db.log_event(
+                                "PARTIAL_FILL",
+                                order_id=order_id,
+                                symbol="SBIT",
+                                requested=sbit_shares,
+                                filled=filled_shares,
+                                shortfall=sbit_shares - filled_shares,
+                                action="REVERSAL",
+                            )
                             self.telegram.notify_error(
                                 "Partial Reversal Fill",
                                 f"Reversal: {sbit_shares} SBIT requested, only {filled_shares} filled",
                             )
                     else:
-                        # Fall back to requested if polling fails
+                        # Fall back to requested if polling fails - ALERT USER
                         logger.warning(f"Using requested shares for reversal order {order_id}")
                         filled_shares = sbit_shares
                         fill_price = sbit_price
+                        # Alert user that we're using estimated price
+                        self.telegram.notify_error(
+                            "Reversal Fill Unconfirmed",
+                            f"Order {order_id}: Using estimated price ${fill_price:.2f}. "
+                            f"Check E*TRADE for actual fill.",
+                        )
 
                     # Register with hedge manager
                     self.hedge_manager.register_position(

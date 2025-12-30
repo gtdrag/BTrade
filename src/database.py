@@ -51,8 +51,11 @@ class Database:
 
     @contextmanager
     def _get_connection(self):
-        """Context manager for database connections."""
-        conn = sqlite3.connect(self.db_path)
+        """Context manager for database connections.
+
+        Thread-safe: Uses WAL mode for concurrent access from APScheduler jobs.
+        """
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
         conn.row_factory = sqlite3.Row
         try:
             yield conn
@@ -64,9 +67,14 @@ class Database:
             conn.close()
 
     def _init_db(self):
-        """Initialize database tables."""
+        """Initialize database tables and enable WAL mode for thread safety."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
+
+            # Enable WAL mode for better concurrent access
+            # This allows multiple readers and one writer simultaneously
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA busy_timeout=30000")  # 30 second timeout
 
             # Trades table - stores all executed trades
             cursor.execute(

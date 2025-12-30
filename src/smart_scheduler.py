@@ -421,7 +421,10 @@ class SmartScheduler:
         logger.info("Error notification sent")
 
     def _job_crash_day_check(self):
-        """Check for intraday crash signal and execute if triggered."""
+        """Check for intraday crash signal and execute if triggered.
+
+        Thread-safe: Uses position lock to prevent TOCTOU race conditions.
+        """
         now = get_et_now()
 
         if not is_trading_day(now.date()):
@@ -439,56 +442,59 @@ class SmartScheduler:
                     f"CRASH DAY TRIGGERED: IBIT down {signal.crash_day_status.current_drop_pct:.1f}%"
                 )
 
-                # Check if we have an existing position that conflicts
-                has_bitx = False
-                has_sbit = False
+                # Acquire lock for atomic position check + modification
+                # Prevents race with other jobs (reversal, hedge, pump_day)
+                with self.bot._position_lock:
+                    # Check if we have an existing position that conflicts
+                    has_bitu = False
+                    has_sbit = False
 
-                if self.bot.is_paper_mode:
-                    has_bitx = "BITU" in self.bot._paper_positions
-                    has_sbit = "SBIT" in self.bot._paper_positions
-                elif self.bot.client:
-                    # For live trading, check actual positions
-                    try:
-                        positions = self.bot.client.get_account_positions(
-                            self.bot.config.account_id_key
+                    if self.bot.is_paper_mode:
+                        has_bitu = "BITU" in self.bot._paper_positions
+                        has_sbit = "SBIT" in self.bot._paper_positions
+                    elif self.bot.client:
+                        # For live trading, check actual positions
+                        try:
+                            positions = self.bot.client.get_account_positions(
+                                self.bot.config.account_id_key
+                            )
+                            for pos in positions:
+                                symbol = pos.get("Product", {}).get("symbol", "")
+                                qty = pos.get("quantity", 0)
+                                if symbol == "BITU" and qty > 0:
+                                    has_bitu = True
+                                elif symbol == "SBIT" and qty > 0:
+                                    has_sbit = True
+                        except Exception as e:
+                            logger.warning(f"Could not check positions: {e}")
+
+                    # If holding BITU (long), we MUST close it - holding long during crash is disaster
+                    if has_bitu:
+                        logger.warning("CRASH during BITU position! Closing BITU first...")
+                        close_result = self.bot.close_position("BITU")
+                        if close_result.success:
+                            logger.info(f"Emergency close: Sold BITU @ ${close_result.price:.2f}")
+                        else:
+                            logger.error(f"Failed to close BITU: {close_result.error}")
+                            return  # Don't proceed if we can't close
+
+                    # If already holding SBIT, we're already positioned correctly
+                    elif has_sbit:
+                        logger.info("Already holding SBIT - correctly positioned for crash")
+                        return
+
+                    # Now execute the crash day trade (still under lock)
+                    result = self.bot.execute_signal(signal)
+                    self._last_result = result
+
+                    if result.success:
+                        # Mark that we've traded the crash day
+                        self.bot.strategy.mark_crash_day_traded()
+                        logger.info(
+                            f"Crash day trade executed: {result.shares} SBIT @ ${result.price:.2f}"
                         )
-                        for pos in positions:
-                            symbol = pos.get("Product", {}).get("symbol", "")
-                            qty = pos.get("quantity", 0)
-                            if symbol == "BITU" and qty > 0:
-                                has_bitx = True
-                            elif symbol == "SBIT" and qty > 0:
-                                has_sbit = True
-                    except Exception as e:
-                        logger.warning(f"Could not check positions: {e}")
-
-                # If holding BITU (long), we MUST close it - holding long during crash is disaster
-                if has_bitx:
-                    logger.warning("CRASH during BITU position! Closing BITU first...")
-                    close_result = self.bot.close_position("BITU")
-                    if close_result.success:
-                        logger.info(f"Emergency close: Sold BITU @ ${close_result.price:.2f}")
                     else:
-                        logger.error(f"Failed to close BITU: {close_result.error}")
-                        return  # Don't proceed if we can't close
-
-                # If already holding SBIT, we're already positioned correctly
-                elif has_sbit:
-                    logger.info("Already holding SBIT - correctly positioned for crash")
-                    return
-
-                # Now execute the crash day trade
-                result = self.bot.execute_signal(signal)
-                self._last_result = result
-
-                if result.success:
-                    # Mark that we've traded the crash day
-                    self.bot.strategy.mark_crash_day_traded()
-                    logger.info(
-                        f"Crash day trade executed: {result.shares} SBIT @ ${result.price:.2f}"
-                    )
-                else:
-                    logger.error(f"Crash day trade failed: {result.error}")
+                        logger.error(f"Crash day trade failed: {result.error}")
             else:
                 if signal.crash_day_status:
                     drop = signal.crash_day_status.current_drop_pct
@@ -501,7 +507,10 @@ class SmartScheduler:
             self._send_error_notification(f"Crash day check failed: {e}")
 
     def _job_pump_day_check(self):
-        """Check for intraday pump signal and execute if triggered."""
+        """Check for intraday pump signal and execute if triggered.
+
+        Thread-safe: Uses position lock to prevent TOCTOU race conditions.
+        """
         now = get_et_now()
 
         if not is_trading_day(now.date()):
@@ -519,56 +528,59 @@ class SmartScheduler:
                     f"PUMP DAY TRIGGERED: IBIT up {signal.pump_day_status.current_gain_pct:.1f}%"
                 )
 
-                # Check if we have an existing position that conflicts
-                has_bitu = False
-                has_sbit = False
+                # Acquire lock for atomic position check + modification
+                # Prevents race with other jobs (reversal, hedge, crash_day)
+                with self.bot._position_lock:
+                    # Check if we have an existing position that conflicts
+                    has_bitu = False
+                    has_sbit = False
 
-                if self.bot.is_paper_mode:
-                    has_bitu = "BITU" in self.bot._paper_positions
-                    has_sbit = "SBIT" in self.bot._paper_positions
-                elif self.bot.client:
-                    # For live trading, check actual positions
-                    try:
-                        positions = self.bot.client.get_account_positions(
-                            self.bot.config.account_id_key
+                    if self.bot.is_paper_mode:
+                        has_bitu = "BITU" in self.bot._paper_positions
+                        has_sbit = "SBIT" in self.bot._paper_positions
+                    elif self.bot.client:
+                        # For live trading, check actual positions
+                        try:
+                            positions = self.bot.client.get_account_positions(
+                                self.bot.config.account_id_key
+                            )
+                            for pos in positions:
+                                symbol = pos.get("Product", {}).get("symbol", "")
+                                qty = pos.get("quantity", 0)
+                                if symbol == "BITU" and qty > 0:
+                                    has_bitu = True
+                                elif symbol == "SBIT" and qty > 0:
+                                    has_sbit = True
+                        except Exception as e:
+                            logger.warning(f"Could not check positions: {e}")
+
+                    # If holding SBIT (inverse), we MUST close it - holding inverse during pump is disaster
+                    if has_sbit:
+                        logger.warning("PUMP during SBIT position! Closing SBIT first...")
+                        close_result = self.bot.close_position("SBIT")
+                        if close_result.success:
+                            logger.info(f"Emergency close: Sold SBIT @ ${close_result.price:.2f}")
+                        else:
+                            logger.error(f"Failed to close SBIT: {close_result.error}")
+                            return  # Don't proceed if we can't close
+
+                    # If already holding BITU, we're already positioned correctly
+                    elif has_bitu:
+                        logger.info("Already holding BITU - correctly positioned for pump")
+                        return
+
+                    # Now execute the pump day trade (still under lock)
+                    result = self.bot.execute_signal(signal)
+                    self._last_result = result
+
+                    if result.success:
+                        # Mark that we've traded the pump day
+                        self.bot.strategy.mark_pump_day_traded()
+                        logger.info(
+                            f"Pump day trade executed: {result.shares} BITU @ ${result.price:.2f}"
                         )
-                        for pos in positions:
-                            symbol = pos.get("Product", {}).get("symbol", "")
-                            qty = pos.get("quantity", 0)
-                            if symbol == "BITU" and qty > 0:
-                                has_bitu = True
-                            elif symbol == "SBIT" and qty > 0:
-                                has_sbit = True
-                    except Exception as e:
-                        logger.warning(f"Could not check positions: {e}")
-
-                # If holding SBIT (inverse), we MUST close it - holding inverse during pump is disaster
-                if has_sbit:
-                    logger.warning("PUMP during SBIT position! Closing SBIT first...")
-                    close_result = self.bot.close_position("SBIT")
-                    if close_result.success:
-                        logger.info(f"Emergency close: Sold SBIT @ ${close_result.price:.2f}")
                     else:
-                        logger.error(f"Failed to close SBIT: {close_result.error}")
-                        return  # Don't proceed if we can't close
-
-                # If already holding BITU, we're already positioned correctly
-                elif has_bitu:
-                    logger.info("Already holding BITU - correctly positioned for pump")
-                    return
-
-                # Now execute the pump day trade
-                result = self.bot.execute_signal(signal)
-                self._last_result = result
-
-                if result.success:
-                    # Mark that we've traded the pump day
-                    self.bot.strategy.mark_pump_day_traded()
-                    logger.info(
-                        f"Pump day trade executed: {result.shares} BITU @ ${result.price:.2f}"
-                    )
-                else:
-                    logger.error(f"Pump day trade failed: {result.error}")
+                        logger.error(f"Pump day trade failed: {result.error}")
             else:
                 if signal.pump_day_status:
                     gain = signal.pump_day_status.current_gain_pct
@@ -726,11 +738,7 @@ class SmartScheduler:
                             message += f" @ ${result.price:.2f}"
                         message += "\n"
 
-                await bot._app.bot.send_message(
-                    chat_id=bot._chat_id,
-                    text=message,
-                    parse_mode="Markdown",
-                )
+                await bot.send_message(message, parse_mode="Markdown")
 
             run_async(_notify())
 
@@ -804,11 +812,7 @@ class SmartScheduler:
                     f"Total hedge: {total_hedge_pct:.0f}% of position"
                 )
 
-                await bot._bot.send_message(
-                    chat_id=bot._chat_id,
-                    text=message,
-                    parse_mode="Markdown",
-                )
+                await bot.send_message(message, parse_mode="Markdown")
 
             run_async(_notify())
 
@@ -881,11 +885,7 @@ class SmartScheduler:
                     f"_Riding the trend down to EOD close_"
                 )
 
-                await bot._app.bot.send_message(
-                    chat_id=bot.chat_id,
-                    text=message,
-                    parse_mode="Markdown",
-                )
+                await bot.send_message(message, parse_mode="Markdown")
 
             run_async(_notify())
 

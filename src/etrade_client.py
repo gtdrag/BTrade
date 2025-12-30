@@ -145,6 +145,29 @@ class ETradeClient:
             logger.error(f"E*TRADE auth check error: {e}")
             return False
 
+    def ensure_authenticated(self) -> bool:
+        """
+        Ensure we have a valid, freshly-renewed token before starting order sequences.
+
+        Call this before preview+place order sequences to avoid token expiry mid-order.
+        This proactively renews the token if authenticated, preventing 401s during orders.
+
+        Returns:
+            True if authenticated (and token renewed), False otherwise
+        """
+        if not self.is_authenticated():
+            return False
+
+        # Proactively renew token to ensure it's fresh for the order sequence
+        # E*TRADE tokens can expire at any time, so renewing before orders is safer
+        try:
+            self.renew_token()
+            return True
+        except Exception as e:
+            logger.warning(f"Token renewal during ensure_authenticated failed: {e}")
+            # Still return True if authenticated - renewal failure isn't fatal
+            return self.is_authenticated()
+
     def authenticate(self, callback_url: str = "oob") -> bool:
         """
         Perform OAuth authentication flow.
