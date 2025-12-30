@@ -83,7 +83,7 @@ class SmartScheduler:
             details["crash_day"] = {
                 "current_drop_pct": signal.crash_day_status.current_drop_pct,
                 "is_triggered": signal.crash_day_status.is_triggered,
-                "threshold": signal.crash_day_status.threshold,
+                "threshold": self.bot.config.strategy.crash_day_threshold,
             }
 
         # Add pump day status if available
@@ -91,7 +91,7 @@ class SmartScheduler:
             details["pump_day"] = {
                 "current_gain_pct": signal.pump_day_status.current_gain_pct,
                 "is_triggered": signal.pump_day_status.is_triggered,
-                "threshold": signal.pump_day_status.threshold,
+                "threshold": self.bot.config.strategy.pump_day_threshold,
             }
 
         # Add weekend gap if available
