@@ -16,7 +16,7 @@ from .database import get_database
 from .smart_strategy import Signal
 from .telegram_bot import TelegramBot
 from .trading_bot import TradeResult, TradingBot
-from .utils import ET, get_et_now, is_trading_day
+from .utils import ET, get_et_now, is_trading_day, run_async
 
 logger = logging.getLogger(__name__)
 
@@ -277,8 +277,6 @@ class SmartScheduler:
 
     def _job_auth_reminder(self):
         """Send daily authentication reminder at 8:00 AM ET."""
-        import asyncio
-
         now = get_et_now()
 
         if not is_trading_day(now.date()):
@@ -324,12 +322,7 @@ class SmartScheduler:
                     parse_mode="Markdown",
                 )
 
-        try:
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-        loop.run_until_complete(_send_reminder())
+        run_async(_send_reminder())
 
         self.db.log_event(
             "AUTH_REMINDER",
@@ -382,8 +375,6 @@ class SmartScheduler:
 
     def _send_no_signal_notification(self, now):
         """Send notification when there's no trade signal."""
-        import asyncio
-
         day_name = now.strftime("%A")
 
         # Build reason for no signal
@@ -407,18 +398,11 @@ class SmartScheduler:
                 "Staying in cash. Monitoring for intraday opportunities..."
             )
 
-        try:
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-        loop.run_until_complete(_send())
+        run_async(_send())
         logger.info("No-signal notification sent")
 
     def _send_error_notification(self, error_msg: str):
         """Send error notification via Telegram."""
-        import asyncio
-
         now = get_et_now()
 
         async def _send():
@@ -433,12 +417,7 @@ class SmartScheduler:
                 parse_mode=None,
             )
 
-        try:
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-        loop.run_until_complete(_send())
+        run_async(_send())
         logger.info("Error notification sent")
 
     def _job_crash_day_check(self):
@@ -603,8 +582,6 @@ class SmartScheduler:
 
     def _job_ten_am_dump_exit(self):
         """Exit 10 AM dump position at 10:30 AM ET."""
-        import asyncio
-
         now = get_et_now()
 
         if not is_trading_day(now.date()):
@@ -642,12 +619,7 @@ class SmartScheduler:
                         parse_mode="Markdown",
                     )
 
-                try:
-                    loop = asyncio.get_event_loop()
-                except RuntimeError:
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                loop.run_until_complete(_send_exit())
+                run_async(_send_exit())
 
                 logger.info(f"10 AM dump exit: Sold {result.shares} SBIT @ ${result.price:.2f}")
 
@@ -724,8 +696,6 @@ class SmartScheduler:
 
     def _send_close_positions_notification(self, successes: list, failures: list):
         """Send Telegram notification for EOD close results."""
-        import asyncio
-
         # Only send if there were actual closes or failures
         if not successes and not failures:
             return
@@ -762,12 +732,7 @@ class SmartScheduler:
                     parse_mode="Markdown",
                 )
 
-            try:
-                loop = asyncio.get_event_loop()
-            except RuntimeError:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-            loop.run_until_complete(_notify())
+            run_async(_notify())
 
         except Exception as e:
             logger.error(f"Failed to send close notification: {e}")
@@ -819,8 +784,6 @@ class SmartScheduler:
 
     def _send_hedge_notification(self, result):
         """Send Telegram notification for hedge execution."""
-        import asyncio
-
         try:
             from .telegram_bot import TelegramBot
 
@@ -847,12 +810,7 @@ class SmartScheduler:
                     parse_mode="Markdown",
                 )
 
-            try:
-                loop = asyncio.get_event_loop()
-            except RuntimeError:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-            loop.run_until_complete(_notify())
+            run_async(_notify())
 
         except Exception as e:
             logger.warning(f"Failed to send hedge notification: {e}")
@@ -905,8 +863,6 @@ class SmartScheduler:
 
     def _send_reversal_notification(self, result):
         """Send Telegram notification for position reversal."""
-        import asyncio
-
         try:
             from .telegram_bot import TelegramBot
 
@@ -931,12 +887,7 @@ class SmartScheduler:
                     parse_mode="Markdown",
                 )
 
-            try:
-                loop = asyncio.get_event_loop()
-            except RuntimeError:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-            loop.run_until_complete(_notify())
+            run_async(_notify())
 
         except Exception as e:
             logger.warning(f"Failed to send reversal notification: {e}")
@@ -952,8 +903,6 @@ class SmartScheduler:
 
     def _job_daily_summary(self):
         """Send daily summary via Telegram at 4:00 PM ET."""
-        import asyncio
-
         now = get_et_now()
 
         if not is_trading_day(now.date()):
@@ -996,12 +945,7 @@ class SmartScheduler:
                     ending_cash=ending_cash,
                 )
 
-            try:
-                loop = asyncio.get_event_loop()
-            except RuntimeError:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-            loop.run_until_complete(_send_summary())
+            run_async(_send_summary())
 
             logger.info(f"Daily summary sent: {trades_today} trades, P/L: ${total_pnl:.2f}")
 
@@ -1011,8 +955,6 @@ class SmartScheduler:
 
     def _job_premarket_reminder(self):
         """Send pre-market reminder at 9:15 AM ET."""
-        import asyncio
-
         now = get_et_now()
 
         if not is_trading_day(now.date()):
@@ -1027,12 +969,7 @@ class SmartScheduler:
                     "No trading activity scheduled. Enjoy your day off!"
                 )
 
-            try:
-                loop = asyncio.get_event_loop()
-            except RuntimeError:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-            loop.run_until_complete(_send_closed())
+            run_async(_send_closed())
             return
 
         # Get today's expected signal
@@ -1059,18 +996,11 @@ class SmartScheduler:
                 "Signal check at 9:35 AM ET"
             )
 
-        try:
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-        loop.run_until_complete(_send_reminder())
+        run_async(_send_reminder())
         logger.info("Pre-market reminder sent")
 
     def _job_position_update(self):
         """Send hourly position update if holding a position."""
-        import asyncio
-
         now = get_et_now()
 
         if not is_trading_day(now.date()):
@@ -1110,18 +1040,11 @@ class SmartScheduler:
                 + "\n\nPositions close at 3:55 PM ET"
             )
 
-        try:
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-        loop.run_until_complete(_send_update())
+        run_async(_send_update())
         logger.info("Position update sent")
 
     def _job_health_check(self):
         """Morning health check - verify account, data feeds, etc."""
-        import asyncio
-
         now = get_et_now()
 
         if not is_trading_day(now.date()):
@@ -1182,18 +1105,11 @@ class SmartScheduler:
             # Don't use Markdown - message may contain error strings
             await bot.send_message(message, parse_mode=None)
 
-        try:
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-        loop.run_until_complete(_send_health())
+        run_async(_send_health())
         logger.info(f"Health check sent: {len(issues)} issues found")
 
     def _job_pattern_analysis(self):
         """Monthly pattern analysis - runs LLM to discover new trading patterns."""
-        import asyncio
-
         from .pattern_discovery import (
             PatternStatus,
             get_data_collector,
@@ -1261,17 +1177,10 @@ class SmartScheduler:
                 except Exception:
                     pass
 
-        try:
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-        loop.run_until_complete(_run_analysis())
+        run_async(_run_analysis())
 
     def _job_strategy_review(self):
         """Bi-weekly strategy review - backtests parameters and sends Claude analysis."""
-        import asyncio
-
         from .strategy_review import get_strategy_reviewer
 
         logger.info("Starting bi-weekly strategy review")
@@ -1313,12 +1222,7 @@ class SmartScheduler:
                 except Exception:
                     pass
 
-        try:
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-        loop.run_until_complete(_run_review())
+        run_async(_run_review())
 
     def start(self):
         """Start the scheduler."""

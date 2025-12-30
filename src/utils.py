@@ -3,14 +3,36 @@ Utility functions for IBIT Dip Bot.
 Handles timezone conversions, calculations, and common helpers.
 """
 
+import asyncio
 import datetime
-from typing import Optional, Tuple
+from typing import Any, Coroutine, Optional, Tuple
 
 from zoneinfo import ZoneInfo
 
 # Eastern timezone for US markets
 ET = ZoneInfo("America/New_York")
 UTC = ZoneInfo("UTC")
+
+
+def run_async(coro: Coroutine) -> Any:
+    """
+    Run an async coroutine from sync code safely.
+
+    Handles the case where no event loop exists (common in threaded contexts
+    like APScheduler) by creating a new one.
+
+    Args:
+        coro: The coroutine to run
+
+    Returns:
+        The result of the coroutine
+    """
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    return loop.run_until_complete(coro)
 
 
 def get_et_now() -> datetime.datetime:
