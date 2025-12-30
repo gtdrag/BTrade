@@ -1274,6 +1274,8 @@ class TradingBot:
             sbit_quote = self.get_quote("SBIT")
             if not sbit_quote or sbit_quote.get("current_price", 0) <= 0:
                 logger.error("Could not get SBIT quote for reversal")
+                # CRITICAL: BITU is closed but we can't open SBIT - alert user!
+                self._alert_reversal_partial_failure("Could not get SBIT quote", shares, pnl_pct)
                 return close_result  # At least we closed BITU
 
             sbit_price = sbit_quote["current_price"]
@@ -1330,6 +1332,10 @@ class TradingBot:
                 # Live reversal via E*TRADE
                 if not self.client or not self.client.is_authenticated():
                     logger.error("Cannot execute live reversal: E*TRADE not authenticated")
+                    # CRITICAL: BITU is closed but we can't open SBIT - alert user!
+                    self._alert_reversal_partial_failure(
+                        "E*TRADE not authenticated", shares, pnl_pct
+                    )
                     return close_result
 
                 try:
@@ -1412,7 +1418,53 @@ class TradingBot:
 
                 except ETradeAPIError as e:
                     logger.error(f"Failed to execute live reversal: {e}")
+                    # CRITICAL: BITU is closed but SBIT order failed - alert user!
+                    self._alert_reversal_partial_failure(f"SBIT order failed: {e}", shares, pnl_pct)
                     return close_result
+
+    def _alert_reversal_partial_failure(
+        self, reason: str, original_shares: int, original_pnl_pct: float
+    ):
+        """
+        Alert user when reversal fails after closing BITU but before opening SBIT.
+
+        This is a critical state - the user needs to manually check their account
+        as they may be holding cash instead of their intended position.
+        """
+        self.db.log_event(
+            "REVERSAL_PARTIAL_FAILURE",
+            "CRITICAL: BITU closed but SBIT not opened",
+            {
+                "reason": reason,
+                "original_shares": original_shares,
+                "original_pnl_pct": original_pnl_pct,
+                "timestamp": get_et_now().isoformat(),
+            },
+        )
+
+        # Send urgent Telegram notification
+        try:
+            from .telegram_bot import TelegramBot
+            from .utils import run_async
+
+            async def _alert():
+                bot = TelegramBot()
+                await bot.initialize()
+                mode = "[PAPER]" if self.is_paper_mode else "[LIVE]"
+                await bot.send_message(
+                    f"🚨🚨 REVERSAL INCOMPLETE 🚨🚨\n\n"
+                    f"{mode} BITU was CLOSED but SBIT could NOT be opened!\n\n"
+                    f"Reason: {reason}\n"
+                    f"Original shares: {original_shares}\n"
+                    f"Original P/L: {original_pnl_pct:.2f}%\n\n"
+                    f"⚠️ YOU MAY BE HOLDING CASH INSTEAD OF SBIT\n"
+                    f"CHECK YOUR ACCOUNT IMMEDIATELY!",
+                    parse_mode=None,
+                )
+
+            run_async(_alert())
+        except Exception as e:
+            logger.error(f"Failed to send reversal failure alert: {e}")
 
     def _notify_trade(self, result: TradeResult, signal: TodaySignal):
         """Send trade notification."""
