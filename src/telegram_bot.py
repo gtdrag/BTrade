@@ -405,7 +405,7 @@ class TelegramBot:
                 "💰 *Switched to LIVE MODE*\n\n"
                 "⚠️ Real money trades will be executed!\n"
                 "All trades require your approval.\n\n"
-                "_Mode persisted - will survive restarts._",
+                "Mode persisted - will survive restarts.",
                 parse_mode="Markdown",
             )
         else:
@@ -415,7 +415,7 @@ class TelegramBot:
             await update.message.reply_text(
                 "📝 *Switched to PAPER MODE*\n\n"
                 "Simulated trades only. No real money at risk.\n\n"
-                "_Mode persisted - will survive restarts._",
+                "Mode persisted - will survive restarts.",
                 parse_mode="Markdown",
             )
 
