@@ -519,6 +519,7 @@ class SmartScheduler:
         except Exception as e:
             logger.error(f"Crash day check failed: {e}")
             self._error_count += 1
+            self._send_error_notification(f"Crash day check failed: {e}")
 
     def _job_pump_day_check(self):
         """Check for intraday pump signal and execute if triggered."""
@@ -598,6 +599,7 @@ class SmartScheduler:
         except Exception as e:
             logger.error(f"Pump day check failed: {e}")
             self._error_count += 1
+            self._send_error_notification(f"Pump day check failed: {e}")
 
     def _job_ten_am_dump_exit(self):
         """Exit 10 AM dump position at 10:30 AM ET."""
@@ -669,6 +671,7 @@ class SmartScheduler:
         except Exception as e:
             logger.error(f"10 AM dump exit failed: {e}")
             self._error_count += 1
+            self._send_error_notification(f"10 AM dump exit failed: {e}")
 
     def _job_close_positions(self):
         """Close any open positions before market close."""
@@ -678,26 +681,96 @@ class SmartScheduler:
             return
 
         logger.info("Closing positions before market close")
+        close_failures = []
+        close_successes = []
 
-        try:
-            # Close BITU position if exists
-            if self.bot.is_paper_mode:
-                for etf in list(self.bot._paper_positions.keys()):
+        # Close positions - each in its own try/except so one failure doesn't stop others
+        if self.bot.is_paper_mode:
+            for etf in list(self.bot._paper_positions.keys()):
+                try:
                     result = self.bot.close_position(etf)
                     if result.success:
                         logger.info(f"Closed {etf} position")
+                        close_successes.append((etf, result))
                     else:
                         logger.error(f"Failed to close {etf}: {result.error}")
-            else:
-                # For live trading, close known ETF positions
-                for etf in ["BITU", "SBIT"]:
+                        close_failures.append((etf, result.error))
+                except Exception as e:
+                    logger.error(f"EXCEPTION closing {etf}: {e}")
+                    close_failures.append((etf, f"Exception: {e}"))
+                    self._error_count += 1
+        else:
+            # For live trading, close known ETF positions
+            for etf in ["BITU", "SBIT"]:
+                try:
                     result = self.bot.close_position(etf)
-                    if result.success and result.shares > 0:
-                        logger.info(f"Closed {etf} position")
+                    if result.success:
+                        if result.shares > 0:
+                            logger.info(f"Closed {etf} position: {result.shares} shares")
+                            close_successes.append((etf, result))
+                        # shares=0 means no position existed, which is fine
+                    else:
+                        # CRITICAL: Log and alert on failures
+                        logger.error(f"FAILED to close {etf}: {result.error}")
+                        close_failures.append((etf, result.error))
+                except Exception as e:
+                    # CRITICAL: Exception doesn't stop us from trying next position
+                    logger.error(f"EXCEPTION closing {etf}: {e}")
+                    close_failures.append((etf, f"Exception: {e}"))
+                    self._error_count += 1
+
+        # Send Telegram notification for results
+        self._send_close_positions_notification(close_successes, close_failures)
+
+    def _send_close_positions_notification(self, successes: list, failures: list):
+        """Send Telegram notification for EOD close results."""
+        import asyncio
+
+        # Only send if there were actual closes or failures
+        if not successes and not failures:
+            return
+
+        try:
+            from .telegram_bot import TelegramBot
+
+            async def _notify():
+                bot = TelegramBot()
+                await bot.initialize()
+                mode = "[PAPER]" if self.bot.is_paper_mode else "[LIVE]"
+
+                if failures:
+                    # CRITICAL ALERT for failures
+                    message = f"🚨 *EOD CLOSE FAILED* 🚨\n\n" f"{mode} Failed to close positions:\n"
+                    for etf, error in failures:
+                        message += f"• {etf}: {error}\n"
+                    message += (
+                        "\n⚠️ *POSITIONS MAY STILL BE OPEN*\n"
+                        "Check your brokerage account immediately!"
+                    )
+                elif successes:
+                    # Success notification
+                    message = f"✅ *EOD Positions Closed*\n\n{mode}\n"
+                    for etf, result in successes:
+                        message += f"• Sold {result.shares} {etf}"
+                        if hasattr(result, "price") and result.price:
+                            message += f" @ ${result.price:.2f}"
+                        message += "\n"
+
+                await bot._app.bot.send_message(
+                    chat_id=bot._chat_id,
+                    text=message,
+                    parse_mode="Markdown",
+                )
+
+            try:
+                loop = asyncio.get_event_loop()
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+            loop.run_until_complete(_notify())
 
         except Exception as e:
-            logger.error(f"Close positions job failed: {e}")
-            self._error_count += 1
+            logger.error(f"Failed to send close notification: {e}")
 
     def _job_hedge_check(self):
         """Check and execute trailing hedges if position has gained enough."""
@@ -741,6 +814,8 @@ class SmartScheduler:
 
         except Exception as e:
             logger.error(f"Hedge check job failed: {e}")
+            self._error_count += 1
+            self._send_error_notification(f"Hedge check failed: {e}")
 
     def _send_hedge_notification(self, result):
         """Send Telegram notification for hedge execution."""
@@ -825,6 +900,8 @@ class SmartScheduler:
 
         except Exception as e:
             logger.error(f"Reversal check job failed: {e}")
+            self._error_count += 1
+            self._send_error_notification(f"Reversal check failed: {e}")
 
     def _send_reversal_notification(self, result):
         """Send Telegram notification for position reversal."""

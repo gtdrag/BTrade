@@ -885,13 +885,23 @@ class TradingBot:
         shares = int(etf_position.get("quantity", 0))
 
         try:
-            # Place sell order
+            # Preview order first (required for production)
+            preview = self.client.preview_order(
+                account_id_key=self.config.account_id_key,
+                symbol=etf,
+                action="SELL",
+                quantity=shares,
+                order_type="MARKET",
+            )
+
+            # Place sell order with preview IDs
             order_response = self.client.place_order(
                 account_id_key=self.config.account_id_key,
                 symbol=etf,
                 action="SELL",
                 quantity=shares,
                 order_type="MARKET",
+                preview_ids=preview.get("PreviewIds", []),
             )
 
             order_id = str(order_response.get("OrderId", ""))
@@ -1002,12 +1012,22 @@ class TradingBot:
                 return None
 
             try:
+                # Preview order first (required for production)
+                preview = self.client.preview_order(
+                    account_id_key=self.config.account_id_key,
+                    symbol=hedge_instrument,
+                    action="BUY",
+                    quantity=hedge_shares,
+                    order_type="MARKET",
+                )
+
                 order_response = self.client.place_order(
                     account_id_key=self.config.account_id_key,
                     symbol=hedge_instrument,
                     action="BUY",
                     quantity=hedge_shares,
                     order_type="MARKET",
+                    preview_ids=preview.get("PreviewIds", []),
                 )
 
                 order_id = str(order_response.get("OrderId", ""))
@@ -1170,12 +1190,22 @@ class TradingBot:
                 return close_result
 
             try:
+                # Preview order first (required for production)
+                preview = self.client.preview_order(
+                    account_id_key=self.config.account_id_key,
+                    symbol="SBIT",
+                    action="BUY",
+                    quantity=sbit_shares,
+                    order_type="MARKET",
+                )
+
                 order_response = self.client.place_order(
                     account_id_key=self.config.account_id_key,
                     symbol="SBIT",
                     action="BUY",
                     quantity=sbit_shares,
                     order_type="MARKET",
+                    preview_ids=preview.get("PreviewIds", []),
                 )
 
                 order_id = str(order_response.get("OrderId", ""))
