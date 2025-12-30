@@ -142,6 +142,67 @@ class TradingBot:
     def is_paper_mode(self) -> bool:
         return self.config.mode == TradingMode.PAPER
 
+    def _wait_for_order_fill(
+        self, order_id: str, timeout_seconds: int = 30, poll_interval: float = 0.5
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Poll order status until filled or timeout.
+
+        Args:
+            order_id: The order ID to check
+            timeout_seconds: Max time to wait for fill
+            poll_interval: Seconds between status checks
+
+        Returns:
+            Dict with 'filled_qty' and 'avg_price' if filled, None if timeout/error
+        """
+        import time
+
+        if not self.client:
+            return None
+
+        start_time = time.time()
+        while time.time() - start_time < timeout_seconds:
+            try:
+                status = self.client.get_order_status(self.config.account_id_key, order_id)
+
+                # Navigate E*TRADE response structure
+                orders = status.get("Order", [])
+                if not orders:
+                    time.sleep(poll_interval)
+                    continue
+
+                order = orders[0]
+                order_status = order.get("OrderDetail", [{}])[0].get("status", "")
+
+                if order_status in ("EXECUTED", "FILLED"):
+                    # Extract fill details
+                    order_detail = order.get("OrderDetail", [{}])[0]
+                    instrument = order_detail.get("Instrument", [{}])[0]
+
+                    filled_qty = int(instrument.get("filledQuantity", 0))
+                    avg_price = float(instrument.get("averageExecutionPrice", 0))
+
+                    if filled_qty > 0 and avg_price > 0:
+                        logger.info(
+                            f"Order {order_id} filled: {filled_qty} shares @ ${avg_price:.2f}"
+                        )
+                        return {"filled_qty": filled_qty, "avg_price": avg_price}
+
+                elif order_status in ("CANCELLED", "REJECTED", "EXPIRED"):
+                    logger.warning(f"Order {order_id} not filled: {order_status}")
+                    return None
+
+                # Still pending, wait and retry
+                time.sleep(poll_interval)
+
+            except Exception as e:
+                logger.warning(f"Error polling order status: {e}")
+                time.sleep(poll_interval)
+
+        logger.warning(f"Order {order_id} fill check timed out after {timeout_seconds}s")
+        return None
+
     def _check_duplicate_trade(self, signal_type: str) -> bool:
         """Check if we've already traded this signal type today."""
         today = get_et_now().strftime("%Y-%m-%d")
@@ -738,26 +799,48 @@ class TradingBot:
 
             order_id = str(order_response.get("OrderId", ""))
 
-            # Get fill price (may need to poll for fill)
-            fill_price = estimated_value / shares if shares > 0 else 0
+            # Poll for actual fill price (fall back to estimate if timeout)
+            fill_info = self._wait_for_order_fill(order_id)
+            if fill_info:
+                fill_price = fill_info["avg_price"]
+                filled_shares = fill_info["filled_qty"]
+                total_value = fill_price * filled_shares
+
+                # Check for partial fill
+                if filled_shares < shares:
+                    logger.warning(
+                        f"PARTIAL FILL: Ordered {shares} {etf}, only {filled_shares} filled"
+                    )
+                    self.telegram.notify_error(
+                        "Partial Fill Warning",
+                        f"Ordered {shares} {etf}, only {filled_shares} filled @ ${fill_price:.2f}",
+                    )
+            else:
+                # Fall back to estimate if polling fails
+                logger.warning(f"Using estimated fill price for order {order_id}")
+                fill_price = estimated_value / shares if shares > 0 else 0
+                filled_shares = shares
+                total_value = estimated_value
 
             # Register with hedge manager for trailing hedge tracking
             self.hedge_manager.register_position(
                 instrument=etf,
-                shares=shares,
+                shares=filled_shares,
                 entry_price=fill_price,
             )
 
-            logger.info(f"[LIVE] Bought {shares} {etf} - Order ID: {order_id}")
+            logger.info(
+                f"[LIVE] Bought {filled_shares} {etf} @ ${fill_price:.2f} - Order ID: {order_id}"
+            )
 
             return TradeResult(
                 success=True,
                 signal=signal.signal,
                 etf=etf,
                 action="BUY",
-                shares=shares,
+                shares=filled_shares,
                 price=fill_price,
-                total_value=estimated_value,
+                total_value=total_value,
                 order_id=order_id,
                 is_paper=False,
             )
@@ -906,17 +989,42 @@ class TradingBot:
 
             order_id = str(order_response.get("OrderId", ""))
 
+            # Poll for actual fill confirmation
+            fill_info = self._wait_for_order_fill(order_id)
+            if fill_info:
+                filled_shares = fill_info["filled_qty"]
+                fill_price = fill_info["avg_price"]
+
+                # Check for partial fill
+                if filled_shares < shares:
+                    logger.warning(
+                        f"PARTIAL FILL: Ordered SELL {shares} {etf}, only {filled_shares} filled"
+                    )
+                    self.telegram.notify_error(
+                        "Partial Fill Warning",
+                        f"Sell order: {shares} {etf} requested, only {filled_shares} filled",
+                    )
+            else:
+                # Fall back to requested shares if polling fails
+                logger.warning(f"Using requested shares for sell order {order_id}")
+                filled_shares = shares
+                fill_price = 0.0
+
             # Clear hedge manager tracking
             self.hedge_manager.clear_position()
 
-            logger.info(f"[LIVE] Sold {shares} {etf} - Order ID: {order_id}")
+            logger.info(
+                f"[LIVE] Sold {filled_shares} {etf} @ ${fill_price:.2f} - Order ID: {order_id}"
+            )
 
             return TradeResult(
                 success=True,
                 signal=Signal.CASH,
                 etf=etf,
                 action="SELL",
-                shares=shares,
+                shares=filled_shares,
+                price=fill_price,
+                total_value=filled_shares * fill_price,
                 order_id=order_id,
                 is_paper=False,
             )
@@ -1031,10 +1139,32 @@ class TradingBot:
                 )
 
                 order_id = str(order_response.get("OrderId", ""))
-                self.hedge_manager.update_hedge_shares(hedge_shares)
+
+                # Poll for actual fill confirmation
+                fill_info = self._wait_for_order_fill(order_id)
+                if fill_info:
+                    filled_shares = fill_info["filled_qty"]
+                    fill_price = fill_info["avg_price"]
+
+                    # Check for partial fill
+                    if filled_shares < hedge_shares:
+                        logger.warning(
+                            f"PARTIAL FILL: Hedge ordered {hedge_shares}, only {filled_shares} filled"
+                        )
+                        self.telegram.notify_error(
+                            "Partial Hedge Fill",
+                            f"Hedge: {hedge_shares} requested, only {filled_shares} filled",
+                        )
+                else:
+                    # Fall back to requested if polling fails
+                    logger.warning(f"Using requested shares for hedge order {order_id}")
+                    filled_shares = hedge_shares
+                    fill_price = hedge_price
+
+                self.hedge_manager.update_hedge_shares(filled_shares)
 
                 logger.info(
-                    f"[LIVE] Hedge executed: {hedge_shares} {hedge_instrument} - Order ID: {order_id}"
+                    f"[LIVE] Hedge executed: {filled_shares} {hedge_instrument} @ ${fill_price:.2f} - Order ID: {order_id}"
                 )
 
                 return TradeResult(
@@ -1042,9 +1172,9 @@ class TradingBot:
                     signal=Signal.CASH,
                     etf=hedge_instrument,
                     action="BUY",
-                    shares=hedge_shares,
-                    price=hedge_price,
-                    total_value=hedge_shares * hedge_price,
+                    shares=filled_shares,
+                    price=fill_price,
+                    total_value=filled_shares * fill_price,
                     order_id=order_id,
                     is_paper=False,
                 )
@@ -1210,11 +1340,32 @@ class TradingBot:
 
                 order_id = str(order_response.get("OrderId", ""))
 
+                # Poll for actual fill confirmation
+                fill_info = self._wait_for_order_fill(order_id)
+                if fill_info:
+                    filled_shares = fill_info["filled_qty"]
+                    fill_price = fill_info["avg_price"]
+
+                    # Check for partial fill
+                    if filled_shares < sbit_shares:
+                        logger.warning(
+                            f"PARTIAL FILL: Reversal ordered {sbit_shares} SBIT, only {filled_shares} filled"
+                        )
+                        self.telegram.notify_error(
+                            "Partial Reversal Fill",
+                            f"Reversal: {sbit_shares} SBIT requested, only {filled_shares} filled",
+                        )
+                else:
+                    # Fall back to requested if polling fails
+                    logger.warning(f"Using requested shares for reversal order {order_id}")
+                    filled_shares = sbit_shares
+                    fill_price = sbit_price
+
                 # Register with hedge manager
                 self.hedge_manager.register_position(
                     instrument="SBIT",
-                    shares=sbit_shares,
-                    entry_price=sbit_price,
+                    shares=filled_shares,
+                    entry_price=fill_price,
                 )
 
                 self.db.log_event(
@@ -1223,23 +1374,25 @@ class TradingBot:
                     {
                         "original_pnl_pct": pnl_pct,
                         "bitu_shares": shares,
-                        "sbit_shares": sbit_shares,
-                        "sbit_price": sbit_price,
+                        "sbit_shares": filled_shares,
+                        "sbit_price": fill_price,
                         "order_id": order_id,
                         "timestamp": get_et_now().isoformat(),
                     },
                 )
 
-                logger.info(f"[LIVE] Reversal executed: {sbit_shares} SBIT - Order ID: {order_id}")
+                logger.info(
+                    f"[LIVE] Reversal executed: {filled_shares} SBIT @ ${fill_price:.2f} - Order ID: {order_id}"
+                )
 
                 return TradeResult(
                     success=True,
                     signal=Signal.CRASH_DAY,
                     etf="SBIT",
                     action="BUY",
-                    shares=sbit_shares,
-                    price=sbit_price,
-                    total_value=sbit_shares * sbit_price,
+                    shares=filled_shares,
+                    price=fill_price,
+                    total_value=filled_shares * fill_price,
                     order_id=order_id,
                     is_paper=False,
                 )
