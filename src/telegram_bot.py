@@ -21,6 +21,7 @@ from telegram.ext import (
     CommandHandler,
     ContextTypes,
 )
+from telegram.request import HTTPXRequest
 
 logger = logging.getLogger(__name__)
 
@@ -121,7 +122,13 @@ class TelegramBot:
 
     async def initialize(self):
         """Initialize the bot application."""
-        self._app = Application.builder().token(self.token).build()
+        # Use longer timeouts for Railway's network (default 5s is too short)
+        request = HTTPXRequest(
+            connect_timeout=30.0,
+            read_timeout=30.0,
+            write_timeout=30.0,
+        )
+        self._app = Application.builder().token(self.token).request(request).build()
 
         # Add command handlers - basic
         self._app.add_handler(CommandHandler("start", self._cmd_start))
