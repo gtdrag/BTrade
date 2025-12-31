@@ -86,6 +86,22 @@ class TradingWorker:
                 etrade_client = create_etrade_client()
                 if etrade_client:
                     logger.info("E*TRADE client created successfully")
+                    # Verify authentication actually works
+                    if etrade_client.is_authenticated():
+                        logger.info("E*TRADE AUTHENTICATION VERIFIED - tokens are valid")
+                        # Test position query
+                        try:
+                            positions = etrade_client.get_account_positions(self.account_id_key)
+                            logger.info(f"E*TRADE position check: {len(positions)} positions found")
+                            for pos in positions:
+                                symbol = pos.get("Product", {}).get("symbol", "?")
+                                qty = pos.get("quantity", 0)
+                                logger.info(f"  - {symbol}: {qty} shares")
+                        except Exception as e:
+                            logger.warning(f"Position check failed: {e}")
+                    else:
+                        logger.error("E*TRADE AUTHENTICATION FAILED - tokens may be expired!")
+                        logger.error("The 3:55 PM close will NOT work without valid authentication")
                 else:
                     logger.warning("E*TRADE client creation returned None - live trading disabled")
             except Exception as e:
