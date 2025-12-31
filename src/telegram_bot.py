@@ -123,7 +123,13 @@ class TelegramBot:
     async def initialize(self):
         """Initialize the bot application."""
         # Use longer timeouts for Railway's network (default 5s is too short)
+        # Create separate request objects for main requests and get_updates
         request = HTTPXRequest(
+            connect_timeout=30.0,
+            read_timeout=30.0,
+            write_timeout=30.0,
+        )
+        get_updates_request = HTTPXRequest(
             connect_timeout=30.0,
             read_timeout=30.0,
             write_timeout=30.0,
@@ -132,9 +138,7 @@ class TelegramBot:
             Application.builder()
             .token(self.token)
             .request(request)
-            .get_updates_connect_timeout(30.0)
-            .get_updates_read_timeout(30.0)
-            .get_updates_write_timeout(30.0)
+            .get_updates_request(get_updates_request)
             .build()
         )
 
