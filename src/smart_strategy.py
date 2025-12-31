@@ -499,8 +499,8 @@ class SmartStrategy:
             ibit_current = quote.current_price
             current_drop_pct = (ibit_current - ibit_open) / ibit_open * 100 if ibit_open > 0 else 0
 
-            # Check if threshold is met
-            is_triggered = current_drop_pct <= self.config.crash_day_threshold
+            # Check if threshold is met (cast to bool for JSON serialization - numpy.bool_ is not serializable)
+            is_triggered = bool(current_drop_pct <= self.config.crash_day_threshold)
 
             # Check if we're past cutoff time
             cutoff_hour, cutoff_min = map(int, self.config.crash_day_cutoff_time.split(":"))
@@ -516,7 +516,7 @@ class SmartStrategy:
 
             return CrashDayStatus(
                 is_triggered=is_triggered,
-                current_drop_pct=current_drop_pct,
+                current_drop_pct=float(current_drop_pct),
                 ibit_open=ibit_open,
                 ibit_current=ibit_current,
                 trigger_time=trigger_time,
@@ -570,8 +570,8 @@ class SmartStrategy:
             ibit_current = quote.current_price
             current_gain_pct = (ibit_current - ibit_open) / ibit_open * 100 if ibit_open > 0 else 0
 
-            # Check if threshold is met (positive threshold for pump)
-            is_triggered = current_gain_pct >= self.config.pump_day_threshold
+            # Check if threshold is met (cast to bool for JSON serialization - numpy.bool_ is not serializable)
+            is_triggered = bool(current_gain_pct >= self.config.pump_day_threshold)
 
             # Check if we're past cutoff time
             cutoff_hour, cutoff_min = map(int, self.config.pump_day_cutoff_time.split(":"))
@@ -587,7 +587,7 @@ class SmartStrategy:
 
             return PumpDayStatus(
                 is_triggered=is_triggered,
-                current_gain_pct=current_gain_pct,
+                current_gain_pct=float(current_gain_pct),
                 ibit_open=ibit_open,
                 ibit_current=ibit_current,
                 trigger_time=trigger_time,

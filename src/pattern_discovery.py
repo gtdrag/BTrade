@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional
 
 import structlog
 
+from .database import safe_json_dumps
 from .utils import get_et_now
 
 logger = structlog.get_logger(__name__)
@@ -195,7 +196,7 @@ class PatternRegistry:
             }
 
             with open(self.patterns_file, "w") as f:
-                json.dump(data, f, indent=2)
+                f.write(safe_json_dumps(data, indent=2))
 
             logger.info(
                 "Saved patterns to registry",

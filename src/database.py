@@ -16,7 +16,32 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import numpy as np
+
 from .utils import get_et_now
+
+
+class NumpyJSONEncoder(json.JSONEncoder):
+    """JSON encoder that handles numpy types (which are not serializable by default)."""
+
+    def default(self, obj):
+        if isinstance(obj, np.bool_):
+            return bool(obj)
+        if isinstance(obj, np.integer):
+            return int(obj)
+        if isinstance(obj, np.floating):
+            return float(obj)
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return super().default(obj)
+
+
+def safe_json_dumps(obj: Any, **kwargs) -> str:
+    """Serialize object to JSON, handling numpy types.
+
+    Accepts all json.dumps kwargs (indent, sort_keys, etc).
+    """
+    return json.dumps(obj, cls=NumpyJSONEncoder, **kwargs)
 
 
 def get_default_db_path() -> Path:
@@ -449,7 +474,7 @@ class Database:
                     now.isoformat(),
                     level,
                     event,
-                    json.dumps(details) if details else None,
+                    safe_json_dumps(details) if details else None,
                     now.isoformat(),
                 ),
             )
@@ -670,11 +695,11 @@ class Database:
                         now[:10],  # Just the date part
                         full_report,
                         summary,
-                        json.dumps(current_params),
+                        safe_json_dumps(current_params),
                         backtest_return,
-                        json.dumps(recommendations),
-                        json.dumps(watch_items),
-                        json.dumps(market_regime) if market_regime else None,
+                        safe_json_dumps(recommendations),
+                        safe_json_dumps(watch_items),
+                        safe_json_dumps(market_regime) if market_regime else None,
                         market_conditions,
                         now,
                     ),
