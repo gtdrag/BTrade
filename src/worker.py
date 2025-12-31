@@ -117,6 +117,8 @@ class TradingWorker:
                 scheduler=self.scheduler,
                 trading_bot=self.trading_bot,
             )
+            # Share the telegram bot with the scheduler for notifications
+            self.scheduler.telegram_bot = self.telegram_bot
             logger.info("Telegram bot configured with interactive commands")
         else:
             logger.warning("Telegram not configured - notifications disabled")

@@ -40,8 +40,9 @@ class SmartScheduler:
     The strategy is intraday - never hold overnight.
     """
 
-    def __init__(self, bot: TradingBot):
+    def __init__(self, bot: TradingBot, telegram_bot: Optional[TelegramBot] = None):
         self.bot = bot
+        self.telegram_bot = telegram_bot  # Shared instance, set after creation if not passed
         self.db = get_database()
         self.scheduler = BackgroundScheduler(timezone=ET)
         self.status = BotStatus.STOPPED
@@ -50,6 +51,20 @@ class SmartScheduler:
 
         # Add event listeners
         self.scheduler.add_listener(self._on_job_event, EVENT_JOB_ERROR | EVENT_JOB_EXECUTED)
+
+    def _send_notification(self, message: str, parse_mode: str = "Markdown"):
+        """Send a notification via the shared Telegram bot instance."""
+        if not self.telegram_bot:
+            logger.warning("Telegram bot not configured, skipping notification")
+            return
+
+        async def _send():
+            try:
+                await self.telegram_bot.send_message(message, parse_mode=parse_mode)
+            except Exception as e:
+                logger.error(f"Failed to send Telegram notification: {e}")
+
+        run_async(_send())
 
     def _on_job_event(self, event):
         """Handle job events."""
@@ -300,29 +315,21 @@ class SmartScheduler:
             auth_status = "No E*TRADE client configured"
 
         # Always send reminder on trading days
-        async def _send_reminder():
-            bot = TelegramBot()
-            await bot.initialize()
-
-            if is_authenticated:
-                await bot.send_message(
-                    f"☀️ *Good Morning!* Trading day started.\n\n"
-                    f"🔐 E*TRADE: {auth_status}\n"
-                    f"📅 {now.strftime('%A, %B %d')}\n\n"
-                    f"Signal check at 9:35 AM ET",
-                    parse_mode="Markdown",
-                )
-            else:
-                await bot.send_message(
-                    "🚨 *ACTION REQUIRED*\n\n"
-                    "E*TRADE authentication expired!\n\n"
-                    "➡️ Run /auth now to login\n"
-                    "⏰ Must complete before 9:35 AM ET\n\n"
-                    "Without auth, trades will be blocked.",
-                    parse_mode="Markdown",
-                )
-
-        run_async(_send_reminder())
+        if is_authenticated:
+            self._send_notification(
+                f"☀️ *Good Morning!* Trading day started.\n\n"
+                f"🔐 E*TRADE: {auth_status}\n"
+                f"📅 {now.strftime('%A, %B %d')}\n\n"
+                f"Signal check at 9:35 AM ET"
+            )
+        else:
+            self._send_notification(
+                "🚨 *ACTION REQUIRED*\n\n"
+                "E*TRADE authentication expired!\n\n"
+                "➡️ Run /auth now to login\n"
+                "⏰ Must complete before 9:35 AM ET\n\n"
+                "Without auth, trades will be blocked."
+            )
 
         self.db.log_event(
             "AUTH_REMINDER",
@@ -387,37 +394,28 @@ class SmartScheduler:
 
         reason = "\n".join(reason_lines) if reason_lines else "• No qualifying conditions met"
 
-        async def _send():
-            bot = TelegramBot()
-            await bot.initialize()
-            await bot.send_message(
-                f"📭 No Trade Signal Today\n\n"
-                f"Time: {now.strftime('%I:%M %p ET')}\n"
-                f"Day: {day_name}\n\n"
-                f"Reason:\n{reason}\n\n"
-                "Staying in cash. Monitoring for intraday opportunities..."
-            )
-
-        run_async(_send())
+        self._send_notification(
+            f"📭 No Trade Signal Today\n\n"
+            f"Time: {now.strftime('%I:%M %p ET')}\n"
+            f"Day: {day_name}\n\n"
+            f"Reason:\n{reason}\n\n"
+            "Staying in cash. Monitoring for intraday opportunities...",
+            parse_mode=None,
+        )
         logger.info("No-signal notification sent")
 
     def _send_error_notification(self, error_msg: str):
         """Send error notification via Telegram."""
         now = get_et_now()
 
-        async def _send():
-            bot = TelegramBot()
-            await bot.initialize()
-            # Don't use Markdown - error messages may contain special chars
-            await bot.send_message(
-                f"🚨 Bot Error Alert\n\n"
-                f"Time: {now.strftime('%I:%M %p ET')}\n\n"
-                f"Error: {error_msg}\n\n"
-                "Please check logs for details.",
-                parse_mode=None,
-            )
-
-        run_async(_send())
+        # Don't use Markdown - error messages may contain special chars
+        self._send_notification(
+            f"🚨 Bot Error Alert\n\n"
+            f"Time: {now.strftime('%I:%M %p ET')}\n\n"
+            f"Error: {error_msg}\n\n"
+            "Please check logs for details.",
+            parse_mode=None,
+        )
         logger.info("Error notification sent")
 
     def _job_crash_day_check(self):
@@ -619,19 +617,13 @@ class SmartScheduler:
                 pnl_str = f"${pnl:+.2f}" if pnl else "TBD"
 
                 # Send notification
-                async def _send_exit():
-                    bot = TelegramBot()
-                    await bot.initialize()
-                    await bot.send_message(
-                        f"🔔 *10 AM Dump Exit*\n\n"
-                        f"Sold: {result.shares} SBIT @ ${result.price:.2f}\n"
-                        f"P/L: {pnl_str}\n"
-                        f"Time: {now.strftime('%I:%M %p ET')}\n\n"
-                        "Strategy: Captured 10 AM weakness window",
-                        parse_mode="Markdown",
-                    )
-
-                run_async(_send_exit())
+                self._send_notification(
+                    f"🔔 *10 AM Dump Exit*\n\n"
+                    f"Sold: {result.shares} SBIT @ ${result.price:.2f}\n"
+                    f"P/L: {pnl_str}\n"
+                    f"Time: {now.strftime('%I:%M %p ET')}\n\n"
+                    "Strategy: Captured 10 AM weakness window"
+                )
 
                 logger.info(f"10 AM dump exit: Sold {result.shares} SBIT @ ${result.price:.2f}")
 
@@ -709,40 +701,36 @@ class SmartScheduler:
     def _send_close_positions_notification(self, successes: list, failures: list):
         """Send Telegram notification for EOD close results."""
         try:
-            from .telegram_bot import TelegramBot
             from .utils import get_et_now
 
-            async def _notify():
-                bot = TelegramBot()
-                await bot.initialize()
-                mode = "[PAPER]" if self.bot.is_paper_mode else "[LIVE]"
-                now = get_et_now()
-                time_str = now.strftime("%I:%M %p ET")
+            mode = "[PAPER]" if self.bot.is_paper_mode else "[LIVE]"
+            now = get_et_now()
+            time_str = now.strftime("%I:%M %p ET")
 
-                if failures:
-                    # CRITICAL ALERT for failures
-                    message = f"🚨 *EOD CLOSE FAILED* 🚨\n\n{mode} Failed to close positions:\n"
-                    for etf, error in failures:
-                        message += f"• {etf}: {error}\n"
-                    message += (
-                        "\n⚠️ *POSITIONS MAY STILL BE OPEN*\n"
-                        "Check your brokerage account immediately!"
-                    )
-                elif successes:
-                    # Success notification
-                    message = f"✅ *EOD Positions Closed*\n\n{mode}\n"
-                    for etf, result in successes:
-                        message += f"• Sold {result.shares} {etf}"
-                        if hasattr(result, "price") and result.price:
-                            message += f" @ ${result.price:.2f}"
-                        message += "\n"
-                else:
-                    # No positions to close - still send confirmation
-                    message = f"✅ *EOD Check Complete*\n\n{mode} at {time_str}\nNo open positions to close."
+            if failures:
+                # CRITICAL ALERT for failures
+                message = f"🚨 *EOD CLOSE FAILED* 🚨\n\n{mode} Failed to close positions:\n"
+                for etf, error in failures:
+                    message += f"• {etf}: {error}\n"
+                message += (
+                    "\n⚠️ *POSITIONS MAY STILL BE OPEN*\n"
+                    "Check your brokerage account immediately!"
+                )
+            elif successes:
+                # Success notification
+                message = f"✅ *EOD Positions Closed*\n\n{mode}\n"
+                for etf, result in successes:
+                    message += f"• Sold {result.shares} {etf}"
+                    if hasattr(result, "price") and result.price:
+                        message += f" @ ${result.price:.2f}"
+                    message += "\n"
+            else:
+                # No positions to close - still send confirmation
+                message = (
+                    f"✅ *EOD Check Complete*\n\n{mode} at {time_str}\nNo open positions to close."
+                )
 
-                await bot.send_message(message, parse_mode="Markdown")
-
-            run_async(_notify())
+            self._send_notification(message)
 
         except Exception as e:
             logger.error(f"Failed to send close notification: {e}")
@@ -795,28 +783,21 @@ class SmartScheduler:
     def _send_hedge_notification(self, result):
         """Send Telegram notification for hedge execution."""
         try:
-            from .telegram_bot import TelegramBot
+            mode = "[PAPER]" if result.is_paper else "[LIVE]"
 
-            async def _notify():
-                bot = TelegramBot()
-                await bot.initialize()
-                mode = "[PAPER]" if result.is_paper else "[LIVE]"
+            # Get hedge status
+            status = self.bot.hedge_manager.get_status()
+            total_hedge_pct = status.get("hedge", {}).get("total_pct", 0)
 
-                # Get hedge status
-                status = self.bot.hedge_manager.get_status()
-                total_hedge_pct = status.get("hedge", {}).get("total_pct", 0)
+            message = (
+                f"🛡️ *Trailing Hedge Executed*\n\n"
+                f"{mode} Bought {result.shares} {result.etf}\n"
+                f"Price: ${result.price:.2f}\n"
+                f"Value: ${result.total_value:.2f}\n\n"
+                f"Total hedge: {total_hedge_pct:.0f}% of position"
+            )
 
-                message = (
-                    f"🛡️ *Trailing Hedge Executed*\n\n"
-                    f"{mode} Bought {result.shares} {result.etf}\n"
-                    f"Price: ${result.price:.2f}\n"
-                    f"Value: ${result.total_value:.2f}\n\n"
-                    f"Total hedge: {total_hedge_pct:.0f}% of position"
-                )
-
-                await bot.send_message(message, parse_mode="Markdown")
-
-            run_async(_notify())
+            self._send_notification(message)
 
         except Exception as e:
             logger.warning(f"Failed to send hedge notification: {e}")
@@ -870,26 +851,19 @@ class SmartScheduler:
     def _send_reversal_notification(self, result):
         """Send Telegram notification for position reversal."""
         try:
-            from .telegram_bot import TelegramBot
+            mode = "[PAPER]" if result.is_paper else "[LIVE]"
 
-            async def _notify():
-                bot = TelegramBot()
-                await bot.initialize()
-                mode = "[PAPER]" if result.is_paper else "[LIVE]"
+            message = (
+                f"🔄 *Position Reversed!*\n\n"
+                f"{mode} BITU was down -2% → flipped to SBIT\n\n"
+                f"New position:\n"
+                f"• {result.shares} {result.etf}\n"
+                f"• Price: ${result.price:.2f}\n"
+                f"• Value: ${result.total_value:.2f}\n\n"
+                f"_Riding the trend down to EOD close_"
+            )
 
-                message = (
-                    f"🔄 *Position Reversed!*\n\n"
-                    f"{mode} BITU was down -2% → flipped to SBIT\n\n"
-                    f"New position:\n"
-                    f"• {result.shares} {result.etf}\n"
-                    f"• Price: ${result.price:.2f}\n"
-                    f"• Value: ${result.total_value:.2f}\n\n"
-                    f"_Riding the trend down to EOD close_"
-                )
-
-                await bot.send_message(message, parse_mode="Markdown")
-
-            run_async(_notify())
+            self._send_notification(message)
 
         except Exception as e:
             logger.warning(f"Failed to send reversal notification: {e}")
@@ -937,17 +911,20 @@ class SmartScheduler:
             ending_cash = portfolio.get("cash", 0)
 
             # Send Telegram summary
-            async def _send_summary():
-                bot = TelegramBot()
-                await bot.initialize()
-                await bot.send_daily_summary(
-                    trades_today=trades_today,
-                    total_pnl=total_pnl,
-                    win_rate=win_rate,
-                    ending_cash=ending_cash,
-                )
+            if self.telegram_bot:
 
-            run_async(_send_summary())
+                async def _send_summary():
+                    try:
+                        await self.telegram_bot.send_daily_summary(
+                            trades_today=trades_today,
+                            total_pnl=total_pnl,
+                            win_rate=win_rate,
+                            ending_cash=ending_cash,
+                        )
+                    except Exception as e:
+                        logger.error(f"Failed to send daily summary: {e}")
+
+                run_async(_send_summary())
 
             logger.info(f"Daily summary sent: {trades_today} trades, P/L: ${total_pnl:.2f}")
 
@@ -962,16 +939,11 @@ class SmartScheduler:
         if not is_trading_day(now.date()):
             # Send holiday/weekend notice instead
             day_name = now.strftime("%A")
-
-            async def _send_closed():
-                bot = TelegramBot()
-                await bot.initialize()
-                await bot.send_message(
-                    f"📅 Market closed today ({day_name})\n\n"
-                    "No trading activity scheduled. Enjoy your day off!"
-                )
-
-            run_async(_send_closed())
+            self._send_notification(
+                f"📅 Market closed today ({day_name})\n\n"
+                "No trading activity scheduled. Enjoy your day off!",
+                parse_mode=None,
+            )
             return
 
         # Get today's expected signal
@@ -986,19 +958,15 @@ class SmartScheduler:
         if day_name == "Thursday":
             strategy_hint = "\n📅 Short Thursday strategy active"
 
-        async def _send_reminder():
-            bot = TelegramBot()
-            await bot.initialize()
-            await bot.send_message(
-                f"☀️ Market opens in 15 minutes!\n\n"
-                f"Time: {now.strftime('%I:%M %p ET')}\n"
-                f"Day: {day_name}"
-                f"{strategy_hint}"
-                f"{signal_preview}\n\n"
-                "Signal check at 9:35 AM ET"
-            )
-
-        run_async(_send_reminder())
+        self._send_notification(
+            f"☀️ Market opens in 15 minutes!\n\n"
+            f"Time: {now.strftime('%I:%M %p ET')}\n"
+            f"Day: {day_name}"
+            f"{strategy_hint}"
+            f"{signal_preview}\n\n"
+            "Signal check at 9:35 AM ET",
+            parse_mode=None,
+        )
         logger.info("Pre-market reminder sent")
 
     def _job_position_update(self):
@@ -1033,16 +1001,12 @@ class SmartScheduler:
                 f"   P/L: {sign}{pnl:.2f} ({sign}{pnl_pct:.1f}%)"
             )
 
-        async def _send_update():
-            bot = TelegramBot()
-            await bot.initialize()
-            await bot.send_message(
-                f"📊 Position Update ({now.strftime('%I:%M %p ET')})\n\n"
-                + "\n\n".join(position_lines)
-                + "\n\nPositions close at 3:55 PM ET"
-            )
-
-        run_async(_send_update())
+        self._send_notification(
+            f"📊 Position Update ({now.strftime('%I:%M %p ET')})\n\n"
+            + "\n\n".join(position_lines)
+            + "\n\nPositions close at 3:55 PM ET",
+            parse_mode=None,
+        )
         logger.info("Position update sent")
 
     def _job_health_check(self):
@@ -1101,13 +1065,8 @@ class SmartScheduler:
                 + f"\n\nMode: {self.bot.config.mode.value.upper()}"
             )
 
-        async def _send_health():
-            bot = TelegramBot()
-            await bot.initialize()
-            # Don't use Markdown - message may contain error strings
-            await bot.send_message(message, parse_mode=None)
-
-        run_async(_send_health())
+        # Don't use Markdown - message may contain error strings
+        self._send_notification(message, parse_mode=None)
         logger.info(f"Health check sent: {len(issues)} issues found")
 
     def _job_pattern_analysis(self):
@@ -1164,20 +1123,21 @@ class SmartScheduler:
                     )
 
                 # Send Telegram notification
-                bot = TelegramBot()
-                await bot.initialize()
-                await bot.send_message(message)
+                if self.telegram_bot:
+                    try:
+                        await self.telegram_bot.send_message(message)
+                    except Exception as notify_err:
+                        logger.error(f"Failed to send pattern analysis notification: {notify_err}")
                 logger.info(f"Pattern analysis complete: {len(new_patterns)} new patterns")
 
             except Exception as e:
                 logger.error(f"Pattern analysis failed: {e}")
                 # Send error notification
-                try:
-                    bot = TelegramBot()
-                    await bot.initialize()
-                    await bot.send_message(f"❌ Pattern analysis failed: {e}")
-                except Exception:
-                    pass
+                if self.telegram_bot:
+                    try:
+                        await self.telegram_bot.send_message(f"❌ Pattern analysis failed: {e}")
+                    except Exception:
+                        pass
 
         run_async(_run_analysis())
 
@@ -1206,9 +1166,11 @@ class SmartScheduler:
                     message = message[:3950] + "\n\n... (truncated)"
 
                 # Send via Telegram
-                bot = TelegramBot()
-                await bot.initialize()
-                await bot.send_message(message, parse_mode="Markdown")
+                if self.telegram_bot:
+                    try:
+                        await self.telegram_bot.send_message(message, parse_mode="Markdown")
+                    except Exception as notify_err:
+                        logger.error(f"Failed to send strategy review notification: {notify_err}")
 
                 logger.info(
                     f"Strategy review complete: recommendations={recommendation.has_recommendations}"
@@ -1217,12 +1179,11 @@ class SmartScheduler:
             except Exception as e:
                 logger.error(f"Strategy review failed: {e}")
                 # Send error notification
-                try:
-                    bot = TelegramBot()
-                    await bot.initialize()
-                    await bot.send_message(f"❌ Strategy review failed: {e}")
-                except Exception:
-                    pass
+                if self.telegram_bot:
+                    try:
+                        await self.telegram_bot.send_message(f"❌ Strategy review failed: {e}")
+                    except Exception:
+                        pass
 
         run_async(_run_review())
 
