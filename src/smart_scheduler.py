@@ -692,8 +692,11 @@ class SmartScheduler:
                             logger.info(f"Closed {etf} position: {result.shares} shares")
                             close_successes.append((etf, result))
                         # shares=0 means no position existed, which is fine
+                    elif "No position found" in (result.error or ""):
+                        # No position to close - this is fine, not a failure
+                        logger.info(f"No {etf} position to close (skipping)")
                     else:
-                        # CRITICAL: Log and alert on failures
+                        # CRITICAL: Log and alert on real failures
                         logger.error(f"FAILED to close {etf}: {result.error}")
                         close_failures.append((etf, result.error))
                 except Exception as e:
