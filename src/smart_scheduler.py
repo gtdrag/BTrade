@@ -708,21 +708,20 @@ class SmartScheduler:
 
     def _send_close_positions_notification(self, successes: list, failures: list):
         """Send Telegram notification for EOD close results."""
-        # Only send if there were actual closes or failures
-        if not successes and not failures:
-            return
-
         try:
             from .telegram_bot import TelegramBot
+            from .utils import get_et_now
 
             async def _notify():
                 bot = TelegramBot()
                 await bot.initialize()
                 mode = "[PAPER]" if self.bot.is_paper_mode else "[LIVE]"
+                now = get_et_now()
+                time_str = now.strftime("%I:%M %p ET")
 
                 if failures:
                     # CRITICAL ALERT for failures
-                    message = f"🚨 *EOD CLOSE FAILED* 🚨\n\n" f"{mode} Failed to close positions:\n"
+                    message = f"🚨 *EOD CLOSE FAILED* 🚨\n\n{mode} Failed to close positions:\n"
                     for etf, error in failures:
                         message += f"• {etf}: {error}\n"
                     message += (
@@ -737,6 +736,9 @@ class SmartScheduler:
                         if hasattr(result, "price") and result.price:
                             message += f" @ ${result.price:.2f}"
                         message += "\n"
+                else:
+                    # No positions to close - still send confirmation
+                    message = f"✅ *EOD Check Complete*\n\n{mode} at {time_str}\nNo open positions to close."
 
                 await bot.send_message(message, parse_mode="Markdown")
 

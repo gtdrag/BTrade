@@ -18,8 +18,9 @@ def run_async(coro: Coroutine) -> Any:
     """
     Run an async coroutine from sync code safely.
 
-    Handles the case where no event loop exists (common in threaded contexts
-    like APScheduler) by creating a new one.
+    Handles threaded contexts (like APScheduler jobs) by creating a new
+    event loop. This is the correct approach for running async code from
+    sync code in a thread that doesn't have an event loop.
 
     Args:
         coro: The coroutine to run
@@ -27,12 +28,21 @@ def run_async(coro: Coroutine) -> Any:
     Returns:
         The result of the coroutine
     """
+    # In threaded contexts (APScheduler jobs), there's no event loop
+    # Use asyncio.run() which handles loop creation/cleanup properly
     try:
-        loop = asyncio.get_event_loop()
+        # Check if we're in an async context with a running loop
+        loop = asyncio.get_running_loop()
+        # If we get here, there's a running loop - this shouldn't happen
+        # in our use case (scheduler jobs run in separate threads)
+        # But handle it gracefully by scheduling the coroutine
+
+        future = asyncio.run_coroutine_threadsafe(coro, loop)
+        return future.result(timeout=30)
     except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-    return loop.run_until_complete(coro)
+        # No running loop - this is the expected case for scheduler jobs
+        # Create a new event loop for this thread and run the coroutine
+        return asyncio.run(coro)
 
 
 def get_et_now() -> datetime.datetime:

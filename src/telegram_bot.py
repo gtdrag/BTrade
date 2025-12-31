@@ -161,8 +161,38 @@ class TelegramBot:
         # Add callback handler for inline buttons
         self._app.add_handler(CallbackQueryHandler(self._handle_callback))
 
+        # Add error handler to catch and log all errors
+        self._app.add_error_handler(self._error_handler)
+
         await self._app.initialize()
         logger.info("Telegram bot initialized")
+
+    async def _error_handler(self, update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle errors that occur during polling/updates."""
+        logger.error(f"Telegram bot error: {context.error}")
+
+        # Log the traceback for debugging
+        if context.error:
+            import traceback
+
+            tb_string = "".join(
+                traceback.format_exception(
+                    type(context.error), context.error, context.error.__traceback__
+                )
+            )
+            logger.error(f"Telegram error traceback:\n{tb_string}")
+
+        # Try to notify about the error (but don't fail if this also fails)
+        try:
+            if self.chat_id:
+                error_msg = str(context.error)[:200] if context.error else "Unknown error"
+                await context.bot.send_message(
+                    chat_id=self.chat_id,
+                    text=f"⚠️ Bot error occurred:\n`{error_msg}`\n\nBot will continue running.",
+                    parse_mode="Markdown",
+                )
+        except Exception as e:
+            logger.warning(f"Could not send error notification: {e}")
 
     async def start_polling(self):
         """Start the bot in polling mode (for development/testing)."""

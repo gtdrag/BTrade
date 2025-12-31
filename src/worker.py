@@ -22,6 +22,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from .database import get_database  # noqa: E402
+from .etrade_client import create_etrade_client  # noqa: E402
 from .smart_scheduler import SmartScheduler  # noqa: E402
 from .telegram_bot import TelegramBot  # noqa: E402
 from .trading_bot import create_trading_bot  # noqa: E402
@@ -78,6 +79,19 @@ class TradingWorker:
         logger.info(f"Current Time (ET): {get_et_now()}")
         logger.info("=" * 60)
 
+        # Create E*TRADE client for live mode
+        etrade_client = None
+        if self.trading_mode == "live":
+            try:
+                etrade_client = create_etrade_client()
+                if etrade_client:
+                    logger.info("E*TRADE client created successfully")
+                else:
+                    logger.warning("E*TRADE client creation returned None - live trading disabled")
+            except Exception as e:
+                logger.error(f"Failed to create E*TRADE client: {e}")
+                logger.warning("Continuing in paper mode due to E*TRADE client failure")
+
         # Create trading bot
         self.trading_bot = create_trading_bot(
             mode=self.trading_mode,
@@ -85,6 +99,7 @@ class TradingWorker:
             approval_mode=self.approval_mode,
             approval_timeout_minutes=self.approval_timeout,
             account_id_key=self.account_id_key,
+            etrade_client=etrade_client,
         )
 
         # Create scheduler
