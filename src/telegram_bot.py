@@ -128,7 +128,15 @@ class TelegramBot:
             read_timeout=30.0,
             write_timeout=30.0,
         )
-        self._app = Application.builder().token(self.token).request(request).build()
+        self._app = (
+            Application.builder()
+            .token(self.token)
+            .request(request)
+            .get_updates_connect_timeout(30.0)
+            .get_updates_read_timeout(30.0)
+            .get_updates_write_timeout(30.0)
+            .build()
+        )
 
         # Add command handlers - basic
         self._app.add_handler(CommandHandler("start", self._cmd_start))
