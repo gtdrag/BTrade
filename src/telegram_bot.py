@@ -21,7 +21,8 @@ from telegram.ext import (
     CommandHandler,
     ContextTypes,
 )
-from telegram.request import HTTPXRequest
+
+# HTTPXRequest import removed - using defaults
 
 logger = logging.getLogger(__name__)
 
@@ -122,25 +123,7 @@ class TelegramBot:
 
     async def initialize(self):
         """Initialize the bot application."""
-        # Use longer timeouts for Railway's network (default 5s is too short)
-        # Create separate request objects for main requests and get_updates
-        request = HTTPXRequest(
-            connect_timeout=30.0,
-            read_timeout=30.0,
-            write_timeout=30.0,
-        )
-        get_updates_request = HTTPXRequest(
-            connect_timeout=30.0,
-            read_timeout=30.0,
-            write_timeout=30.0,
-        )
-        self._app = (
-            Application.builder()
-            .token(self.token)
-            .request(request)
-            .get_updates_request(get_updates_request)
-            .build()
-        )
+        self._app = Application.builder().token(self.token).build()
 
         # Add command handlers - basic
         self._app.add_handler(CommandHandler("start", self._cmd_start))
