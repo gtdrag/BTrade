@@ -480,10 +480,20 @@ class ETradeClient:
         Args:
             account_id_key: The accountIdKey from list_accounts()
         """
+        logger.info(f"get_account_positions: Querying account {account_id_key}")
         response = self._request("GET", f"/v1/accounts/{account_id_key}/portfolio")
+        logger.info(
+            f"get_account_positions: Raw response keys: {response.keys() if response else 'None'}"
+        )
         portfolio = response.get("PortfolioResponse", {}).get("AccountPortfolio", [])
+        logger.info(
+            f"get_account_positions: Portfolio has {len(portfolio) if portfolio else 0} accounts"
+        )
 
         if not portfolio:
+            logger.warning(
+                f"get_account_positions: No portfolio data returned for account {account_id_key}"
+            )
             return []
 
         positions = []
@@ -492,6 +502,12 @@ class ETradeClient:
             if isinstance(account_positions, dict):
                 account_positions = [account_positions]
             positions.extend(account_positions)
+
+        logger.info(f"get_account_positions: Found {len(positions)} positions")
+        for pos in positions:
+            symbol = pos.get("Product", {}).get("symbol", pos.get("symbolDescription", "?"))
+            qty = pos.get("quantity", 0)
+            logger.info(f"get_account_positions: Position - {symbol}: {qty} shares")
 
         return positions
 
