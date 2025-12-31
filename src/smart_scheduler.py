@@ -657,6 +657,13 @@ class SmartScheduler:
             return
 
         logger.info("Closing positions before market close")
+
+        # First, log what positions E*TRADE sees
+        portfolio = self.bot.get_portfolio_value()
+        logger.info(f"EOD close - portfolio check: {portfolio}")
+        if "error" in portfolio:
+            logger.error(f"EOD close - E*TRADE error: {portfolio.get('error')}")
+
         close_failures = []
         close_successes = []
 
@@ -978,9 +985,21 @@ class SmartScheduler:
 
         # Check if we have any positions
         portfolio = self.bot.get_portfolio_value()
+        logger.info(f"Position update - portfolio result: {portfolio}")
+
+        # Check for error response
+        if "error" in portfolio:
+            logger.error(f"Position update failed - E*TRADE error: {portfolio.get('error')}")
+            self._send_notification(
+                f"⚠️ Position Update Failed\n\nE*TRADE error: {portfolio.get('error')}",
+                parse_mode=None,
+            )
+            return
+
         positions = portfolio.get("positions", [])
 
         if not positions:
+            logger.info("Position update - no positions found, skipping")
             return  # No positions, skip update
 
         # Build position update message
