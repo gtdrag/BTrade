@@ -623,16 +623,33 @@ class Database:
             row = cursor.fetchone()
             return row["param_value"] if row else None
 
-    def get_all_strategy_params(self) -> Dict[str, float]:
+    def get_all_strategy_params(self) -> Dict[str, Any]:
         """Get all saved strategy parameters.
 
         Returns:
-            Dict mapping param_name to param_value
+            Dict mapping param_name to param_value (float, bool, or str)
         """
+        # Map of params that should be booleans (SQLite stores as 0/1)
+        bool_params = {
+            "mean_reversion_enabled",
+            "ten_am_dump_enabled",
+            "crash_day_enabled",
+            "pump_day_enabled",
+            "btc_overnight_filter_enabled",
+        }
+
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT param_name, param_value FROM strategy_params")
-            return {row["param_name"]: row["param_value"] for row in cursor.fetchall()}
+            result = {}
+            for row in cursor.fetchall():
+                name = row["param_name"]
+                value = row["param_value"]
+                # Convert 0/1 back to bool for boolean params
+                if name in bool_params and isinstance(value, (int, float)):
+                    value = bool(value)
+                result[name] = value
+            return result
 
     def get_strategy_param_history(self, param_name: str) -> Optional[Dict[str, Any]]:
         """Get full details of a strategy parameter including history.

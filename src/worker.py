@@ -108,7 +108,13 @@ class TradingWorker:
                 logger.error(f"Failed to create E*TRADE client: {e}")
                 logger.warning("Continuing in paper mode due to E*TRADE client failure")
 
-        # Create trading bot
+        # Load strategy parameters from database (persisted from /review recommendations)
+        saved_params = self.db.get_all_strategy_params()
+        logger.info(f"Loaded {len(saved_params)} strategy params from database")
+        for param, value in saved_params.items():
+            logger.info(f"  - {param}: {value}")
+
+        # Create trading bot with DB-persisted strategy params
         self.trading_bot = create_trading_bot(
             mode=self.trading_mode,
             max_position_pct=self.max_position_pct,
@@ -116,6 +122,14 @@ class TradingWorker:
             approval_timeout_minutes=self.approval_timeout,
             account_id_key=self.account_id_key,
             etrade_client=etrade_client,
+            # Strategy params from database (override defaults)
+            mean_reversion_enabled=saved_params.get("mean_reversion_enabled", True),
+            mean_reversion_threshold=saved_params.get("mr_threshold", -2.0),
+            crash_day_enabled=saved_params.get("crash_day_enabled", True),
+            crash_day_threshold=saved_params.get("crash_threshold", -2.0),
+            pump_day_enabled=saved_params.get("pump_day_enabled", True),
+            pump_day_threshold=saved_params.get("pump_threshold", 2.0),
+            ten_am_dump_enabled=saved_params.get("ten_am_dump_enabled", True),
         )
 
         # Create scheduler
@@ -146,15 +160,17 @@ class TradingWorker:
                 await self.telegram_bot.start_polling()
                 logger.info("Telegram bot polling started")
 
-                # Send startup notification
+                # Send startup notification with strategy params
                 now = get_et_now()
                 next_jobs = self._get_next_jobs_preview()
+                strategy_status = self._get_strategy_status()
                 await self.telegram_bot.send_message(
                     f"🤖 IBIT Trading Bot Online\n\n"
                     f"Mode: {self.trading_mode.upper()}\n"
                     f"Approval: {self.approval_mode}\n"
                     f"Time: {now.strftime('%I:%M %p ET')}\n"
                     f"Date: {now.strftime('%A, %b %d')}\n\n"
+                    f"📊 Strategy Config:\n{strategy_status}\n\n"
                     f"📅 Upcoming:\n{next_jobs}\n\n"
                     f"Ready for trading signals!"
                 )
@@ -230,6 +246,28 @@ class TradingWorker:
             return "\n".join(lines) if lines else "No upcoming jobs"
         except Exception:
             return "Unable to fetch schedule"
+
+    def _get_strategy_status(self) -> str:
+        """Get current strategy configuration status."""
+        if not self.trading_bot:
+            return "Bot not initialized"
+
+        config = self.trading_bot.strategy.config
+        lines = []
+
+        # Show enabled/disabled strategies
+        strategies = [
+            ("10AM Dump", config.ten_am_dump_enabled),
+            ("Mean Reversion", config.mean_reversion_enabled),
+            ("Crash Day", config.crash_day_enabled),
+            ("Pump Day", config.pump_day_enabled),
+        ]
+
+        for name, enabled in strategies:
+            status = "✅" if enabled else "❌"
+            lines.append(f"{status} {name}")
+
+        return "\n".join(lines)
 
 
 def main():
