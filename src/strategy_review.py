@@ -23,6 +23,40 @@ from .database import get_database
 logger = logging.getLogger(__name__)
 
 
+# All configurable strategy parameters
+STRATEGY_PARAMETERS = {
+    # Threshold parameters (floats)
+    "mr_threshold": {"type": "float", "default": -2.0, "display": "Mean Reversion Threshold"},
+    "reversal_threshold": {
+        "type": "float",
+        "default": -2.0,
+        "display": "Position Reversal Threshold",
+    },
+    "crash_threshold": {"type": "float", "default": -2.0, "display": "Crash Day Threshold"},
+    "pump_threshold": {"type": "float", "default": 2.0, "display": "Pump Day Threshold"},
+    # Enable/disable flags (booleans)
+    "ten_am_dump_enabled": {"type": "bool", "default": True, "display": "10 AM Dump Strategy"},
+    "mean_reversion_enabled": {
+        "type": "bool",
+        "default": True,
+        "display": "Mean Reversion Strategy",
+    },
+    "crash_day_enabled": {"type": "bool", "default": True, "display": "Crash Day Strategy"},
+    "pump_day_enabled": {"type": "bool", "default": True, "display": "Pump Day Strategy"},
+    "btc_overnight_filter_enabled": {
+        "type": "bool",
+        "default": True,
+        "display": "BTC Overnight Filter",
+    },
+    # Priority mode
+    "signal_priority": {
+        "type": "enum",
+        "default": "ten_am_first",
+        "options": ["ten_am_first", "mean_reversion_first"],
+        "display": "Signal Priority Mode",
+    },
+}
+
 # Tool definition for Claude to recommend parameter changes
 PARAMETER_CHANGE_TOOL = {
     "name": "recommend_parameter_change",
@@ -31,25 +65,27 @@ PARAMETER_CHANGE_TOOL = {
         "CRITICAL: You may ONLY recommend values that were actually tested in the "
         "parameter sensitivity analysis. Do NOT extrapolate or guess untested values. "
         "Only call this tool if backtest data strongly supports a specific tested value. "
-        "Do not call if current parameters are optimal or if no tested value is clearly better."
+        "Do not call if current parameters are optimal or if no tested value is clearly better. "
+        "For boolean parameters, use true/false. For enum parameters, use exact option values."
     ),
     "input_schema": {
         "type": "object",
         "properties": {
             "parameter": {
                 "type": "string",
-                "enum": ["mr_threshold", "reversal_threshold", "crash_threshold", "pump_threshold"],
+                "enum": list(STRATEGY_PARAMETERS.keys()),
                 "description": "The parameter to change",
             },
             "current_value": {
-                "type": "number",
+                "oneOf": [{"type": "number"}, {"type": "boolean"}, {"type": "string"}],
                 "description": "The current value of the parameter",
             },
             "recommended_value": {
-                "type": "number",
+                "oneOf": [{"type": "number"}, {"type": "boolean"}, {"type": "string"}],
                 "description": (
                     "The recommended new value. MUST be one of the values from the "
-                    "parameter sensitivity tests shown above - never extrapolate."
+                    "parameter sensitivity tests shown above - never extrapolate. "
+                    "For boolean params: true/false. For enum params: exact option value."
                 ),
             },
             "backtest_return": {
@@ -126,17 +162,22 @@ WATCH_ITEM_TOOL = {
 # Claude prompt for strategy review
 STRATEGY_REVIEW_PROMPT = """You are a quantitative trading strategist reviewing the performance of a Bitcoin ETF trading strategy.
 
-## Current Strategy
+## Current Strategy Configuration
 The bot trades IBIT (Bitcoin ETF) using leveraged ETFs:
 - BITU (2x long) for bullish signals
 - SBIT (2x inverse) for bearish signals
 
-**Active Strategies:**
-1. **Mean Reversion**: Buy BITU after IBIT drops ≥{mr_threshold}% previous day
+**Active Strategies (and current status):**
+1. **10 AM Dump** [{ten_am_dump_enabled}]: Buy SBIT at 9:35 AM, sell at 10:30 AM (daily)
+2. **Mean Reversion** [{mean_reversion_enabled}]: Buy BITU after IBIT drops ≥{mr_threshold}% previous day
    - Filtered by BTC overnight movement (only trade if BTC up overnight)
-2. **Position Reversal**: If BITU position drops ≥{reversal_threshold}% intraday, flip to SBIT
-3. **Crash Day**: Buy SBIT if IBIT drops ≥{crash_threshold}% intraday
-4. **Pump Day**: Buy BITU if IBIT rises ≥{pump_threshold}% intraday
+3. **Position Reversal**: If BITU position drops ≥{reversal_threshold}% intraday, flip to SBIT
+4. **Crash Day**: Buy SBIT if IBIT drops ≥{crash_threshold}% intraday
+5. **Pump Day**: Buy BITU if IBIT rises ≥{pump_threshold}% intraday
+
+**Signal Priority Mode:** {signal_priority}
+- "ten_am_first": 10 AM Dump takes priority, blocks Mean Reversion on that day
+- "mean_reversion_first": Mean Reversion takes priority, 10 AM Dump runs only on non-MR days
 
 All positions close at 3:55 PM ET (never hold overnight).
 
@@ -149,8 +190,11 @@ All positions close at 3:55 PM ET (never hold overnight).
 ### Backtest Results - Current Parameters
 {current_backtest}
 
-### Parameter Sensitivity Analysis
+### Threshold Parameter Sensitivity Analysis
 {parameter_tests}
+
+### Strategy Configuration Tests
+{strategy_tests}
 
 **Tested Values (you may ONLY recommend from these):**
 {tested_values}
@@ -169,28 +213,35 @@ Analyze this data and provide:
    - Check the status of each flagged item
    - Has the concern materialized or resolved?
 
-3. **Parameter Recommendations** (if any)
+3. **Strategy Configuration Recommendations**
+   - Should any strategies be ENABLED or DISABLED based on backtest results?
+   - Should the signal priority mode change? (Compare 10 AM Priority vs MR Priority results)
+   - Be specific: recommend based on the Strategy Configuration Tests above
+
+4. **Threshold Recommendations** (if any)
    - Should we adjust thresholds? Be specific with numbers.
    - Only recommend changes if data strongly supports it.
 
-4. **Pattern Observations**
+5. **Pattern Observations**
    - Any new patterns emerging in the data?
    - Day-of-week effects, time-of-day patterns, cross-market correlations?
 
-5. **Risk Concerns**
+6. **Risk Concerns**
    - Any warning signs? Increasing drawdowns? Deteriorating win rate?
 
-6. **Action Items** (bullet list)
+7. **Action Items** (bullet list)
    - Specific, actionable recommendations
    - Include "NO CHANGES NEEDED" if current parameters are optimal
 
-Format your response as a clear report suitable for a Telegram message (use markdown, keep it under 2000 characters).
+Format your response as a clear report suitable for a Telegram message (use markdown, keep it under 2500 characters).
 
 **CRITICAL RULES FOR RECOMMENDATIONS:**
 1. You may ONLY recommend values that appear in the "Tested Values" list above
-2. Do NOT extrapolate or guess values that weren't tested (e.g., if -1.5 and -2.0 were tested, do NOT recommend -1.0)
-3. When using the `recommend_parameter_change` tool, the `backtest_return` MUST match the exact return shown in the sensitivity analysis
-4. If no tested value clearly outperforms the current setting, respond with "NO CHANGES NEEDED"
+2. For boolean params (enable/disable): use true or false
+3. For enum params (signal_priority): use exact option values ("ten_am_first" or "mean_reversion_first")
+4. For float params: only use values from the tested list
+5. When using the `recommend_parameter_change` tool, the `backtest_return` MUST match the exact return shown in the tests
+6. If no tested value clearly outperforms the current setting, respond with "NO CHANGES NEEDED"
 
 **WATCH ITEMS:**
 Use the `flag_watch_item` tool to flag anything important to monitor in future reviews:
@@ -276,12 +327,21 @@ class StrategyReviewer:
         self.client = anthropic.Anthropic(api_key=self.api_key)
         self.db = get_database()
 
-        # Default strategy parameters
+        # Default strategy parameters (all configurable params)
         self.current_params = {
+            # Threshold parameters
             "mr_threshold": -2.0,
             "reversal_threshold": -2.0,
             "crash_threshold": -2.0,
             "pump_threshold": 2.0,
+            # Enable/disable flags
+            "ten_am_dump_enabled": True,
+            "mean_reversion_enabled": True,
+            "crash_day_enabled": True,
+            "pump_day_enabled": True,
+            "btc_overnight_filter_enabled": True,
+            # Priority mode
+            "signal_priority": "ten_am_first",  # or "mean_reversion_first"
         }
 
         # Load any persisted parameters from database (override defaults)
@@ -739,6 +799,390 @@ class StrategyReviewer:
 
         return "\n".join(sections)
 
+    def _run_strategy_combination_tests(self, ibit_data: List[Dict]) -> Dict[str, Dict]:
+        """
+        Run comprehensive backtests for strategy enable/disable combinations.
+
+        Tests:
+        1. 10 AM Dump Only
+        2. Mean Reversion Only
+        3. Both with 10 AM Dump Priority (current default)
+        4. Both with Mean Reversion Priority
+        5. Neither (baseline)
+
+        Returns dict with results for each configuration.
+        """
+        import os
+        from datetime import timedelta
+
+        from .data_providers import AlpacaProvider
+
+        # We need intraday data for 10 AM dump testing
+        alpaca = AlpacaProvider(
+            api_key=os.environ.get("ALPACA_API_KEY"),
+            secret_key=os.environ.get("ALPACA_SECRET_KEY"),
+        )
+
+        if not alpaca.is_available():
+            logger.warning("Alpaca not available for strategy combination tests")
+            return {}
+
+        # Determine date range from IBIT data
+        if not ibit_data:
+            return {}
+
+        dates = [d["date"] for d in ibit_data if "date" in d]
+        if not dates:
+            return {}
+
+        # Convert string dates to date objects if needed
+        if isinstance(dates[0], str):
+            from datetime import datetime
+
+            dates = [datetime.strptime(d, "%Y-%m-%d").date() for d in dates]
+
+        start_date = min(dates)
+        end_date = max(dates)
+
+        results = {}
+
+        # Fetch additional data needed for comprehensive testing
+        try:
+            # Fetch SBIT intraday for 10 AM dump
+            sbit_bars = alpaca.get_historical_bars(
+                "SBIT",
+                start_date.isoformat(),
+                (end_date + timedelta(days=1)).isoformat(),
+                "1Min",
+            )
+
+            # Fetch BITU daily for mean reversion
+            bitu_bars = alpaca.get_historical_bars(
+                "BITU",
+                start_date.isoformat(),
+                (end_date + timedelta(days=1)).isoformat(),
+                "1Day",
+            )
+
+            # Fetch BTC for overnight filter
+            btc_bars = alpaca.get_crypto_bars(
+                "BTC/USD",
+                start_date.isoformat(),
+                (end_date + timedelta(days=1)).isoformat(),
+                "1Day",
+            )
+
+            if not sbit_bars or not bitu_bars:
+                logger.warning("Missing data for strategy tests")
+                return {}
+
+            # Run each test configuration
+            results["10am_dump_only"] = self._backtest_10am_dump(sbit_bars)
+            results["mean_reversion_only"] = self._backtest_mean_reversion(
+                ibit_data, bitu_bars, btc_bars
+            )
+            results["combined_10am_priority"] = self._backtest_combined(
+                ibit_data, bitu_bars, sbit_bars, btc_bars, priority="ten_am_first"
+            )
+            results["combined_mr_priority"] = self._backtest_combined(
+                ibit_data, bitu_bars, sbit_bars, btc_bars, priority="mean_reversion_first"
+            )
+
+        except Exception as e:
+            logger.error(f"Strategy combination tests failed: {e}")
+            return {}
+
+        return results
+
+    def _backtest_10am_dump(self, sbit_intraday: List[Dict]) -> Dict[str, Any]:
+        """Backtest 10 AM dump strategy only."""
+        import pandas as pd
+
+        if not sbit_intraday:
+            return {"return": 0, "trades": 0, "win_rate": 0}
+
+        df = pd.DataFrame(sbit_intraday)
+        df["timestamp"] = pd.to_datetime(df["t"])
+        df["timestamp_et"] = df["timestamp"].dt.tz_convert("America/New_York")
+        df["date"] = df["timestamp_et"].dt.date
+        df["time"] = df["timestamp_et"].dt.strftime("%H:%M")
+        df = df.rename(columns={"o": "open", "c": "close"})
+
+        capital = 10000.0
+        trades = []
+        slippage = 0.02
+
+        for trade_date, day_data in df.groupby("date"):
+            # Find bars near 9:35 and 10:30
+            entry_bar = self._find_nearest_bar(day_data, "09:35", 5)
+            exit_bar = self._find_nearest_bar(day_data, "10:30", 5)
+
+            if entry_bar is None or exit_bar is None:
+                continue
+
+            entry_price = entry_bar["close"] * (1 + slippage / 100)
+            exit_price = exit_bar["close"] * (1 - slippage / 100)
+
+            ret = (exit_price - entry_price) / entry_price
+            capital *= 1 + ret
+            trades.append(ret * 100)
+
+        total_return = (capital - 10000) / 10000 * 100
+        win_rate = sum(1 for t in trades if t > 0) / len(trades) * 100 if trades else 0
+
+        return {
+            "return": total_return,
+            "trades": len(trades),
+            "win_rate": win_rate,
+            "name": "10 AM Dump Only",
+        }
+
+    def _backtest_mean_reversion(
+        self, ibit_data: List[Dict], bitu_bars: List[Dict], btc_bars: List[Dict]
+    ) -> Dict[str, Any]:
+        """Backtest mean reversion strategy only."""
+        import pandas as pd
+
+        if not ibit_data or not bitu_bars:
+            return {"return": 0, "trades": 0, "win_rate": 0}
+
+        # Build IBIT daily returns
+        ibit_df = pd.DataFrame(ibit_data)
+        ibit_df["daily_return"] = (ibit_df["close"] - ibit_df["open"]) / ibit_df["open"] * 100
+        ibit_df["prev_return"] = ibit_df["daily_return"].shift(1)
+
+        # Build BITU lookup
+        bitu_df = pd.DataFrame(bitu_bars)
+        bitu_df["date"] = pd.to_datetime(bitu_df["t"]).dt.date
+        bitu_df = bitu_df.rename(columns={"o": "open", "c": "close"})
+        bitu_by_date = {row["date"]: row for _, row in bitu_df.iterrows()}
+
+        # Build BTC overnight lookup
+        btc_overnight = {}
+        if btc_bars:
+            btc_df = pd.DataFrame(btc_bars)
+            btc_df["date"] = pd.to_datetime(btc_df["t"]).dt.date
+            btc_df = btc_df.rename(columns={"o": "open", "c": "close"}).sort_values("date")
+            for i in range(1, len(btc_df)):
+                prev_close = btc_df.iloc[i - 1]["close"]
+                today_open = btc_df.iloc[i]["open"]
+                btc_overnight[btc_df.iloc[i]["date"]] = (
+                    (today_open - prev_close) / prev_close * 100 if prev_close > 0 else 0
+                )
+
+        capital = 10000.0
+        trades = []
+        slippage = 0.02
+        threshold = self.current_params["mr_threshold"]
+
+        for i in range(1, len(ibit_df)):
+            row = ibit_df.iloc[i]
+            prev_ret = row["prev_return"]
+            trade_date = row["date"]
+
+            if pd.isna(prev_ret) or prev_ret >= threshold:
+                continue
+
+            # BTC overnight filter
+            if trade_date in btc_overnight and btc_overnight[trade_date] <= 0:
+                continue
+
+            if trade_date not in bitu_by_date:
+                continue
+
+            bitu_row = bitu_by_date[trade_date]
+            entry_price = bitu_row["open"] * (1 + slippage / 100)
+            exit_price = bitu_row["close"] * (1 - slippage / 100)
+
+            ret = (exit_price - entry_price) / entry_price
+            capital *= 1 + ret
+            trades.append(ret * 100)
+
+        total_return = (capital - 10000) / 10000 * 100
+        win_rate = sum(1 for t in trades if t > 0) / len(trades) * 100 if trades else 0
+
+        return {
+            "return": total_return,
+            "trades": len(trades),
+            "win_rate": win_rate,
+            "name": "Mean Reversion Only",
+        }
+
+    def _backtest_combined(
+        self,
+        ibit_data: List[Dict],
+        bitu_bars: List[Dict],
+        sbit_bars: List[Dict],
+        btc_bars: List[Dict],
+        priority: str = "ten_am_first",
+    ) -> Dict[str, Any]:
+        """Backtest combined strategy with specified priority."""
+        import pandas as pd
+
+        if not ibit_data or not bitu_bars or not sbit_bars:
+            return {"return": 0, "trades": 0, "win_rate": 0}
+
+        # Prepare IBIT data
+        ibit_df = pd.DataFrame(ibit_data)
+        ibit_df["daily_return"] = (ibit_df["close"] - ibit_df["open"]) / ibit_df["open"] * 100
+        ibit_df["prev_return"] = ibit_df["daily_return"].shift(1)
+
+        # Prepare BITU lookup
+        bitu_df = pd.DataFrame(bitu_bars)
+        bitu_df["date"] = pd.to_datetime(bitu_df["t"]).dt.date
+        bitu_df = bitu_df.rename(columns={"o": "open", "c": "close"})
+        bitu_by_date = {row["date"]: row for _, row in bitu_df.iterrows()}
+
+        # Prepare SBIT intraday for 10 AM dump
+        sbit_df = pd.DataFrame(sbit_bars)
+        sbit_df["timestamp"] = pd.to_datetime(sbit_df["t"])
+        sbit_df["timestamp_et"] = sbit_df["timestamp"].dt.tz_convert("America/New_York")
+        sbit_df["date"] = sbit_df["timestamp_et"].dt.date
+        sbit_df = sbit_df.rename(columns={"c": "close"})
+
+        sbit_10am = {}
+        for trade_date, day_data in sbit_df.groupby("date"):
+            entry_bar = self._find_nearest_bar(day_data, "09:35", 5)
+            exit_bar = self._find_nearest_bar(day_data, "10:30", 5)
+            if entry_bar is not None and exit_bar is not None:
+                sbit_10am[trade_date] = {"entry": entry_bar["close"], "exit": exit_bar["close"]}
+
+        # BTC overnight filter
+        btc_overnight = {}
+        if btc_bars:
+            btc_df = pd.DataFrame(btc_bars)
+            btc_df["date"] = pd.to_datetime(btc_df["t"]).dt.date
+            btc_df = btc_df.rename(columns={"o": "open", "c": "close"}).sort_values("date")
+            for i in range(1, len(btc_df)):
+                prev_close = btc_df.iloc[i - 1]["close"]
+                today_open = btc_df.iloc[i]["open"]
+                btc_overnight[btc_df.iloc[i]["date"]] = (
+                    (today_open - prev_close) / prev_close * 100 if prev_close > 0 else 0
+                )
+
+        capital = 10000.0
+        trades = []
+        ten_am_trades = 0
+        mr_trades = 0
+        slippage = 0.02
+        threshold = self.current_params["mr_threshold"]
+
+        for i in range(1, len(ibit_df)):
+            row = ibit_df.iloc[i]
+            prev_ret = row["prev_return"]
+            trade_date = row["date"]
+
+            # Check if mean reversion conditions are met
+            is_mr_day = (
+                not pd.isna(prev_ret)
+                and prev_ret < threshold
+                and (trade_date not in btc_overnight or btc_overnight[trade_date] > 0)
+            )
+
+            # Execute based on priority
+            if priority == "ten_am_first":
+                # 10 AM dump takes priority - runs every day
+                if trade_date in sbit_10am:
+                    data = sbit_10am[trade_date]
+                    entry_price = data["entry"] * (1 + slippage / 100)
+                    exit_price = data["exit"] * (1 - slippage / 100)
+                    ret = (exit_price - entry_price) / entry_price
+                    capital *= 1 + ret
+                    trades.append(ret * 100)
+                    ten_am_trades += 1
+                    continue  # Skip MR on this day
+
+                # Mean reversion (only if 10 AM dump didn't fire)
+                if is_mr_day and trade_date in bitu_by_date:
+                    bitu_row = bitu_by_date[trade_date]
+                    entry_price = bitu_row["open"] * (1 + slippage / 100)
+                    exit_price = bitu_row["close"] * (1 - slippage / 100)
+                    ret = (exit_price - entry_price) / entry_price
+                    capital *= 1 + ret
+                    trades.append(ret * 100)
+                    mr_trades += 1
+
+            else:  # mean_reversion_first
+                # Mean reversion takes priority
+                if is_mr_day and trade_date in bitu_by_date:
+                    bitu_row = bitu_by_date[trade_date]
+                    entry_price = bitu_row["open"] * (1 + slippage / 100)
+                    exit_price = bitu_row["close"] * (1 - slippage / 100)
+                    ret = (exit_price - entry_price) / entry_price
+                    capital *= 1 + ret
+                    trades.append(ret * 100)
+                    mr_trades += 1
+                    continue  # Skip 10 AM dump on MR days
+
+                # 10 AM dump (only if MR didn't fire)
+                if trade_date in sbit_10am:
+                    data = sbit_10am[trade_date]
+                    entry_price = data["entry"] * (1 + slippage / 100)
+                    exit_price = data["exit"] * (1 - slippage / 100)
+                    ret = (exit_price - entry_price) / entry_price
+                    capital *= 1 + ret
+                    trades.append(ret * 100)
+                    ten_am_trades += 1
+
+        total_return = (capital - 10000) / 10000 * 100
+        win_rate = sum(1 for t in trades if t > 0) / len(trades) * 100 if trades else 0
+
+        priority_name = "10AM Priority" if priority == "ten_am_first" else "MR Priority"
+        return {
+            "return": total_return,
+            "trades": len(trades),
+            "win_rate": win_rate,
+            "ten_am_trades": ten_am_trades,
+            "mr_trades": mr_trades,
+            "name": f"Combined ({priority_name})",
+        }
+
+    def _find_nearest_bar(self, day_data, target_time: str, window_minutes: int = 5):
+        """Find the bar nearest to target_time within a window."""
+
+        target_hour, target_min = map(int, target_time.split(":"))
+        target_minutes = target_hour * 60 + target_min
+
+        day_data = day_data.copy()
+        day_data["minutes"] = (
+            day_data["timestamp_et"].dt.hour * 60 + day_data["timestamp_et"].dt.minute
+        )
+        day_data["diff"] = abs(day_data["minutes"] - target_minutes)
+
+        nearby = day_data[day_data["diff"] <= window_minutes]
+        if nearby.empty:
+            return None
+
+        return nearby.loc[nearby["diff"].idxmin()]
+
+    def _format_strategy_tests(self, results: Dict[str, Dict]) -> str:
+        """Format strategy combination test results for the prompt."""
+        if not results:
+            return "Strategy combination tests unavailable."
+
+        lines = ["### Strategy Configuration Tests", ""]
+        lines.append("| Configuration | Return | Trades | Win Rate | Details |")
+        lines.append("|---------------|--------|--------|----------|---------|")
+
+        for key, data in results.items():
+            name = data.get("name", key)
+            ret = data.get("return", 0)
+            trades = data.get("trades", 0)
+            win_rate = data.get("win_rate", 0)
+
+            details = ""
+            if "ten_am_trades" in data:
+                details = f"{data['ten_am_trades']} 10AM / {data['mr_trades']} MR"
+
+            lines.append(f"| {name} | {ret:+.2f}% | {trades} | {win_rate:.1f}% | {details} |")
+
+        lines.append("")
+        lines.append("**Interpretation:**")
+        lines.append("- Compare returns to determine if strategies should be enabled/disabled")
+        lines.append("- Compare priority modes to see which signal should take precedence")
+
+        return "\n".join(lines)
+
     async def run_monthly_review(self) -> StrategyRecommendation:
         """
         Run the monthly strategy review.
@@ -770,25 +1214,20 @@ class StrategyReviewer:
             name="Current Strategy",
         )
 
-        # 3. Test alternative parameters with DYNAMIC ranges around current values
+        # 3. Comprehensive parameter testing
         parameter_tests = []
-        tested_values: Dict[str, List[float]] = {
-            "mr_threshold": [],
-            "reversal_threshold": [],
-        }
+        tested_values: Dict[str, Any] = {}
 
-        # Generate test values around current MR threshold (±0.5, ±1.0)
+        # 3a. Test threshold parameters
         current_mr = self.current_params["mr_threshold"]
         mr_test_values = sorted(
             set(
                 [current_mr - 1.0, current_mr - 0.5, current_mr, current_mr + 0.5, current_mr + 1.0]
             )
         )
-        # Keep values in reasonable range (not too close to 0, not too extreme)
         mr_test_values = [v for v in mr_test_values if -4.0 <= v <= -0.5]
         tested_values["mr_threshold"] = mr_test_values
 
-        # Generate test values around current reversal threshold
         current_rev = self.current_params["reversal_threshold"]
         rev_test_values = sorted(
             set(
@@ -804,25 +1243,41 @@ class StrategyReviewer:
         rev_test_values = [v for v in rev_test_values if -4.0 <= v <= -0.5]
         tested_values["reversal_threshold"] = rev_test_values
 
-        # Test MR thresholds (using CURRENT reversal as baseline)
         for mr_thresh in mr_test_values:
             result = self._run_backtest(
                 ibit_data,
                 mr_threshold=mr_thresh,
-                reversal_threshold=self.current_params["reversal_threshold"],  # Use current!
+                reversal_threshold=self.current_params["reversal_threshold"],
                 name=f"MR @ {mr_thresh}%",
             )
             parameter_tests.append(result)
 
-        # Test reversal thresholds (using CURRENT MR as baseline)
         for rev_thresh in rev_test_values:
             result = self._run_backtest(
                 ibit_data,
-                mr_threshold=self.current_params["mr_threshold"],  # Use current!
+                mr_threshold=self.current_params["mr_threshold"],
                 reversal_threshold=rev_thresh,
                 name=f"Reversal @ {rev_thresh}%",
             )
             parameter_tests.append(result)
+
+        # 3b. Test strategy enable/disable combinations
+        # Run in thread pool to avoid blocking async event loop
+        import asyncio
+
+        try:
+            strategy_tests = await asyncio.to_thread(
+                self._run_strategy_combination_tests, ibit_data
+            )
+        except Exception as e:
+            logger.warning(f"Strategy combination tests failed: {e}")
+            strategy_tests = {}
+        tested_values["ten_am_dump_enabled"] = [True, False]
+        tested_values["mean_reversion_enabled"] = [True, False]
+        tested_values["signal_priority"] = ["ten_am_first", "mean_reversion_first"]
+
+        # 3c. Format strategy test results
+        strategy_tests_str = self._format_strategy_tests(strategy_tests)
 
         # 4. Format data for Claude
         current_backtest = self._format_backtest_result(current_result)
@@ -831,8 +1286,14 @@ class StrategyReviewer:
 
         # Build explicit tested values list for Claude
         tested_values_str = (
+            f"**Threshold Parameters (floats):**\n"
             f"- mr_threshold: {tested_values['mr_threshold']}\n"
-            f"- reversal_threshold: {tested_values['reversal_threshold']}"
+            f"- reversal_threshold: {tested_values['reversal_threshold']}\n\n"
+            f"**Strategy Enable/Disable (booleans):**\n"
+            f"- ten_am_dump_enabled: {tested_values.get('ten_am_dump_enabled', [True, False])}\n"
+            f"- mean_reversion_enabled: {tested_values.get('mean_reversion_enabled', [True, False])}\n\n"
+            f"**Priority Mode (enum):**\n"
+            f"- signal_priority: {tested_values.get('signal_priority', ['ten_am_first', 'mean_reversion_first'])}"
         )
 
         # 4.5 Detect market regime
@@ -853,10 +1314,14 @@ class StrategyReviewer:
             reversal_threshold=self.current_params["reversal_threshold"],
             crash_threshold=self.current_params["crash_threshold"],
             pump_threshold=self.current_params["pump_threshold"],
+            ten_am_dump_enabled=self.current_params["ten_am_dump_enabled"],
+            mean_reversion_enabled=self.current_params["mean_reversion_enabled"],
+            signal_priority=self.current_params["signal_priority"],
             market_regime=market_regime_str,
             previous_review_context=previous_review_context,
             current_backtest=current_backtest,
             parameter_tests=param_tests_str,
+            strategy_tests=strategy_tests_str,
             tested_values=tested_values_str,
             market_summary=market_summary,
         )
@@ -1038,13 +1503,34 @@ class StrategyReviewer:
         param = recommendation.parameter
         new_value = recommendation.recommended_value
 
-        # Validate the parameter exists
-        valid_params = ["mr_threshold", "reversal_threshold", "crash_threshold", "pump_threshold"]
-        if param not in valid_params:
+        # Validate the parameter exists (use STRATEGY_PARAMETERS as source of truth)
+        if param not in STRATEGY_PARAMETERS:
             logger.error(f"Invalid parameter: {param}")
             return False
 
+        # Type coercion based on parameter definition
+        param_def = STRATEGY_PARAMETERS[param]
+        param_type = param_def["type"]
+
         try:
+            if param_type == "float":
+                new_value = float(new_value)
+            elif param_type == "bool":
+                # Handle string "true"/"false" from JSON
+                if isinstance(new_value, str):
+                    new_value = new_value.lower() == "true"
+                else:
+                    new_value = bool(new_value)
+            elif param_type == "enum":
+                # Validate enum value
+                valid_options = param_def.get("options", [])
+                if new_value not in valid_options:
+                    logger.error(
+                        f"Invalid enum value for {param}: {new_value}. Must be one of {valid_options}"
+                    )
+                    return False
+            # string type doesn't need conversion
+
             # Update our internal tracking
             old_value = self.current_params[param]
             self.current_params[param] = new_value
@@ -1067,6 +1553,7 @@ class StrategyReviewer:
                     "parameter": param,
                     "old_value": old_value,
                     "new_value": new_value,
+                    "param_type": param_type,
                     "reason": recommendation.reason,
                     "confidence": recommendation.confidence,
                     "timestamp": datetime.now().isoformat(),
