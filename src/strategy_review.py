@@ -941,27 +941,28 @@ class StrategyReviewer:
         self, ibit_data: List[Dict], bitu_bars: List[Dict], btc_bars: List[Dict]
     ) -> Dict[str, Any]:
         """Backtest mean reversion strategy only."""
+
         import pandas as pd
 
         if not ibit_data or not bitu_bars:
-            return {"return": 0, "trades": 0, "win_rate": 0}
+            return {"return": 0, "trades": 0, "win_rate": 0, "name": "Mean Reversion Only"}
 
         # Build IBIT daily returns
         ibit_df = pd.DataFrame(ibit_data)
         ibit_df["daily_return"] = (ibit_df["close"] - ibit_df["open"]) / ibit_df["open"] * 100
         ibit_df["prev_return"] = ibit_df["daily_return"].shift(1)
 
-        # Build BITU lookup
+        # Build BITU lookup - use STRING dates for consistent comparison
         bitu_df = pd.DataFrame(bitu_bars)
-        bitu_df["date"] = pd.to_datetime(bitu_df["t"]).dt.date
+        bitu_df["date"] = pd.to_datetime(bitu_df["t"]).dt.strftime("%Y-%m-%d")
         bitu_df = bitu_df.rename(columns={"o": "open", "c": "close"})
         bitu_by_date = {row["date"]: row for _, row in bitu_df.iterrows()}
 
-        # Build BTC overnight lookup
+        # Build BTC overnight lookup - use STRING dates
         btc_overnight = {}
         if btc_bars:
             btc_df = pd.DataFrame(btc_bars)
-            btc_df["date"] = pd.to_datetime(btc_df["t"]).dt.date
+            btc_df["date"] = pd.to_datetime(btc_df["t"]).dt.strftime("%Y-%m-%d")
             btc_df = btc_df.rename(columns={"o": "open", "c": "close"}).sort_values("date")
             for i in range(1, len(btc_df)):
                 prev_close = btc_df.iloc[i - 1]["close"]
@@ -978,7 +979,7 @@ class StrategyReviewer:
         for i in range(1, len(ibit_df)):
             row = ibit_df.iloc[i]
             prev_ret = row["prev_return"]
-            trade_date = row["date"]
+            trade_date = row["date"]  # This is already a string from _fetch_market_data
 
             if pd.isna(prev_ret) or prev_ret >= threshold:
                 continue
@@ -1027,17 +1028,17 @@ class StrategyReviewer:
         ibit_df["daily_return"] = (ibit_df["close"] - ibit_df["open"]) / ibit_df["open"] * 100
         ibit_df["prev_return"] = ibit_df["daily_return"].shift(1)
 
-        # Prepare BITU lookup
+        # Prepare BITU lookup - use STRING dates for consistent comparison
         bitu_df = pd.DataFrame(bitu_bars)
-        bitu_df["date"] = pd.to_datetime(bitu_df["t"]).dt.date
+        bitu_df["date"] = pd.to_datetime(bitu_df["t"]).dt.strftime("%Y-%m-%d")
         bitu_df = bitu_df.rename(columns={"o": "open", "c": "close"})
         bitu_by_date = {row["date"]: row for _, row in bitu_df.iterrows()}
 
-        # Prepare SBIT intraday for 10 AM dump
+        # Prepare SBIT intraday for 10 AM dump - use STRING dates
         sbit_df = pd.DataFrame(sbit_bars)
         sbit_df["timestamp"] = pd.to_datetime(sbit_df["t"])
         sbit_df["timestamp_et"] = sbit_df["timestamp"].dt.tz_convert("America/New_York")
-        sbit_df["date"] = sbit_df["timestamp_et"].dt.date
+        sbit_df["date"] = sbit_df["timestamp_et"].dt.strftime("%Y-%m-%d")
         sbit_df = sbit_df.rename(columns={"c": "close"})
 
         sbit_10am = {}
@@ -1047,11 +1048,11 @@ class StrategyReviewer:
             if entry_bar is not None and exit_bar is not None:
                 sbit_10am[trade_date] = {"entry": entry_bar["close"], "exit": exit_bar["close"]}
 
-        # BTC overnight filter
+        # BTC overnight filter - use STRING dates
         btc_overnight = {}
         if btc_bars:
             btc_df = pd.DataFrame(btc_bars)
-            btc_df["date"] = pd.to_datetime(btc_df["t"]).dt.date
+            btc_df["date"] = pd.to_datetime(btc_df["t"]).dt.strftime("%Y-%m-%d")
             btc_df = btc_df.rename(columns={"o": "open", "c": "close"}).sort_values("date")
             for i in range(1, len(btc_df)):
                 prev_close = btc_df.iloc[i - 1]["close"]
