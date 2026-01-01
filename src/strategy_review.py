@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Optional
 import anthropic
 
 from .database import get_database
+from .error_alerting import AlertSeverity, alert_anomaly, alert_error
 
 logger = logging.getLogger(__name__)
 
@@ -400,6 +401,12 @@ class StrategyReviewer:
             ]
         except Exception as e:
             logger.error(f"Failed to fetch IBIT data: {e}")
+            alert_error(
+                AlertSeverity.WARNING,
+                f"Failed to fetch IBIT data for strategy review: {e}",
+                {"days_requested": days},
+                category="fetch_ibit_data",
+            )
             data["ibit"] = []
 
         return data
@@ -890,6 +897,12 @@ class StrategyReviewer:
 
         except Exception as e:
             logger.error(f"Strategy combination tests failed: {e}")
+            alert_error(
+                AlertSeverity.WARNING,
+                f"Strategy combination tests failed: {e}",
+                {"start_date": str(start_date), "end_date": str(end_date)},
+                category="strategy_tests",
+            )
             return {}
 
         return results
@@ -1001,6 +1014,15 @@ class StrategyReviewer:
 
         total_return = (capital - 10000) / 10000 * 100
         win_rate = sum(1 for t in trades if t > 0) / len(trades) * 100 if trades else 0
+
+        # Alert if 0 trades when we had dip days (data quality check)
+        if len(trades) == 0 and len(ibit_data) > 30:
+            alert_anomaly(
+                "mean_reversion_trades",
+                0,
+                ">0 if dip days exist",
+                {"ibit_days": len(ibit_data), "bitu_days": len(bitu_bars)},
+            )
 
         return {
             "return": total_return,
@@ -1272,6 +1294,11 @@ class StrategyReviewer:
             )
         except Exception as e:
             logger.warning(f"Strategy combination tests failed: {e}")
+            alert_error(
+                AlertSeverity.WARNING,
+                f"Async strategy combination tests failed: {e}",
+                category="async_strategy_tests",
+            )
             strategy_tests = {}
         tested_values["ten_am_dump_enabled"] = [True, False]
         tested_values["mean_reversion_enabled"] = [True, False]
@@ -1332,7 +1359,7 @@ class StrategyReviewer:
 
         try:
             response = self.client.messages.create(
-                model="claude-sonnet-4-20250514",
+                model="claude-opus-4-5-20251101",
                 max_tokens=2000,
                 messages=[{"role": "user", "content": prompt}],
                 tools=[PARAMETER_CHANGE_TOOL, WATCH_ITEM_TOOL],
@@ -1402,7 +1429,7 @@ class StrategyReviewer:
                 "STRATEGY_REVIEW",
                 "Monthly strategy review completed",
                 {
-                    "model": "claude-sonnet-4-20250514",
+                    "model": "claude-opus-4-5-20251101",
                     "current_return": current_result.total_return_pct,
                     "has_recommendations": has_recs,
                     "num_recommendations": len(recommendations),
@@ -1480,6 +1507,12 @@ class StrategyReviewer:
 
         except Exception as e:
             logger.error(f"Claude API call failed: {e}")
+            alert_error(
+                AlertSeverity.CRITICAL,
+                f"Strategy review Claude API call failed: {e}",
+                {"model": "claude-sonnet-4-20250514"},
+                category="claude_api_review",
+            )
             return StrategyRecommendation(
                 summary=f"Review failed: {e}",
                 full_report=f"Error calling Claude API: {e}",
@@ -1570,6 +1603,12 @@ class StrategyReviewer:
 
         except Exception as e:
             logger.error(f"Failed to apply recommendation: {e}")
+            alert_error(
+                AlertSeverity.WARNING,
+                f"Failed to apply recommendation: {e}",
+                {"parameter": param, "new_value": str(new_value)},
+                category="apply_recommendation",
+            )
             return False
 
 

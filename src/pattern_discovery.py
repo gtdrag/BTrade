@@ -366,7 +366,7 @@ Requirements:
     def __init__(
         self,
         api_key: Optional[str] = None,
-        model: str = "claude-sonnet-4-20250514",
+        model: str = "claude-opus-4-5-20251101",
         lookback_days: int = 90,
     ):
         """Initialize the pattern analyzer.
@@ -1109,7 +1109,7 @@ def get_pattern_registry(patterns_file: Optional[Path] = None) -> PatternRegistr
 
 def get_pattern_analyzer(
     api_key: Optional[str] = None,
-    model: str = "claude-sonnet-4-20250514",
+    model: str = "claude-opus-4-5-20251101",
 ) -> PatternAnalyzer:
     """Get or create pattern analyzer singleton."""
     global _analyzer_instance

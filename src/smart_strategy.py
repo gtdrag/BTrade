@@ -26,6 +26,7 @@ import pandas as pd
 
 from .data_providers import AlpacaProvider, create_data_manager
 from .database import Database, get_database
+from .error_alerting import AlertSeverity, alert_error
 
 logger = logging.getLogger(__name__)
 
@@ -364,6 +365,12 @@ class SmartStrategy:
 
         except Exception as e:
             logger.warning(f"Failed to get weekend gap: {e}")
+            alert_error(
+                AlertSeverity.WARNING,
+                f"Failed to get weekend gap data: {e}",
+                {"is_monday": is_monday},
+                category="weekend_gap",
+            )
             return WeekendGapInfo(
                 alert_level=AlertLevel.NONE,
                 btc_friday_close=0,
@@ -457,6 +464,13 @@ class SmartStrategy:
 
         except Exception as e:
             logger.warning(f"Failed to get BTC overnight status: {e}")
+            # Alert on this - it's a critical trade filter
+            alert_error(
+                AlertSeverity.WARNING,
+                f"Failed to get BTC overnight status: {e}",
+                {"action": "skipping_trade"},
+                category="btc_overnight",
+            )
             # On error, default to not trading (conservative)
             return BTCOvernightStatus(
                 btc_close_yesterday=0,
@@ -525,6 +539,11 @@ class SmartStrategy:
 
         except Exception as e:
             logger.warning(f"Failed to get crash day status: {e}")
+            alert_error(
+                AlertSeverity.WARNING,
+                f"Failed to get crash day status: {e}",
+                category="crash_day_status",
+            )
             return CrashDayStatus(
                 is_triggered=False,
                 current_drop_pct=0,
@@ -596,6 +615,11 @@ class SmartStrategy:
 
         except Exception as e:
             logger.warning(f"Failed to get pump day status: {e}")
+            alert_error(
+                AlertSeverity.WARNING,
+                f"Failed to get pump day status: {e}",
+                category="pump_day_status",
+            )
             return PumpDayStatus(
                 is_triggered=False,
                 current_gain_pct=0,
