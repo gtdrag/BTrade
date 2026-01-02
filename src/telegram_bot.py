@@ -2231,14 +2231,21 @@ class TelegramNotifier:
             logger.warning("TELEGRAM_BOT_TOKEN not set - notifications disabled")
 
     def _run_async(self, coro):
-        """Run an async coroutine synchronously."""
-        try:
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
+        """Run an async coroutine synchronously.
 
-        return loop.run_until_complete(coro)
+        Handles all event loop states properly:
+        - If running loop exists: use run_coroutine_threadsafe
+        - If no running loop: use asyncio.run() for safe creation/cleanup
+        """
+        try:
+            # Check if there's already a running event loop
+            loop = asyncio.get_running_loop()
+            # Running loop exists - schedule on it and wait for result
+            future = asyncio.run_coroutine_threadsafe(coro, loop)
+            return future.result(timeout=30)
+        except RuntimeError:
+            # No running loop - use asyncio.run() which safely creates/destroys a loop
+            return asyncio.run(coro)
 
     def send_message(self, text: str) -> bool:
         """Send a simple message."""
