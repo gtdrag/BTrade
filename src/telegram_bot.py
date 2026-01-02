@@ -47,6 +47,29 @@ def escape_markdown(text: str) -> str:
     )
 
 
+async def run_sync_in_thread(func, *args, **kwargs):
+    """
+    Run a synchronous function in a thread executor to avoid event loop conflicts.
+
+    This is necessary because some libraries (like requests_oauthlib) don't play
+    well with asyncio when called from within an async context. Running them in
+    a thread isolates them from the event loop entirely.
+    """
+    import concurrent.futures
+    import functools
+
+    loop = asyncio.get_running_loop()
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        if kwargs:
+            func_with_args = functools.partial(func, *args, **kwargs)
+            return await loop.run_in_executor(executor, func_with_args)
+        elif args:
+            func_with_args = functools.partial(func, *args)
+            return await loop.run_in_executor(executor, func_with_args)
+        else:
+            return await loop.run_in_executor(executor, func)
+
+
 class ApprovalResult(Enum):
     """Result of trade approval request."""
 
@@ -532,7 +555,8 @@ class TelegramBot:
             return
 
         try:
-            portfolio = self.trading_bot.get_portfolio_value()
+            # Run in thread to avoid event loop conflicts with HTTP libraries
+            portfolio = await run_sync_in_thread(self.trading_bot.get_portfolio_value)
             cash = portfolio.get("cash", 0)
             total_value = portfolio.get("total_value", cash)
             positions_value = total_value - cash
@@ -549,7 +573,7 @@ class TelegramBot:
 
             await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
         except Exception as e:
-            await update.message.reply_text(f"❌ Error fetching balance: {e}")
+            await update.message.reply_text(f"❌ Error fetching balance: {escape_markdown(str(e))}")
 
     async def _cmd_positions(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /positions command - show current positions."""
@@ -562,7 +586,8 @@ class TelegramBot:
             return
 
         try:
-            portfolio = self.trading_bot.get_portfolio_value()
+            # Run in thread to avoid event loop conflicts with HTTP libraries
+            portfolio = await run_sync_in_thread(self.trading_bot.get_portfolio_value)
             positions = portfolio.get("positions", [])
 
             if not positions:
@@ -621,7 +646,8 @@ class TelegramBot:
                 )
                 return
 
-            signal = self.trading_bot.strategy.get_today_signal()
+            # Run in thread to avoid event loop conflicts with HTTP libraries
+            signal = await run_sync_in_thread(self.trading_bot.strategy.get_today_signal)
             signal_name = signal.signal.value.upper().replace("_", " ")
 
             if signal.signal.value == "cash":
@@ -1828,13 +1854,7 @@ class TelegramBot:
 
         try:
             # Get authorization URL - run in thread to avoid event loop conflicts
-            import concurrent.futures
-
-            loop = asyncio.get_running_loop()
-            with concurrent.futures.ThreadPoolExecutor() as executor:
-                auth_url, request_token = await loop.run_in_executor(
-                    executor, temp_client.get_authorization_url
-                )
+            auth_url, request_token = await run_sync_in_thread(temp_client.get_authorization_url)
 
             # Store request token for /verify command
             self._pending_auth_request = {
@@ -1909,15 +1929,9 @@ class TelegramBot:
             request_token = self._pending_auth_request["request_token"]
 
             # Complete authorization - run in thread to avoid event loop conflicts
-            import concurrent.futures
-            import functools
-
-            loop = asyncio.get_running_loop()
-            with concurrent.futures.ThreadPoolExecutor() as executor:
-                success = await loop.run_in_executor(
-                    executor,
-                    functools.partial(client.complete_authorization, verifier, request_token),
-                )
+            success = await run_sync_in_thread(
+                client.complete_authorization, verifier, request_token
+            )
 
             if success:
                 # Update the trading bot's client
