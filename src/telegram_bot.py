@@ -1827,8 +1827,14 @@ class TelegramBot:
             return
 
         try:
-            # Get authorization URL
-            auth_url, request_token = temp_client.get_authorization_url()
+            # Get authorization URL - run in thread to avoid event loop conflicts
+            import concurrent.futures
+
+            loop = asyncio.get_running_loop()
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                auth_url, request_token = await loop.run_in_executor(
+                    executor, temp_client.get_authorization_url
+                )
 
             # Store request token for /verify command
             self._pending_auth_request = {
@@ -1902,8 +1908,16 @@ class TelegramBot:
             client = self._pending_auth_request["client"]
             request_token = self._pending_auth_request["request_token"]
 
-            # Complete authorization
-            success = client.complete_authorization(verifier, request_token)
+            # Complete authorization - run in thread to avoid event loop conflicts
+            import concurrent.futures
+            import functools
+
+            loop = asyncio.get_running_loop()
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                success = await loop.run_in_executor(
+                    executor,
+                    functools.partial(client.complete_authorization, verifier, request_token),
+                )
 
             if success:
                 # Update the trading bot's client
