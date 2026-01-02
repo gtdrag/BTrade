@@ -27,6 +27,26 @@ from telegram.ext import (
 logger = logging.getLogger(__name__)
 
 
+def escape_markdown(text: str) -> str:
+    """
+    Escape special characters for Telegram Markdown parsing.
+
+    Telegram's Markdown parser fails if these characters appear unmatched.
+    This function escapes them to prevent parse errors.
+    """
+    if not text:
+        return ""
+    # Escape in specific order to avoid double-escaping
+    return (
+        str(text)
+        .replace("\\", "\\\\")  # Escape backslashes first
+        .replace("_", "\\_")
+        .replace("*", "\\*")
+        .replace("`", "\\`")
+        .replace("[", "\\[")
+    )
+
+
 class ApprovalResult(Enum):
     """Result of trade approval request."""
 
@@ -188,9 +208,11 @@ class TelegramBot:
         try:
             if self.chat_id:
                 error_msg = str(context.error)[:200] if context.error else "Unknown error"
+                # Escape markdown to prevent parse errors from error text
+                safe_error = escape_markdown(error_msg)
                 await context.bot.send_message(
                     chat_id=self.chat_id,
-                    text=f"⚠️ Bot error occurred:\n`{error_msg}`\n\nBot will continue running.",
+                    text=f"⚠️ Bot error occurred:\n{safe_error}\n\nBot will continue running.",
                     parse_mode="Markdown",
                 )
         except Exception as e:
@@ -554,7 +576,7 @@ class TelegramBot:
             lines = [f"📊 *Open Positions ({mode})*\n"]
 
             for pos in positions:
-                symbol = pos.get("symbol", "?")
+                symbol = escape_markdown(pos.get("symbol", "?"))
                 shares = pos.get("shares", 0)
                 entry = pos.get("entry_price", 0)
                 current = pos.get("current_price", 0)
@@ -572,7 +594,9 @@ class TelegramBot:
 
             await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
         except Exception as e:
-            await update.message.reply_text(f"❌ Error fetching positions: {e}")
+            await update.message.reply_text(
+                f"❌ Error fetching positions: {escape_markdown(str(e))}"
+            )
 
     async def _cmd_signal(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /signal command - check today's signal."""
@@ -601,26 +625,28 @@ class TelegramBot:
             signal_name = signal.signal.value.upper().replace("_", " ")
 
             if signal.signal.value == "cash":
+                reason = escape_markdown(signal.reason or "No qualifying conditions")
                 await update.message.reply_text(
                     f"📭 *No Signal Today*\n\n"
                     f"Day: {day_name}\n"
-                    f"Reason: {signal.reason or 'No qualifying conditions'}\n\n"
+                    f"Reason: {reason}\n\n"
                     "Staying in cash.",
                     parse_mode="Markdown",
                 )
             else:
                 emoji = self._get_signal_emoji(signal.signal.value)
-                etf = signal.etf if hasattr(signal, "etf") else "TBD"
+                etf = escape_markdown(signal.etf if hasattr(signal, "etf") else "TBD")
+                reason = escape_markdown(signal.reason or "Conditions met")
 
                 await update.message.reply_text(
                     f"{emoji} *Signal: {signal_name}*\n\n"
                     f"Day: {day_name}\n"
                     f"ETF: {etf}\n"
-                    f"Reason: {signal.reason or 'Conditions met'}",
+                    f"Reason: {reason}",
                     parse_mode="Markdown",
                 )
         except Exception as e:
-            await update.message.reply_text(f"❌ Error checking signal: {e}")
+            await update.message.reply_text(f"❌ Error checking signal: {escape_markdown(str(e))}")
 
     async def _cmd_jobs(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /jobs command - list scheduled jobs."""
@@ -648,14 +674,14 @@ class TelegramBot:
             for job in sorted_jobs:
                 time_str = job.next_run_time.strftime("%I:%M %p")
                 date_str = job.next_run_time.strftime("%b %d")
-                lines.append(f"• {time_str} ({date_str}): {job.name}")
+                lines.append(f"• {time_str} ({date_str}): {escape_markdown(job.name)}")
 
             if self._is_paused:
                 lines.append("\n⏸ _Scheduler is PAUSED_")
 
             await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
         except Exception as e:
-            await update.message.reply_text(f"❌ Error fetching jobs: {e}")
+            await update.message.reply_text(f"❌ Error fetching jobs: {escape_markdown(str(e))}")
 
     async def _cmd_logs(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /logs command - view recent activity logs."""
@@ -712,9 +738,9 @@ class TelegramBot:
                 elif "SCHEDULER" in level:
                     emoji = "⏰"
 
-                # Truncate event if too long
+                # Truncate event if too long and escape markdown characters
                 evt_short = evt[:40] + "..." if len(evt) > 40 else evt
-                lines.append(f"{emoji} {time_str}: {evt_short}")
+                lines.append(f"{emoji} {time_str}: {escape_markdown(evt_short)}")
 
             # Add summary of event types
             signal_checks = sum(1 for e in events if "SIGNAL" in e.get("level", ""))
@@ -729,7 +755,7 @@ class TelegramBot:
             await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
         except Exception as e:
-            await update.message.reply_text(f"❌ Error fetching logs: {e}")
+            await update.message.reply_text(f"❌ Error fetching logs: {escape_markdown(str(e))}")
 
     async def _cmd_analyze(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /analyze command - run pattern discovery analysis with raw data."""
@@ -808,8 +834,8 @@ class TelegramBot:
                     registry.add_pattern(pattern)
 
                 pattern_list = "\n".join(
-                    f"• *{p.display_name}*\n"
-                    f"  {p.signal.value.upper()} {p.instrument} @ {p.entry_time}-{p.exit_time}\n"
+                    f"• *{escape_markdown(p.display_name)}*\n"
+                    f"  {escape_markdown(p.signal.value.upper())} {escape_markdown(p.instrument)} @ {escape_markdown(p.entry_time)}-{escape_markdown(p.exit_time)}\n"
                     f"  {p.confidence:.0%} win rate, {p.expected_edge:.2f}% edge"
                     for p in new_patterns
                 )
@@ -825,7 +851,7 @@ class TelegramBot:
                 )
 
         except Exception as e:
-            await update.message.reply_text(f"❌ Analysis failed: {e}")
+            await update.message.reply_text(f"❌ Analysis failed: {escape_markdown(str(e))}")
 
     async def _cmd_patterns(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /patterns command - view discovered patterns."""
@@ -858,15 +884,15 @@ class TelegramBot:
                 lines.append("\n🟢 *LIVE* (actively trading):")
                 for p in live:
                     lines.append(
-                        f"  • {p.display_name}\n"
-                        f"    {p.signal.value.upper()} {p.instrument} @ {p.entry_time}"
+                        f"  • {escape_markdown(p.display_name)}\n"
+                        f"    {escape_markdown(p.signal.value.upper())} {escape_markdown(p.instrument)} @ {escape_markdown(p.entry_time)}"
                     )
 
             if paper:
                 lines.append("\n🟡 *PAPER* (validation):")
                 for p in paper:
                     lines.append(
-                        f"  • {p.display_name}\n"
+                        f"  • {escape_markdown(p.display_name)}\n"
                         f"    {p.validation_trades} trades, ${p.validation_pnl:.2f} P&L"
                     )
 
@@ -874,7 +900,7 @@ class TelegramBot:
                 lines.append("\n⚪ *CANDIDATE* (pending validation):")
                 for p in candidates:
                     lines.append(
-                        f"  • {p.display_name}\n"
+                        f"  • {escape_markdown(p.display_name)}\n"
                         f"    {p.confidence:.0%} conf, {p.expected_edge:.2f}% edge"
                     )
 
@@ -883,7 +909,7 @@ class TelegramBot:
             await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
         except Exception as e:
-            await update.message.reply_text(f"❌ Error: {e}")
+            await update.message.reply_text(f"❌ Error: {escape_markdown(str(e))}")
 
     async def _cmd_analyses(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /analyses command - view past Claude pattern analyses."""
@@ -930,22 +956,24 @@ class TelegramBot:
                 except Exception:
                     date_str = timestamp[:16] if timestamp else "?"
 
-                model = details.get("model", "unknown")
+                model = escape_markdown(details.get("model", "unknown"))
                 lookback = details.get("lookback_days", "?")
                 response = details.get("response", "")
 
                 # Truncate response for display
                 if len(response) > 500:
                     response = response[:500] + "..."
+                # Escape the response but preserve code block formatting
+                response_escaped = escape_markdown(response)
 
                 lines.append(f"\n*{i}. {date_str}*")
                 lines.append(f"Model: `{model}` | Lookback: {lookback} days")
-                lines.append(f"```\n{response}\n```")
+                lines.append(f"```\n{response_escaped}\n```")
 
             await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
         except Exception as e:
-            await update.message.reply_text(f"❌ Error: {e}")
+            await update.message.reply_text(f"❌ Error: {escape_markdown(str(e))}")
 
     async def _cmd_promote(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /promote command - promote a pattern to paper or live status."""
@@ -965,10 +993,10 @@ class TelegramBot:
             pattern_list = ""
             if candidates:
                 pattern_list += "\n*Candidates:*\n"
-                pattern_list += "\n".join(f"  • `{p.name}`" for p in candidates)
+                pattern_list += "\n".join(f"  • `{escape_markdown(p.name)}`" for p in candidates)
             if paper:
                 pattern_list += "\n*Paper:*\n"
-                pattern_list += "\n".join(f"  • `{p.name}`" for p in paper)
+                pattern_list += "\n".join(f"  • `{escape_markdown(p.name)}`" for p in paper)
 
             if not pattern_list:
                 pattern_list = "\nNo patterns available to promote."
@@ -982,6 +1010,7 @@ class TelegramBot:
             return
 
         pattern_name = args[0]
+        pattern_name_safe = escape_markdown(pattern_name)
         target_status = args[1].lower()
 
         if target_status not in ("paper", "live"):
@@ -996,7 +1025,7 @@ class TelegramBot:
 
         if not pattern:
             await update.message.reply_text(
-                f"❌ Pattern `{pattern_name}` not found.\nUse /patterns to see available patterns.",
+                f"❌ Pattern `{pattern_name_safe}` not found.\nUse /patterns to see available patterns.",
                 parse_mode="Markdown",
             )
             return
@@ -1009,7 +1038,7 @@ class TelegramBot:
             # Warn about skipping paper validation
             await update.message.reply_text(
                 f"⚠️ *Warning*: Promoting directly to LIVE skips paper validation.\n\n"
-                f"Pattern: `{pattern_name}`\n"
+                f"Pattern: `{pattern_name_safe}`\n"
                 f"From: {old_status.value} → To: {new_status.value}\n\n"
                 f"Proceeding with promotion...",
                 parse_mode="Markdown",
@@ -1021,13 +1050,13 @@ class TelegramBot:
             emoji = "🟡" if new_status == PatternStatus.PAPER else "🟢"
             await update.message.reply_text(
                 f"{emoji} *Pattern Promoted*\n\n"
-                f"Pattern: `{pattern_name}`\n"
+                f"Pattern: `{pattern_name_safe}`\n"
                 f"Status: {old_status.value} → *{new_status.value}*\n\n"
                 f"Use /patterns to view all patterns.",
                 parse_mode="Markdown",
             )
         else:
-            await update.message.reply_text(f"❌ Failed to promote pattern `{pattern_name}`.")
+            await update.message.reply_text(f"❌ Failed to promote pattern `{pattern_name_safe}`.")
 
     async def _cmd_hedge(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /hedge command - view and control trailing hedge settings."""
@@ -1072,12 +1101,12 @@ class TelegramBot:
                     f"Enabled: {'✅' if status['enabled'] else '❌'}",
                     "",
                     "*Active Position:*",
-                    f"  • {pos['instrument']}: {pos['shares']} shares",
+                    f"  • {escape_markdown(pos['instrument'])}: {pos['shares']} shares",
                     f"  • Entry: ${pos['entry_price']:.2f}",
                     f"  • Value: ${pos['original_value']:.2f}",
                     "",
                     "*Hedge Status:*",
-                    f"  • Instrument: {hedge['instrument']}",
+                    f"  • Instrument: {escape_markdown(hedge['instrument'])}",
                     f"  • Shares: {hedge['shares']}",
                     f"  • Coverage: {hedge['total_pct']:.1f}%",
                     f"  • Tiers triggered: {hedge['tiers_triggered']}/{hedge['tiers_total']}",
@@ -1150,7 +1179,9 @@ class TelegramBot:
             else:
                 header = "📊 *Strategy Review Complete*\n✅ No changes needed\n\n"
 
-            message = header + result.full_report
+            # Escape AI-generated content to prevent Markdown parsing errors
+            report_escaped = escape_markdown(result.full_report)
+            message = header + report_escaped
 
             # Truncate if too long for Telegram (max 4096 chars)
             if len(message) > 4000:
@@ -1164,13 +1195,19 @@ class TelegramBot:
 
                 for i, rec in enumerate(result.recommendations):
                     # Build recommendation message with approval buttons
+                    # Escape AI/dynamic content to prevent Markdown parsing errors
+                    display_name = escape_markdown(rec.to_display_name())
+                    current_val = escape_markdown(str(rec.current_value))
+                    recommended_val = escape_markdown(str(rec.recommended_value))
+                    reason = escape_markdown(rec.reason)
+
                     rec_msg = (
                         f"🔧 *Parameter Change Recommendation {i + 1}*\n\n"
-                        f"*{rec.to_display_name()}*\n"
-                        f"Current: `{rec.current_value}`\n"
-                        f"Recommended: `{rec.recommended_value}`\n"
+                        f"*{display_name}*\n"
+                        f"Current: `{current_val}`\n"
+                        f"Recommended: `{recommended_val}`\n"
                         f"Confidence: {rec.confidence.upper()}\n\n"
-                        f"_{rec.reason}_"
+                        f"_{reason}_"
                     )
 
                     # Show backtest return if available (proves it was actually tested)
@@ -1178,7 +1215,7 @@ class TelegramBot:
                         rec_msg += f"\n\n📊 Backtest Return: `{rec.backtest_return:+.2f}%`"
 
                     if rec.expected_improvement:
-                        rec_msg += f"\n📈 Expected: {rec.expected_improvement}"
+                        rec_msg += f"\n📈 Expected: {escape_markdown(rec.expected_improvement)}"
 
                     keyboard = InlineKeyboardMarkup(
                         [
@@ -1225,13 +1262,13 @@ class TelegramBot:
             pattern_list = ""
             if live:
                 pattern_list += "\n*Live:*\n"
-                pattern_list += "\n".join(f"  • `{p.name}`" for p in live)
+                pattern_list += "\n".join(f"  • `{escape_markdown(p.name)}`" for p in live)
             if paper:
                 pattern_list += "\n*Paper:*\n"
-                pattern_list += "\n".join(f"  • `{p.name}`" for p in paper)
+                pattern_list += "\n".join(f"  • `{escape_markdown(p.name)}`" for p in paper)
             if candidates:
                 pattern_list += "\n*Candidates:*\n"
-                pattern_list += "\n".join(f"  • `{p.name}`" for p in candidates)
+                pattern_list += "\n".join(f"  • `{escape_markdown(p.name)}`" for p in candidates)
 
             if not pattern_list:
                 pattern_list = "\nNo patterns available to retire."
@@ -1243,14 +1280,16 @@ class TelegramBot:
             return
 
         pattern_name = args[0]
+        pattern_name_safe = escape_markdown(pattern_name)
         reason = " ".join(args[1:]) if len(args) > 1 else "Manually retired"
+        reason_safe = escape_markdown(reason)
 
         registry = get_pattern_registry()
         pattern = registry.get_pattern(pattern_name)
 
         if not pattern:
             await update.message.reply_text(
-                f"❌ Pattern `{pattern_name}` not found.\nUse /patterns to see available patterns.",
+                f"❌ Pattern `{pattern_name_safe}` not found.\nUse /patterns to see available patterns.",
                 parse_mode="Markdown",
             )
             return
@@ -1261,14 +1300,14 @@ class TelegramBot:
         if success:
             await update.message.reply_text(
                 f"🔴 *Pattern Retired*\n\n"
-                f"Pattern: `{pattern_name}`\n"
+                f"Pattern: `{pattern_name_safe}`\n"
                 f"Previous status: {old_status.value}\n"
-                f"Reason: {reason}\n\n"
+                f"Reason: {reason_safe}\n\n"
                 f"The pattern will no longer trade.",
                 parse_mode="Markdown",
             )
         else:
-            await update.message.reply_text(f"❌ Failed to retire pattern `{pattern_name}`.")
+            await update.message.reply_text(f"❌ Failed to retire pattern `{pattern_name_safe}`.")
 
     # ========== Backtesting Commands ==========
 
@@ -1429,12 +1468,13 @@ class TelegramBot:
 
         except ImportError as e:
             await update.message.reply_text(
-                f"❌ Missing dependency: {e}\n\n" "Install with: `pip install yfinance`",
+                f"❌ Missing dependency: {escape_markdown(str(e))}\n\n"
+                "Install with: `pip install yfinance`",
                 parse_mode="Markdown",
             )
         except Exception as e:
             logger.error(f"Backtest failed: {e}")
-            await update.message.reply_text(f"❌ Backtest failed: {e}")
+            await update.message.reply_text(f"❌ Backtest failed: {escape_markdown(str(e))}")
 
     # ========== Historical Simulation Commands ==========
 
@@ -1710,8 +1750,8 @@ class TelegramBot:
                         parse_mode="Markdown",
                     )
             else:
-                # Send via Telegram
-                report = result.format_report()
+                # Send via Telegram - escape AI-generated content
+                report = escape_markdown(result.format_report())
 
                 # Split if too long for Telegram
                 if len(report) > 4000:
@@ -1727,7 +1767,7 @@ class TelegramBot:
         except Exception as e:
             logger.error(f"Simulation failed: {e}")
             await status_msg.edit_text(
-                f"❌ *Simulation Failed*\n\nError: {e}\n\nCheck logs for details.",
+                f"❌ *Simulation Failed*\n\nError: {escape_markdown(str(e))}\n\nCheck logs for details.",
                 parse_mode="Markdown",
             )
 
@@ -1998,12 +2038,17 @@ class TelegramBot:
             reviewer = get_strategy_reviewer()
             success = reviewer.apply_recommendation(rec)
 
+            # Escape dynamic content
+            display_name = escape_markdown(rec.to_display_name())
+            current_val = escape_markdown(str(rec.current_value))
+            recommended_val = escape_markdown(str(rec.recommended_value))
+
             if success:
                 await query.edit_message_text(
                     text=(
                         f"✅ *Parameter Updated!*\n\n"
-                        f"*{rec.to_display_name()}*\n"
-                        f"`{rec.current_value}` → `{rec.recommended_value}`\n\n"
+                        f"*{display_name}*\n"
+                        f"`{current_val}` → `{recommended_val}`\n\n"
                         f"_Change applied and saved to database._\n\n"
                         f"💾 This change persists across restarts."
                     ),
@@ -2016,11 +2061,13 @@ class TelegramBot:
                 )
 
         elif data.startswith("reject_param_"):
+            display_name = escape_markdown(rec.to_display_name())
+            current_val = escape_markdown(str(rec.current_value))
             await query.edit_message_text(
                 text=(
                     f"❌ *Recommendation Rejected*\n\n"
-                    f"*{rec.to_display_name()}*\n"
-                    f"Keeping current value: `{rec.current_value}`"
+                    f"*{display_name}*\n"
+                    f"Keeping current value: `{current_val}`"
                 ),
                 parse_mode="Markdown",
             )
@@ -2070,13 +2117,15 @@ class TelegramBot:
             # Generate unique callback ID
             callback_id = f"{signal_type}_{datetime.now().strftime('%H%M%S')}"
 
-            # Create message
+            # Create message - escape dynamic content
             emoji = self._get_signal_emoji(signal_type)
+            reason_safe = escape_markdown(reason)
+            etf_safe = escape_markdown(etf)
             message = (
                 f"{emoji} *{signal_type.replace('_', ' ').upper()} SIGNAL*\n\n"
                 f"📊 *Details:*\n"
-                f"• Reason: {reason}\n"
-                f"• ETF: {etf}\n"
+                f"• Reason: {reason_safe}\n"
+                f"• ETF: {etf_safe}\n"
                 f"• Shares: {shares}\n"
                 f"• Price: ${price:.2f}\n"
                 f"• Total: ${position_value:.2f}\n\n"
@@ -2131,10 +2180,12 @@ class TelegramBot:
     ):
         """Send confirmation that a trade was executed."""
         emoji = "🟢" if action.lower() == "buy" else "🔴"
+        etf_safe = escape_markdown(etf)
+        signal_safe = escape_markdown(signal_type)
         await self.send_message(
             f"{emoji} *TRADE EXECUTED*\n\n"
-            f"• Signal: {signal_type}\n"
-            f"• Action: {action.upper()} {shares} {etf}\n"
+            f"• Signal: {signal_safe}\n"
+            f"• Action: {action.upper()} {shares} {etf_safe}\n"
             f"• Price: ${price:.2f}\n"
             f"• Total: ${total:.2f}"
         )
@@ -2151,10 +2202,11 @@ class TelegramBot:
         """Send notification that a position was closed."""
         emoji = "📈" if pnl >= 0 else "📉"
         pnl_sign = "+" if pnl >= 0 else ""
+        etf_safe = escape_markdown(etf)
 
         await self.send_message(
             f"{emoji} *POSITION CLOSED*\n\n"
-            f"• ETF: {etf}\n"
+            f"• ETF: {etf_safe}\n"
             f"• Shares: {shares}\n"
             f"• Entry: ${entry_price:.2f}\n"
             f"• Exit: ${exit_price:.2f}\n"
@@ -2183,10 +2235,13 @@ class TelegramBot:
 
     async def send_error_alert(self, error_type: str, message: str):
         """Send an error alert."""
+        # Escape error content to prevent Markdown parsing issues
+        error_type_safe = escape_markdown(error_type)
+        message_safe = escape_markdown(message)
         await self.send_message(
             f"⚠️ *ERROR ALERT*\n\n"
-            f"• Type: {error_type}\n"
-            f"• Message: {message}\n\n"
+            f"• Type: {error_type_safe}\n"
+            f"• Message: {message_safe}\n\n"
             f"Please check the bot logs."
         )
 
