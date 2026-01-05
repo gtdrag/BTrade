@@ -126,9 +126,9 @@ class TradingWorker:
             mean_reversion_enabled=saved_params.get("mean_reversion_enabled", True),
             mean_reversion_threshold=saved_params.get("mr_threshold", -2.0),
             crash_day_enabled=saved_params.get("crash_day_enabled", True),
-            crash_day_threshold=saved_params.get("crash_threshold", -2.0),
+            crash_day_threshold=saved_params.get("crash_threshold", -1.5),
             pump_day_enabled=saved_params.get("pump_day_enabled", True),
-            pump_day_threshold=saved_params.get("pump_threshold", 2.0),
+            pump_day_threshold=saved_params.get("pump_threshold", 1.5),
             ten_am_dump_enabled=saved_params.get("ten_am_dump_enabled", True),
         )
 

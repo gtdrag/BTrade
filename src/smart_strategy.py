@@ -74,7 +74,7 @@ class StrategyConfig:
 
     # Crash day settings (intraday reactive)
     crash_day_enabled: bool = True
-    crash_day_threshold: float = -2.0  # Buy SBIT when IBIT drops this much intraday
+    crash_day_threshold: float = -1.5  # Buy SBIT when IBIT drops this much intraday
     crash_day_check_times: List[str] = field(
         default_factory=lambda: ["09:45", "10:00", "10:15", "10:30", "10:45", "11:00", "11:30"]
     )
@@ -82,7 +82,7 @@ class StrategyConfig:
 
     # Pump day settings (intraday reactive - opposite of crash day)
     pump_day_enabled: bool = True
-    pump_day_threshold: float = 2.0  # Buy BITU when IBIT rises this much intraday
+    pump_day_threshold: float = 1.5  # Buy BITU when IBIT rises this much intraday
     pump_day_check_times: List[str] = field(
         default_factory=lambda: ["09:45", "10:00", "10:15", "10:30", "10:45", "11:00", "11:30"]
     )
