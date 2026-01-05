@@ -92,7 +92,7 @@ def _get_telegram_bot():
         return None
 
     try:
-        from .telegram_bot import TelegramBot
+        from .telegram_bot import TelegramBot, escape_markdown  # noqa: F401
 
         _telegram_bot = TelegramBot(token, chat_id)
         return _telegram_bot
@@ -108,6 +108,8 @@ async def _send_telegram_alert(
     context: Optional[Dict[str, Any]] = None,
 ) -> bool:
     """Send alert via Telegram (async)."""
+    from .telegram_bot import escape_markdown
+
     bot = _get_telegram_bot()
     if bot is None:
         return False
@@ -117,7 +119,7 @@ async def _send_telegram_alert(
         if bot._app is None:
             await bot.initialize()
 
-        # Format the alert
+        # Format the alert - escape dynamic content to prevent Markdown parse errors
         emoji_map = {
             AlertSeverity.CRITICAL: "🚨",
             AlertSeverity.WARNING: "⚠️",
@@ -128,12 +130,15 @@ async def _send_telegram_alert(
 
         alert_text = (
             f"{emoji} *{severity.value.upper()} ALERT*\n\n"
-            f"*Category:* `{category}`\n"
-            f"*Message:* {message}"
+            f"*Category:* `{escape_markdown(category)}`\n"
+            f"*Message:* {escape_markdown(message)}"
         )
 
         if context:
-            context_str = "\n".join(f"  • {k}: `{v}`" for k, v in context.items())
+            context_str = "\n".join(
+                f"  • {escape_markdown(str(k))}: `{escape_markdown(str(v))}`"
+                for k, v in context.items()
+            )
             alert_text += f"\n\n*Context:*\n{context_str}"
 
         alert_text += f"\n\n_Time: {datetime.now().strftime('%H:%M:%S ET')}_"

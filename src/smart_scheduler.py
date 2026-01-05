@@ -14,7 +14,7 @@ from apscheduler.triggers.cron import CronTrigger
 
 from .database import get_database
 from .smart_strategy import Signal
-from .telegram_bot import TelegramBot
+from .telegram_bot import TelegramBot, escape_markdown
 from .trading_bot import TradeResult, TradingBot
 from .utils import ET, get_et_now, is_trading_day, run_async
 
@@ -1135,7 +1135,7 @@ class SmartScheduler:
                         registry.add_pattern(pattern)
 
                     pattern_list = "\n".join(
-                        f"• {p.display_name} ({p.instrument}, {p.confidence:.0%} conf)"
+                        f"• {escape_markdown(p.display_name)} ({escape_markdown(p.instrument)}, {p.confidence:.0%} conf)"
                         for p in new_patterns
                     )
                     message = (
@@ -1157,7 +1157,9 @@ class SmartScheduler:
                 # Send error notification
                 if self.telegram_bot:
                     try:
-                        await self.telegram_bot.send_message(f"❌ Pattern analysis failed: {e}")
+                        await self.telegram_bot.send_message(
+                            f"❌ Pattern analysis failed: {escape_markdown(str(e))}"
+                        )
                     except Exception:
                         pass
 
@@ -1180,8 +1182,8 @@ class SmartScheduler:
                 else:
                     header = "📊 *Strategy Review*\n✅ No changes needed\n\n"
 
-                # The full report is already formatted by Claude
-                message = header + recommendation.full_report
+                # The full report is from Claude - escape special chars
+                message = header + escape_markdown(recommendation.full_report)
 
                 # Truncate if too long for Telegram (max 4096 chars)
                 if len(message) > 4000:
@@ -1203,7 +1205,9 @@ class SmartScheduler:
                 # Send error notification
                 if self.telegram_bot:
                     try:
-                        await self.telegram_bot.send_message(f"❌ Strategy review failed: {e}")
+                        await self.telegram_bot.send_message(
+                            f"❌ Strategy review failed: {escape_markdown(str(e))}"
+                        )
                     except Exception:
                         pass
 

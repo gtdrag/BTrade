@@ -24,7 +24,7 @@ load_dotenv()
 from .database import get_database  # noqa: E402
 from .etrade_client import create_etrade_client  # noqa: E402
 from .smart_scheduler import SmartScheduler  # noqa: E402
-from .telegram_bot import TelegramBot  # noqa: E402
+from .telegram_bot import TelegramBot, escape_markdown  # noqa: E402
 from .trading_bot import create_trading_bot  # noqa: E402
 from .utils import get_et_now  # noqa: E402
 
@@ -241,7 +241,7 @@ class TradingWorker:
             lines = []
             for job in sorted_jobs:
                 time_str = job.next_run_time.strftime("%I:%M %p")
-                lines.append(f"• {time_str}: {job.name}")
+                lines.append(f"• {time_str}: {escape_markdown(job.name)}")
 
             return "\n".join(lines) if lines else "No upcoming jobs"
         except Exception:

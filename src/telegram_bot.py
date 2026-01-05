@@ -335,7 +335,7 @@ class TelegramBot:
                     lines.append("\n📅 *Next Jobs:*")
                     for job in next_jobs:
                         time_str = job.next_run_time.strftime("%I:%M %p")
-                        lines.append(f"• {time_str}: {job.name}")
+                        lines.append(f"• {time_str}: {escape_markdown(job.name)}")
             except Exception:
                 pass
 
