@@ -287,21 +287,30 @@ def sync_alert_error(
 
     _alert_state.record_alert(category, severity)
 
-    # Send synchronously - handle both running loop and no-loop cases
+    # Send synchronously - handle all loop states (running, closed, none)
     try:
         # Check if there's already a running loop
         loop = asyncio.get_running_loop()
-        # There's a running loop - use run_coroutine_threadsafe for thread-safety
-        future = asyncio.run_coroutine_threadsafe(
-            _send_telegram_alert(severity, category, message, context), loop
-        )
-        future.result(timeout=10)  # Wait up to 10 seconds
-    except RuntimeError:
-        # No running loop - safe to use asyncio.run()
-        try:
+
+        # Check if loop is closed (can happen after errors/restarts)
+        if loop.is_closed():
+            logger.debug("alert_error: Running loop is closed, creating new one")
             asyncio.run(_send_telegram_alert(severity, category, message, context))
-        except Exception as e:
-            logger.warning(f"Failed to send sync alert: {e}")
+        else:
+            # There's a running, open loop - use run_coroutine_threadsafe for thread-safety
+            future = asyncio.run_coroutine_threadsafe(
+                _send_telegram_alert(severity, category, message, context), loop
+            )
+            future.result(timeout=10)  # Wait up to 10 seconds
+    except RuntimeError as e:
+        # No running loop - safe to use asyncio.run()
+        if "no running" in str(e).lower() or "no current" in str(e).lower():
+            try:
+                asyncio.run(_send_telegram_alert(severity, category, message, context))
+            except Exception as send_err:
+                logger.warning(f"Failed to send sync alert: {send_err}")
+        else:
+            logger.warning(f"Unexpected error in alert_error: {e}")
 
 
 # Context manager for alerting on exceptions

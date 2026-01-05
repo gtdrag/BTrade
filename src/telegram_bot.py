@@ -7,6 +7,8 @@ waits for user response before executing trades.
 """
 
 import asyncio
+import concurrent.futures
+import functools
 import logging
 import os
 from dataclasses import dataclass
@@ -47,6 +49,21 @@ def escape_markdown(text: str) -> str:
     )
 
 
+# Persistent thread pool for sync operations - avoids creating/destroying executors
+# which can cause "event loop is closed" errors during cleanup
+_sync_executor: Optional[concurrent.futures.ThreadPoolExecutor] = None
+
+
+def _get_sync_executor() -> concurrent.futures.ThreadPoolExecutor:
+    """Get or create a persistent thread pool executor for sync operations."""
+    global _sync_executor
+    if _sync_executor is None or _sync_executor._shutdown:
+        _sync_executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=4, thread_name_prefix="sync_worker"
+        )
+    return _sync_executor
+
+
 async def run_sync_in_thread(func, *args, **kwargs):
     """
     Run a synchronous function in a thread executor to avoid event loop conflicts.
@@ -54,20 +71,27 @@ async def run_sync_in_thread(func, *args, **kwargs):
     This is necessary because some libraries (like requests_oauthlib) don't play
     well with asyncio when called from within an async context. Running them in
     a thread isolates them from the event loop entirely.
-    """
-    import concurrent.futures
-    import functools
 
-    loop = asyncio.get_running_loop()
-    with concurrent.futures.ThreadPoolExecutor() as executor:
-        if kwargs:
-            func_with_args = functools.partial(func, *args, **kwargs)
-            return await loop.run_in_executor(executor, func_with_args)
-        elif args:
-            func_with_args = functools.partial(func, *args)
-            return await loop.run_in_executor(executor, func_with_args)
-        else:
-            return await loop.run_in_executor(executor, func)
+    Uses a persistent thread pool to avoid executor creation/shutdown issues
+    that can cause "event loop is closed" errors.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError as e:
+        # No running loop - this shouldn't happen in async context but handle gracefully
+        logger.error(f"run_sync_in_thread called without running loop: {e}")
+        raise RuntimeError("Cannot run sync function: no event loop running") from e
+
+    executor = _get_sync_executor()
+
+    if kwargs:
+        func_with_args = functools.partial(func, *args, **kwargs)
+        return await loop.run_in_executor(executor, func_with_args)
+    elif args:
+        func_with_args = functools.partial(func, *args)
+        return await loop.run_in_executor(executor, func_with_args)
+    else:
+        return await loop.run_in_executor(executor, func)
 
 
 class ApprovalResult(Enum):
@@ -2317,18 +2341,29 @@ class TelegramNotifier:
         """Run an async coroutine synchronously.
 
         Handles all event loop states properly:
-        - If running loop exists: use run_coroutine_threadsafe
+        - If running loop exists and open: use run_coroutine_threadsafe
+        - If running loop is closed: use asyncio.run() to create new loop
         - If no running loop: use asyncio.run() for safe creation/cleanup
         """
         try:
             # Check if there's already a running event loop
             loop = asyncio.get_running_loop()
-            # Running loop exists - schedule on it and wait for result
+
+            # Check if the loop is closed (can happen after errors)
+            if loop.is_closed():
+                logger.warning("_run_async: Running loop is closed, creating new one")
+                return asyncio.run(coro)
+
+            # Running loop exists and is open - schedule on it and wait for result
             future = asyncio.run_coroutine_threadsafe(coro, loop)
             return future.result(timeout=30)
-        except RuntimeError:
+        except RuntimeError as e:
             # No running loop - use asyncio.run() which safely creates/destroys a loop
-            return asyncio.run(coro)
+            if "no running" in str(e).lower() or "no current" in str(e).lower():
+                return asyncio.run(coro)
+            # Some other RuntimeError
+            logger.error(f"_run_async: Unexpected error: {e}")
+            raise
 
     def send_message(self, text: str) -> bool:
         """Send a simple message."""

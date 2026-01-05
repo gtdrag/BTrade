@@ -5,9 +5,12 @@ Handles timezone conversions, calculations, and common helpers.
 
 import asyncio
 import datetime
+import logging
 from typing import Any, Coroutine, Optional, Tuple
 
 from zoneinfo import ZoneInfo
+
+logger = logging.getLogger(__name__)
 
 # Eastern timezone for US markets
 ET = ZoneInfo("America/New_York")
@@ -22,27 +25,38 @@ def run_async(coro: Coroutine) -> Any:
     event loop. This is the correct approach for running async code from
     sync code in a thread that doesn't have an event loop.
 
+    Uses a robust approach that handles:
+    - No running loop (creates new one with asyncio.run)
+    - Running loop exists (uses run_coroutine_threadsafe)
+    - Closed loop (creates new one)
+
     Args:
         coro: The coroutine to run
 
     Returns:
         The result of the coroutine
     """
-    # In threaded contexts (APScheduler jobs), there's no event loop
-    # Use asyncio.run() which handles loop creation/cleanup properly
     try:
         # Check if we're in an async context with a running loop
         loop = asyncio.get_running_loop()
-        # If we get here, there's a running loop - this shouldn't happen
-        # in our use case (scheduler jobs run in separate threads)
-        # But handle it gracefully by scheduling the coroutine
 
+        # Check if the loop is closed (shouldn't happen but handle it)
+        if loop.is_closed():
+            logger.warning("run_async: Running loop is closed, creating new one")
+            return asyncio.run(coro)
+
+        # Running loop exists - schedule the coroutine on it
         future = asyncio.run_coroutine_threadsafe(coro, loop)
         return future.result(timeout=30)
-    except RuntimeError:
+
+    except RuntimeError as e:
         # No running loop - this is the expected case for scheduler jobs
-        # Create a new event loop for this thread and run the coroutine
-        return asyncio.run(coro)
+        # The error message varies: "no running event loop" or "no current event loop"
+        if "no running" in str(e).lower() or "no current" in str(e).lower():
+            return asyncio.run(coro)
+        # Some other RuntimeError - re-raise
+        logger.error(f"run_async: Unexpected RuntimeError: {e}")
+        raise
 
 
 def get_et_now() -> datetime.datetime:
