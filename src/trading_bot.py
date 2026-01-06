@@ -476,12 +476,16 @@ class TradingBot:
         logger.warning(f"Data manager failed for {symbol}, using strategy fallback")
         return self.strategy.get_etf_quote(symbol)
 
-    def execute_signal(self, signal: Optional[TodaySignal] = None) -> TradeResult:
+    def execute_signal(
+        self, signal: Optional[TodaySignal] = None, skip_approval: bool = False
+    ) -> TradeResult:
         """
         Execute today's trading signal with optional Telegram approval.
 
         Args:
             signal: Optional pre-fetched signal. If None, fetches current signal.
+            skip_approval: If True, bypass approval and auto-execute (for time-sensitive
+                          signals like crash/pump days). Still sends notification.
 
         Returns:
             TradeResult with execution details
@@ -568,8 +572,8 @@ class TradingBot:
                     error="Insufficient capital for trade",
                 )
 
-            # Request Telegram approval if required
-            if self.config.approval_mode == ApprovalMode.REQUIRED:
+            # Request Telegram approval if required (unless skip_approval for emergency trades)
+            if self.config.approval_mode == ApprovalMode.REQUIRED and not skip_approval:
                 logger.info(
                     f"Requesting Telegram approval for {signal.signal.value}: {shares} {etf}"
                 )
@@ -682,6 +686,26 @@ class TradingBot:
                                 f"Sold: {close_result.shares} {close_result.etf} @ ${close_result.price:.2f}\n"
                                 f"Now entering: {etf}"
                             )
+
+            elif skip_approval:
+                # Emergency auto-execute (crash/pump day) - notify but don't wait
+                reversal_msg = ""
+                if needs_reversal:
+                    reversal_msg = f"\n⚠️ Closing existing {list(open_positions.keys())} first!"
+                self.telegram.send_message(
+                    f"🚨 *AUTO-EXECUTING EMERGENCY TRADE*\n\n"
+                    f"Signal: {signal.signal.value}\n"
+                    f"ETF: {etf}\n"
+                    f"Shares: {shares}\n"
+                    f"Price: ${price:.2f}\n"
+                    f"Total: ${position_value:.2f}{reversal_msg}\n\n"
+                    f"⚡ Time-sensitive signal - executing immediately"
+                )
+                logger.info(f"Emergency auto-execute: {signal.signal.value} - {shares} {etf}")
+
+                # Close existing positions if this is a reversal
+                if needs_reversal:
+                    self.close_all_positions(reason=f"Emergency reversal for {signal.signal.value}")
 
             elif self.config.approval_mode == ApprovalMode.NOTIFY_ONLY:
                 # Send notification but don't wait for response

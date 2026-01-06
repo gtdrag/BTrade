@@ -482,14 +482,15 @@ class SmartScheduler:
                         return
 
                     # Now execute the crash day trade (still under lock)
-                    result = self.bot.execute_signal(signal)
+                    # skip_approval=True for time-sensitive emergency trades
+                    result = self.bot.execute_signal(signal, skip_approval=True)
                     self._last_result = result
 
                     if result.success:
                         # Mark that we've traded the crash day
                         self.bot.strategy.mark_crash_day_traded()
                         logger.info(
-                            f"Crash day trade executed: {result.shares} SBIT @ ${result.price:.2f}"
+                            f"Crash day trade AUTO-EXECUTED: {result.shares} SBIT @ ${result.price:.2f}"
                         )
                     else:
                         logger.error(f"Crash day trade failed: {result.error}")
@@ -568,14 +569,15 @@ class SmartScheduler:
                         return
 
                     # Now execute the pump day trade (still under lock)
-                    result = self.bot.execute_signal(signal)
+                    # skip_approval=True for time-sensitive emergency trades
+                    result = self.bot.execute_signal(signal, skip_approval=True)
                     self._last_result = result
 
                     if result.success:
                         # Mark that we've traded the pump day
                         self.bot.strategy.mark_pump_day_traded()
                         logger.info(
-                            f"Pump day trade executed: {result.shares} BITU @ ${result.price:.2f}"
+                            f"Pump day trade AUTO-EXECUTED: {result.shares} BITU @ ${result.price:.2f}"
                         )
                     else:
                         logger.error(f"Pump day trade failed: {result.error}")
