@@ -17,6 +17,7 @@ Usage:
     alert_anomaly("expected_trades", 0, ">0", {"backtest": "mean_reversion"})
 """
 
+import asyncio
 import logging
 import os
 from dataclasses import dataclass, field
@@ -288,6 +289,7 @@ def sync_alert_error(
     _alert_state.record_alert(category, severity)
 
     # Send synchronously - handle all loop states (running, closed, none)
+    # Uses isolated loops to avoid corrupting global event loop policy
     try:
         # Check if there's already a running loop
         loop = asyncio.get_running_loop()
@@ -295,7 +297,7 @@ def sync_alert_error(
         # Check if loop is closed (can happen after errors/restarts)
         if loop.is_closed():
             logger.debug("alert_error: Running loop is closed, creating new one")
-            asyncio.run(_send_telegram_alert(severity, category, message, context))
+            _run_alert_in_isolated_loop(severity, category, message, context)
         else:
             # There's a running, open loop - use run_coroutine_threadsafe for thread-safety
             future = asyncio.run_coroutine_threadsafe(
@@ -303,14 +305,23 @@ def sync_alert_error(
             )
             future.result(timeout=10)  # Wait up to 10 seconds
     except RuntimeError as e:
-        # No running loop - safe to use asyncio.run()
+        # No running loop - create isolated loop (don't use asyncio.run)
         if "no running" in str(e).lower() or "no current" in str(e).lower():
             try:
-                asyncio.run(_send_telegram_alert(severity, category, message, context))
+                _run_alert_in_isolated_loop(severity, category, message, context)
             except Exception as send_err:
                 logger.warning(f"Failed to send sync alert: {send_err}")
         else:
             logger.warning(f"Unexpected error in alert_error: {e}")
+
+
+def _run_alert_in_isolated_loop(severity, category, message, context):
+    """Run alert in isolated loop without affecting global policy."""
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(_send_telegram_alert(severity, category, message, context))
+    finally:
+        loop.close()
 
 
 # Context manager for alerting on exceptions

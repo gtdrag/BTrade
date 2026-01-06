@@ -26,9 +26,13 @@ def run_async(coro: Coroutine) -> Any:
     sync code in a thread that doesn't have an event loop.
 
     Uses a robust approach that handles:
-    - No running loop (creates new one with asyncio.run)
+    - No running loop (creates isolated new one)
     - Running loop exists (uses run_coroutine_threadsafe)
-    - Closed loop (creates new one)
+    - Closed loop (creates isolated new one)
+
+    IMPORTANT: Uses new_event_loop() instead of asyncio.run() to avoid
+    corrupting global event loop policy state, which can cause
+    "Event loop is closed" errors in other threads.
 
     Args:
         coro: The coroutine to run
@@ -43,7 +47,7 @@ def run_async(coro: Coroutine) -> Any:
         # Check if the loop is closed (shouldn't happen but handle it)
         if loop.is_closed():
             logger.warning("run_async: Running loop is closed, creating new one")
-            return asyncio.run(coro)
+            return _run_in_new_loop(coro)
 
         # Running loop exists - schedule the coroutine on it
         future = asyncio.run_coroutine_threadsafe(coro, loop)
@@ -53,10 +57,25 @@ def run_async(coro: Coroutine) -> Any:
         # No running loop - this is the expected case for scheduler jobs
         # The error message varies: "no running event loop" or "no current event loop"
         if "no running" in str(e).lower() or "no current" in str(e).lower():
-            return asyncio.run(coro)
+            return _run_in_new_loop(coro)
         # Some other RuntimeError - re-raise
         logger.error(f"run_async: Unexpected RuntimeError: {e}")
         raise
+
+
+def _run_in_new_loop(coro: Coroutine) -> Any:
+    """
+    Run a coroutine in a completely isolated event loop.
+
+    Unlike asyncio.run(), this doesn't modify the global event loop policy,
+    which prevents "Event loop is closed" errors in other threads that
+    might be checking the default loop.
+    """
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
 
 
 def get_et_now() -> datetime.datetime:

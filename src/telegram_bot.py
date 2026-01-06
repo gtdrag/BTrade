@@ -2342,8 +2342,11 @@ class TelegramNotifier:
 
         Handles all event loop states properly:
         - If running loop exists and open: use run_coroutine_threadsafe
-        - If running loop is closed: use asyncio.run() to create new loop
-        - If no running loop: use asyncio.run() for safe creation/cleanup
+        - If running loop is closed: create isolated new loop
+        - If no running loop: create isolated new loop
+
+        Uses new_event_loop() instead of asyncio.run() to avoid corrupting
+        global event loop policy state.
         """
         try:
             # Check if there's already a running event loop
@@ -2352,18 +2355,26 @@ class TelegramNotifier:
             # Check if the loop is closed (can happen after errors)
             if loop.is_closed():
                 logger.warning("_run_async: Running loop is closed, creating new one")
-                return asyncio.run(coro)
+                return self._run_in_isolated_loop(coro)
 
             # Running loop exists and is open - schedule on it and wait for result
             future = asyncio.run_coroutine_threadsafe(coro, loop)
             return future.result(timeout=30)
         except RuntimeError as e:
-            # No running loop - use asyncio.run() which safely creates/destroys a loop
+            # No running loop - create an isolated loop
             if "no running" in str(e).lower() or "no current" in str(e).lower():
-                return asyncio.run(coro)
+                return self._run_in_isolated_loop(coro)
             # Some other RuntimeError
             logger.error(f"_run_async: Unexpected error: {e}")
             raise
+
+    def _run_in_isolated_loop(self, coro):
+        """Run coroutine in isolated loop without affecting global policy."""
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(coro)
+        finally:
+            loop.close()
 
     def send_message(self, text: str) -> bool:
         """Send a simple message."""
