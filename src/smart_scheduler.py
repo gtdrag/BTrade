@@ -134,14 +134,14 @@ class SmartScheduler:
             misfire_grace_time=300,
         )
 
-        # Crash day monitoring - check every 15 min from 9:45 AM to 12:00 PM ET
+        # Crash day monitoring - check every 15 min from 9:45 AM to 3:30 PM ET
         if self.bot.config.strategy.crash_day_enabled:
             self.scheduler.add_job(
                 self._job_crash_day_check,
                 CronTrigger(
                     day_of_week="mon-fri",
-                    hour="9-11",
-                    minute="45,0,15,30,45",
+                    hour="9-15",
+                    minute="0,15,30,45",
                     timezone=ET,
                 ),
                 id="crash_day_check",
@@ -149,14 +149,14 @@ class SmartScheduler:
                 misfire_grace_time=120,
             )
 
-        # Pump day monitoring - check every 15 min from 9:45 AM to 12:00 PM ET
+        # Pump day monitoring - check every 15 min from 9:45 AM to 3:30 PM ET
         if self.bot.config.strategy.pump_day_enabled:
             self.scheduler.add_job(
                 self._job_pump_day_check,
                 CronTrigger(
                     day_of_week="mon-fri",
-                    hour="9-11",
-                    minute="45,0,15,30,45",
+                    hour="9-15",
+                    minute="0,15,30,45",
                     timezone=ET,
                 ),
                 id="pump_day_check",
@@ -649,8 +649,63 @@ class SmartScheduler:
             self._error_count += 1
             self._send_error_notification(f"10 AM dump exit failed: {e}")
 
+    def _close_position_with_retry(self, etf: str, max_retries: int = 3) -> tuple:
+        """
+        Close a position with retry logic and exponential backoff.
+
+        Args:
+            etf: The ETF symbol to close
+            max_retries: Maximum number of retry attempts
+
+        Returns:
+            Tuple of (success: bool, result_or_error: TradeResult|str)
+        """
+        import time
+
+        for attempt in range(max_retries):
+            try:
+                result = self.bot.close_position(etf)
+
+                if result.success:
+                    if result.shares > 0:
+                        logger.info(
+                            f"Closed {etf} position: {result.shares} shares (attempt {attempt + 1})"
+                        )
+                        return (True, result)
+                    else:
+                        # shares=0 means no position existed
+                        return (True, None)
+
+                elif "No position found" in (result.error or ""):
+                    # No position to close - not a failure, don't retry
+                    logger.info(f"No {etf} position to close")
+                    return (True, None)
+
+                else:
+                    # Real failure - log and maybe retry
+                    logger.warning(
+                        f"Close {etf} attempt {attempt + 1}/{max_retries} failed: {result.error}"
+                    )
+                    if attempt < max_retries - 1:
+                        wait_time = 2**attempt  # 1s, 2s, 4s
+                        logger.info(f"Retrying in {wait_time}s...")
+                        time.sleep(wait_time)
+                    else:
+                        return (False, result.error)
+
+            except Exception as e:
+                logger.error(f"EXCEPTION closing {etf} (attempt {attempt + 1}/{max_retries}): {e}")
+                if attempt < max_retries - 1:
+                    wait_time = 2**attempt
+                    logger.info(f"Retrying in {wait_time}s...")
+                    time.sleep(wait_time)
+                else:
+                    return (False, f"Exception after {max_retries} attempts: {e}")
+
+        return (False, f"Failed after {max_retries} attempts")
+
     def _job_close_positions(self):
-        """Close any open positions before market close."""
+        """Close any open positions before market close with retry logic."""
         now = get_et_now()
 
         if not is_trading_day(now.date()):
@@ -667,43 +722,23 @@ class SmartScheduler:
         close_failures = []
         close_successes = []
 
-        # Close positions - each in its own try/except so one failure doesn't stop others
+        # Determine which ETFs to try closing
         if self.bot.is_paper_mode:
-            for etf in list(self.bot._paper_positions.keys()):
-                try:
-                    result = self.bot.close_position(etf)
-                    if result.success:
-                        logger.info(f"Closed {etf} position")
-                        close_successes.append((etf, result))
-                    else:
-                        logger.error(f"Failed to close {etf}: {result.error}")
-                        close_failures.append((etf, result.error))
-                except Exception as e:
-                    logger.error(f"EXCEPTION closing {etf}: {e}")
-                    close_failures.append((etf, f"Exception: {e}"))
-                    self._error_count += 1
+            etfs_to_close = list(self.bot._paper_positions.keys())
         else:
-            # For live trading, close known ETF positions
-            for etf in ["BITU", "SBIT"]:
-                try:
-                    result = self.bot.close_position(etf)
-                    if result.success:
-                        if result.shares > 0:
-                            logger.info(f"Closed {etf} position: {result.shares} shares")
-                            close_successes.append((etf, result))
-                        # shares=0 means no position existed, which is fine
-                    elif "No position found" in (result.error or ""):
-                        # No position to close - this is fine, not a failure
-                        logger.info(f"No {etf} position to close (skipping)")
-                    else:
-                        # CRITICAL: Log and alert on real failures
-                        logger.error(f"FAILED to close {etf}: {result.error}")
-                        close_failures.append((etf, result.error))
-                except Exception as e:
-                    # CRITICAL: Exception doesn't stop us from trying next position
-                    logger.error(f"EXCEPTION closing {etf}: {e}")
-                    close_failures.append((etf, f"Exception: {e}"))
-                    self._error_count += 1
+            etfs_to_close = ["BITU", "SBIT"]
+
+        # Close each position with retry logic
+        for etf in etfs_to_close:
+            success, result_or_error = self._close_position_with_retry(etf, max_retries=3)
+
+            if success:
+                if result_or_error is not None:  # Actually closed a position
+                    close_successes.append((etf, result_or_error))
+                # else: no position existed, which is fine
+            else:
+                close_failures.append((etf, result_or_error))
+                self._error_count += 1
 
         # Send Telegram notification for results
         self._send_close_positions_notification(close_successes, close_failures)

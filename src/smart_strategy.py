@@ -41,6 +41,19 @@ class Signal(Enum):
     TEN_AM_DUMP = "ten_am_dump"  # Buy SBIT at 9:35, sell at 10:30 (daily)
     DISCOVERED = "discovered"  # AI-discovered pattern from registry
     CASH = "cash"  # No position
+    # Position management signals (when holding)
+    CLOSE_LONG = "close_long"  # Close BITU position (crash while holding)
+    CLOSE_SHORT = "close_short"  # Close SBIT position (pump while holding)
+    HOLD = "hold"  # Keep current position
+
+
+class PositionAction(Enum):
+    """Recommended action for current position."""
+
+    NONE = "none"  # No position, no action needed
+    HOLD = "hold"  # Keep current position
+    CLOSE = "close"  # Close current position
+    SWITCH = "switch"  # Close and enter opposite position
 
 
 class AlertLevel(Enum):
@@ -78,7 +91,9 @@ class StrategyConfig:
     crash_day_check_times: List[str] = field(
         default_factory=lambda: ["09:45", "10:00", "10:15", "10:30", "10:45", "11:00", "11:30"]
     )
-    crash_day_cutoff_time: str = "12:00"  # Don't enter crash trades after this time
+    crash_day_cutoff_time: str = (
+        "15:30"  # Don't enter crash trades after this (25 min before EOD close)
+    )
 
     # Pump day settings (intraday reactive - opposite of crash day)
     pump_day_enabled: bool = True
@@ -86,7 +101,9 @@ class StrategyConfig:
     pump_day_check_times: List[str] = field(
         default_factory=lambda: ["09:45", "10:00", "10:15", "10:30", "10:45", "11:00", "11:30"]
     )
-    pump_day_cutoff_time: str = "12:00"  # Don't enter pump trades after this time
+    pump_day_cutoff_time: str = (
+        "15:30"  # Don't enter pump trades after this (25 min before EOD close)
+    )
 
     # 10 AM Dump settings (daily time-based strategy)
     # Backtested: +9.41% over 3 months, 51.5% win rate, 1.51 Sharpe
@@ -199,9 +216,16 @@ class TodaySignal:
     weekend_gap: Optional[WeekendGapInfo] = None
     btc_overnight: Optional[BTCOvernightStatus] = None
     discovered_pattern: Optional[DiscoveredPatternStatus] = None  # AI-discovered pattern
+    # Position awareness fields
+    current_position: Optional[str] = None  # Current ETF held (BITU, SBIT, or None)
+    position_action: Optional[PositionAction] = None  # Recommended action for current position
 
     def should_trade(self) -> bool:
-        return self.signal != Signal.CASH
+        return self.signal != Signal.CASH and self.signal != Signal.HOLD
+
+    def requires_position_change(self) -> bool:
+        """Returns True if signal recommends closing or switching position."""
+        return self.position_action in (PositionAction.CLOSE, PositionAction.SWITCH)
 
 
 class SmartStrategy:
@@ -751,23 +775,40 @@ class SmartStrategy:
         check_crash_day: bool = True,
         check_pump_day: bool = True,
         check_ten_am_dump: bool = True,
+        current_positions: Optional[Dict[str, Any]] = None,
     ) -> TodaySignal:
         """
         Determine today's trading signal.
 
+        Args:
+            check_crash_day: Whether to check for crash day signal
+            check_pump_day: Whether to check for pump day signal
+            check_ten_am_dump: Whether to check for 10 AM dump signal
+            current_positions: Dict of current positions {etf: {shares, entry_price}}
+                              If provided, signal will consider existing holdings
+
         Priority order:
-        1. 10 AM Dump (time-based) - runs every day at 9:35, exits at 10:30
-        2. Mean Reversion (previous day drop)
+        1. Position management (if holding wrong-way position during crash/pump)
+        2. 10 AM Dump (time-based) - runs every day at 9:35, exits at 10:30
+        3. Mean Reversion (previous day drop)
            - BUT filtered by BTC overnight movement (84% vs 17% win rate!)
-        3. Crash Day (intraday drop) - reactive signal (go inverse)
-        4. Pump Day (intraday pump) - reactive signal (go long)
-        5. Short Thursday - calendar-based
-        6. Cash - default
+        4. Crash Day (intraday drop) - reactive signal (go inverse)
+        5. Pump Day (intraday pump) - reactive signal (go long)
+        6. Short Thursday - calendar-based
+        7. Cash - default
         """
         today = date.today()
         weekday = today.weekday()  # 0=Monday, 3=Thursday
 
         prev_return = self.get_previous_day_return()
+
+        # Determine current position
+        current_pos = None
+        if current_positions:
+            if "BITU" in current_positions and current_positions["BITU"].get("shares", 0) > 0:
+                current_pos = "BITU"
+            elif "SBIT" in current_positions and current_positions["SBIT"].get("shares", 0) > 0:
+                current_pos = "SBIT"
 
         # Get weekend gap info for context
         weekend_gap = None
@@ -793,6 +834,77 @@ class SmartStrategy:
         btc_overnight = None
         if self.config.btc_overnight_filter_enabled:
             btc_overnight = self.get_btc_overnight_status()
+
+        # POSITION-AWARE LOGIC: Check if holding position during adverse conditions
+        # This takes priority because losing money RIGHT NOW is worse than missing entry
+        if current_pos:
+            # Holding BITU (long) during crash - MUST exit or switch
+            if current_pos == "BITU" and crash_status:
+                drop_pct = crash_status.current_drop_pct
+                if drop_pct <= self.config.crash_day_threshold:
+                    # Full crash triggered - recommend switch to SBIT
+                    return TodaySignal(
+                        signal=Signal.CLOSE_LONG,
+                        etf="SBIT",  # Recommend switching to SBIT
+                        reason=f"⚠️ CLOSE BITU: Crash day triggered (IBIT {drop_pct:.1f}%) - switch to SBIT",
+                        prev_day_return=prev_return,
+                        crash_day_status=crash_status,
+                        pump_day_status=pump_status,
+                        ten_am_dump_status=ten_am_status,
+                        weekend_gap=weekend_gap,
+                        btc_overnight=btc_overnight,
+                        current_position=current_pos,
+                        position_action=PositionAction.SWITCH,
+                    )
+                elif drop_pct <= -1.0:
+                    # Significant drop but not crash threshold - warn user
+                    return TodaySignal(
+                        signal=Signal.HOLD,
+                        etf="BITU",
+                        reason=f"⚠️ CAUTION: IBIT down {drop_pct:.1f}% (crash threshold: {self.config.crash_day_threshold}%)",
+                        prev_day_return=prev_return,
+                        crash_day_status=crash_status,
+                        pump_day_status=pump_status,
+                        ten_am_dump_status=ten_am_status,
+                        weekend_gap=weekend_gap,
+                        btc_overnight=btc_overnight,
+                        current_position=current_pos,
+                        position_action=PositionAction.HOLD,
+                    )
+
+            # Holding SBIT (inverse) during pump - MUST exit or switch
+            if current_pos == "SBIT" and pump_status:
+                gain_pct = pump_status.current_gain_pct
+                if gain_pct >= self.config.pump_day_threshold:
+                    # Full pump triggered - recommend switch to BITU
+                    return TodaySignal(
+                        signal=Signal.CLOSE_SHORT,
+                        etf="BITU",  # Recommend switching to BITU
+                        reason=f"⚠️ CLOSE SBIT: Pump day triggered (IBIT +{gain_pct:.1f}%) - switch to BITU",
+                        prev_day_return=prev_return,
+                        crash_day_status=crash_status,
+                        pump_day_status=pump_status,
+                        ten_am_dump_status=ten_am_status,
+                        weekend_gap=weekend_gap,
+                        btc_overnight=btc_overnight,
+                        current_position=current_pos,
+                        position_action=PositionAction.SWITCH,
+                    )
+                elif gain_pct >= 1.0:
+                    # Significant gain but not pump threshold - warn user
+                    return TodaySignal(
+                        signal=Signal.HOLD,
+                        etf="SBIT",
+                        reason=f"⚠️ CAUTION: IBIT up +{gain_pct:.1f}% (pump threshold: +{self.config.pump_day_threshold}%)",
+                        prev_day_return=prev_return,
+                        crash_day_status=crash_status,
+                        pump_day_status=pump_status,
+                        ten_am_dump_status=ten_am_status,
+                        weekend_gap=weekend_gap,
+                        btc_overnight=btc_overnight,
+                        current_position=current_pos,
+                        position_action=PositionAction.HOLD,
+                    )
 
         # Check 10 AM dump first (highest priority - runs every day at 9:35)
         if self.config.ten_am_dump_enabled and ten_am_status and ten_am_status.should_enter:

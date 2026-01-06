@@ -274,9 +274,22 @@ class TradingBot:
 
         return results
 
-    def get_today_signal(self) -> TodaySignal:
-        """Get today's trading signal."""
-        return self.strategy.get_today_signal()
+    def get_today_signal(self, include_position_context: bool = True) -> TodaySignal:
+        """
+        Get today's trading signal.
+
+        Args:
+            include_position_context: If True, passes current positions to strategy
+                                     for position-aware signal generation.
+        """
+        current_positions = None
+        if include_position_context:
+            try:
+                current_positions = self.get_open_positions()
+            except Exception as e:
+                logger.warning(f"Could not get positions for signal context: {e}")
+
+        return self.strategy.get_today_signal(current_positions=current_positions)
 
     def get_available_capital(self) -> float:
         """Get available capital for trading."""
