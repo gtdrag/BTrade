@@ -1,5 +1,26 @@
 # AI Quick Reference - BTrade
 
+## CRITICAL RULES (Read First)
+
+**These rules override all other considerations:**
+
+1. **THOROUGHNESS OVER SPEED**: When fixing bugs or making changes, find and fix ALL instances of the pattern. Use `grep -r` to search the entire codebase. NEVER claim "all fixed" without exhaustive verification.
+
+2. **VERIFY, DON'T ASSUME**: After claiming something is fixed/complete, verify it by:
+   - Running `grep` for all variations of the pattern
+   - Tracing actual runtime execution paths
+   - Testing integration, not just individual units
+
+3. **ROOT CAUSE, NOT SYMPTOMS**: When a bug is reported, trace it to the fundamental cause. Fix the architecture, not just the immediate error. If there are duplicate implementations, consolidate them.
+
+4. **UNIT TESTS LIE**: Tests that mock dependencies don't catch integration bugs. When debugging production issues, mentally execute the actual runtime path with real dependencies.
+
+5. **SAY "I DON'T KNOW"**: If you're not 100% certain, say so. It's better to investigate further than to confidently make claims that turn out to be false.
+
+6. **NO COSMETIC WORK DURING BUGS**: If production bugs exist, don't do type hints, file splitting, or refactoring. Fix the actual bugs first.
+
+---
+
 > Concise guide for AI agents maintaining this codebase. For full docs, see `docs/architecture.md` and `docs/prd.md`.
 
 ## What This System Does
