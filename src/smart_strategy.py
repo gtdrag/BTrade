@@ -24,7 +24,7 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 import pandas as pd
 
-from .data_providers import AlpacaProvider, create_data_manager
+from .data_providers import AlpacaProvider, MarketDataManager, create_data_manager
 from .database import Database, get_database
 from .error_alerting import AlertSeverity, alert_error
 
@@ -245,9 +245,9 @@ class SmartStrategy:
         config: Optional[StrategyConfig] = None,
         db: Optional[Database] = None,
         pattern_registry: Optional[Any] = None,  # Optional PatternRegistry from pattern_discovery
-    ):
-        self.config = config or StrategyConfig()
-        self.db = db or get_database()
+    ) -> None:
+        self.config: StrategyConfig = config or StrategyConfig()
+        self.db: Database = db or get_database()
         self._ibit_data: Optional[pd.DataFrame] = None
         self._last_data_fetch: Optional[datetime] = None
         self._crash_day_traded_today: bool = False
@@ -259,16 +259,16 @@ class SmartStrategy:
         self._ten_am_dump_position_open: bool = False
 
         # Pattern registry for AI-discovered patterns (optional)
-        self._pattern_registry = pattern_registry
+        self._pattern_registry: Optional[Any] = pattern_registry
         self._discovered_pattern_traded_today: Dict[str, bool] = {}
         self._discovered_pattern_trade_date: Optional[date] = None
 
         # Initialize Alpaca data provider
-        self._alpaca = AlpacaProvider(
+        self._alpaca: AlpacaProvider = AlpacaProvider(
             api_key=os.environ.get("ALPACA_API_KEY"),
             secret_key=os.environ.get("ALPACA_SECRET_KEY"),
         )
-        self._data_manager = create_data_manager()
+        self._data_manager: MarketDataManager = create_data_manager()
 
     def get_ibit_data(self, days: int = 10) -> pd.DataFrame:
         """Fetch recent IBIT data from Alpaca."""
@@ -576,7 +576,7 @@ class SmartStrategy:
                 already_traded_today=self._crash_day_traded_today,
             )
 
-    def mark_crash_day_traded(self):
+    def mark_crash_day_traded(self) -> None:
         """Mark that we've executed a crash day trade today."""
         self._crash_day_traded_today = True
         self._crash_day_trade_date = date.today()
@@ -652,7 +652,7 @@ class SmartStrategy:
                 already_traded_today=self._pump_day_traded_today,
             )
 
-    def mark_pump_day_traded(self):
+    def mark_pump_day_traded(self) -> None:
         """Mark that we've executed a pump day trade today."""
         self._pump_day_traded_today = True
         self._pump_day_trade_date = date.today()
@@ -716,12 +716,12 @@ class SmartStrategy:
             position_open=self._ten_am_dump_position_open,
         )
 
-    def mark_ten_am_dump_entered(self):
+    def mark_ten_am_dump_entered(self) -> None:
         """Mark that we've entered a 10 AM dump position."""
         self._ten_am_dump_position_open = True
         self._ten_am_dump_trade_date = date.today()
 
-    def mark_ten_am_dump_exited(self):
+    def mark_ten_am_dump_exited(self) -> None:
         """Mark that we've exited a 10 AM dump position."""
         self._ten_am_dump_position_open = False
         self._ten_am_dump_traded_today = True
@@ -765,7 +765,7 @@ class SmartStrategy:
             expected_edge=active_pattern.expected_edge,
         )
 
-    def mark_discovered_pattern_traded(self, pattern_name: str):
+    def mark_discovered_pattern_traded(self, pattern_name: str) -> None:
         """Mark that we've traded a discovered pattern today."""
         self._discovered_pattern_traded_today[pattern_name] = True
         self._discovered_pattern_trade_date = date.today()
@@ -1056,20 +1056,22 @@ class SmartStrategy:
 class SmartBacktester:
     """Backtest the smart strategy using Alpaca historical data."""
 
-    def __init__(self, initial_capital: float = 10000.0, config: Optional[StrategyConfig] = None):
-        self.initial_capital = initial_capital
-        self.config = config or StrategyConfig()
+    def __init__(
+        self, initial_capital: float = 10000.0, config: Optional[StrategyConfig] = None
+    ) -> None:
+        self.initial_capital: float = initial_capital
+        self.config: StrategyConfig = config or StrategyConfig()
         self.data: Dict[str, pd.DataFrame] = {}
 
         # Initialize Alpaca for historical data
-        self._alpaca = AlpacaProvider(
+        self._alpaca: AlpacaProvider = AlpacaProvider(
             api_key=os.environ.get("ALPACA_API_KEY"),
             secret_key=os.environ.get("ALPACA_SECRET_KEY"),
         )
 
-    def load_data(self, start_date: date, end_date: date):
+    def load_data(self, start_date: date, end_date: date) -> int:
         """Load historical data for all ETFs and BTC from Alpaca."""
-        tickers = ["IBIT", "BITU", "SBIT"]
+        tickers: List[str] = ["IBIT", "BITU", "SBIT"]
 
         for ticker in tickers:
             # Use Alpaca historical bars
@@ -1127,12 +1129,12 @@ class SmartBacktester:
 
     def run_backtest(self) -> Dict[str, Any]:
         """Run backtest and return results."""
-        ibit = self.data["IBIT"].copy()
-        bitx = self.data["BITU"].copy()
-        sbit = self.data["SBIT"].copy()
+        ibit: pd.DataFrame = self.data["IBIT"].copy()
+        bitx: pd.DataFrame = self.data["BITU"].copy()
+        sbit: pd.DataFrame = self.data["SBIT"].copy()
 
         # Get BTC data for overnight filter
-        btc = (
+        btc: pd.DataFrame = (
             self.data.get("BTC", pd.DataFrame()).copy()
             if self.config.btc_overnight_filter_enabled
             else pd.DataFrame()
@@ -1144,7 +1146,7 @@ class SmartBacktester:
         ibit["weekday"] = pd.to_datetime(ibit["date"]).apply(lambda x: x.weekday())
 
         # Create BTC overnight lookup (date → overnight change)
-        btc_overnight = {}
+        btc_overnight: Dict[date, float] = {}
         if len(btc) > 0:
             btc = btc.sort_values("date").reset_index(drop=True)
             for i in range(1, len(btc)):
@@ -1157,10 +1159,10 @@ class SmartBacktester:
                 )
                 btc_overnight[btc.iloc[i]["date"]] = overnight_pct
 
-        capital = self.initial_capital
-        trades = []
-        skipped_trades = []  # Track trades we skipped due to BTC filter
-        slippage = self.config.slippage_pct
+        capital: float = self.initial_capital
+        trades: List[Dict[str, Any]] = []
+        skipped_trades: List[Dict[str, Any]] = []  # Track trades we skipped due to BTC filter
+        slippage: float = self.config.slippage_pct
 
         for i in range(len(ibit)):
             row = ibit.iloc[i]
