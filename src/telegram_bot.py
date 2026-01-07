@@ -7,8 +7,6 @@ waits for user response before executing trades.
 """
 
 import asyncio
-import concurrent.futures
-import functools
 import logging
 import os
 from dataclasses import dataclass
@@ -24,7 +22,8 @@ from telegram.ext import (
     ContextTypes,
 )
 
-# HTTPXRequest import removed - using defaults
+# Unified async utilities - use these for ALL async/sync bridging
+from .async_utils import run_sync_in_executor as run_sync_in_thread  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
@@ -47,51 +46,6 @@ def escape_markdown(text: str) -> str:
         .replace("`", "\\`")
         .replace("[", "\\[")
     )
-
-
-# Persistent thread pool for sync operations - avoids creating/destroying executors
-# which can cause "event loop is closed" errors during cleanup
-_sync_executor: Optional[concurrent.futures.ThreadPoolExecutor] = None
-
-
-def _get_sync_executor() -> concurrent.futures.ThreadPoolExecutor:
-    """Get or create a persistent thread pool executor for sync operations."""
-    global _sync_executor
-    if _sync_executor is None or _sync_executor._shutdown:
-        _sync_executor = concurrent.futures.ThreadPoolExecutor(
-            max_workers=4, thread_name_prefix="sync_worker"
-        )
-    return _sync_executor
-
-
-async def run_sync_in_thread(func, *args, **kwargs):
-    """
-    Run a synchronous function in a thread executor to avoid event loop conflicts.
-
-    This is necessary because some libraries (like requests_oauthlib) don't play
-    well with asyncio when called from within an async context. Running them in
-    a thread isolates them from the event loop entirely.
-
-    Uses a persistent thread pool to avoid executor creation/shutdown issues
-    that can cause "event loop is closed" errors.
-    """
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError as e:
-        # No running loop - this shouldn't happen in async context but handle gracefully
-        logger.error(f"run_sync_in_thread called without running loop: {e}")
-        raise RuntimeError("Cannot run sync function: no event loop running") from e
-
-    executor = _get_sync_executor()
-
-    if kwargs:
-        func_with_args = functools.partial(func, *args, **kwargs)
-        return await loop.run_in_executor(executor, func_with_args)
-    elif args:
-        func_with_args = functools.partial(func, *args)
-        return await loop.run_in_executor(executor, func_with_args)
-    else:
-        return await loop.run_in_executor(executor, func)
 
 
 class ApprovalResult(Enum):
@@ -1861,50 +1815,61 @@ class TelegramBot:
                 )
                 return
 
-            # Create a temporary client for auth
+            # Create client AND get auth URL in thread to avoid event loop conflicts
+            # ETradeClient constructor does file I/O and creates OAuth sessions
             from .etrade_client import ETradeClient
 
+            def create_client_and_get_auth():
+                """Create client and get auth URL - must run in thread."""
+                client = ETradeClient(consumer_key, consumer_secret)
+                auth_url, req_token = client.get_authorization_url()
+                return client, auth_url, req_token
+
             try:
-                temp_client = ETradeClient(consumer_key, consumer_secret)
+                temp_client, auth_url, request_token = await run_sync_in_thread(
+                    create_client_and_get_auth
+                )
             except Exception as e:
-                await update.message.reply_text(f"❌ Failed to create client: {e}")
+                logger.error(f"Failed to create client or get auth URL: {e}")
+                await update.message.reply_text(f"❌ Failed to connect to E*TRADE: {e}")
                 return
         else:
             temp_client = self.trading_bot.client
 
-        if not temp_client:
-            await update.message.reply_text("❌ E*TRADE client not available.")
-            return
+            if not temp_client:
+                await update.message.reply_text("❌ E*TRADE client not available.")
+                return
 
-        try:
-            # Get authorization URL - run in thread to avoid event loop conflicts
-            auth_url, request_token = await run_sync_in_thread(temp_client.get_authorization_url)
+            try:
+                # Get authorization URL - run in thread to avoid event loop conflicts
+                auth_url, request_token = await run_sync_in_thread(
+                    temp_client.get_authorization_url
+                )
+            except Exception as e:
+                logger.error(f"Failed to get auth URL: {e}")
+                await update.message.reply_text(
+                    f"❌ Authorization Failed\n\nCould not connect to E*TRADE:\n{e}"
+                )
+                return
 
-            # Store request token for /verify command
-            self._pending_auth_request = {
-                "request_token": request_token,
-                "client": temp_client,
-                "timestamp": datetime.now(),
-            }
+        # Store request token for /verify command
+        self._pending_auth_request = {
+            "request_token": request_token,
+            "client": temp_client,
+            "timestamp": datetime.now(),
+        }
 
-            await update.message.reply_text(
-                "🔐 E*TRADE Authorization\n\n"
-                "Step 1: Tap the link below to open E*TRADE:\n\n"
-                f"{auth_url}\n\n"
-                "Step 2: Log in and click 'Authorize'\n\n"
-                "Step 3: Copy the verification code shown\n\n"
-                "Step 4: Send: /verify YOUR_CODE\n\n"
-                "⏱ Link expires in 5 minutes.",
-                disable_web_page_preview=True,
-            )
-            logger.info("E*TRADE auth URL sent to user")
-
-        except Exception as e:
-            logger.error(f"Failed to get auth URL: {e}")
-            # Don't use Markdown - error messages may contain special chars
-            await update.message.reply_text(
-                f"❌ Authorization Failed\n\nCould not connect to E*TRADE:\n{e}"
-            )
+        await update.message.reply_text(
+            "🔐 E*TRADE Authorization\n\n"
+            "Step 1: Tap the link below to open E*TRADE:\n\n"
+            f"{auth_url}\n\n"
+            "Step 2: Log in and click 'Authorize'\n\n"
+            "Step 3: Copy the verification code shown\n\n"
+            "Step 4: Send: /verify YOUR_CODE\n\n"
+            "⏱ Link expires in 5 minutes.",
+            disable_web_page_preview=True,
+        )
+        logger.info("E*TRADE auth URL sent to user")
 
     async def _cmd_verify(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /verify command - complete E*TRADE OAuth with verifier code."""

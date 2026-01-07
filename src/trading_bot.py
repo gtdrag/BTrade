@@ -258,19 +258,27 @@ class TradingBot:
             return result
 
     def close_all_positions(self, reason: str = "New signal") -> List[TradeResult]:
-        """Close all open positions before entering a new trade."""
-        results = []
-        positions = self.get_open_positions()
+        """
+        Close all open positions before entering a new trade.
 
-        for etf in list(positions.keys()):
-            logger.info(f"Closing existing {etf} position before new trade: {reason}")
-            self.db.log_event(
-                "POSITION_CLOSE",
-                f"Closing {etf} for new signal",
-                {"etf": etf, "reason": reason, "timestamp": get_et_now().isoformat()},
-            )
-            result = self.close_position(etf)
-            results.append(result)
+        Thread-safe: Uses position lock to prevent concurrent modifications.
+        """
+        results = []
+
+        with self._position_lock:
+            # Get positions under lock to ensure consistent view
+            positions = self.get_open_positions()
+
+            for etf in list(positions.keys()):
+                logger.info(f"Closing existing {etf} position before new trade: {reason}")
+                self.db.log_event(
+                    "POSITION_CLOSE",
+                    f"Closing {etf} for new signal",
+                    {"etf": etf, "reason": reason, "timestamp": get_et_now().isoformat()},
+                )
+                # Note: close_position also acquires _position_lock, but RLock allows re-entry
+                result = self.close_position(etf)
+                results.append(result)
 
         return results
 
@@ -779,21 +787,26 @@ class TradingBot:
     def _execute_paper_trade(
         self, etf: str, shares: int, price: float, signal: TodaySignal
     ) -> TradeResult:
-        """Execute a paper trade."""
+        """
+        Execute a paper trade.
+
+        Thread-safe: Uses position lock to prevent concurrent modifications.
+        """
         total_value = shares * price
 
-        # Update paper capital
-        self._paper_capital -= total_value
+        with self._position_lock:
+            # Update paper capital
+            self._paper_capital -= total_value
 
-        # Track position
-        self._paper_positions[etf] = {
-            "shares": shares,
-            "entry_price": price,
-            "entry_time": get_et_now(),
-            "signal": signal.signal.value,
-        }
+            # Track position
+            self._paper_positions[etf] = {
+                "shares": shares,
+                "entry_price": price,
+                "entry_time": get_et_now(),
+                "signal": signal.signal.value,
+            }
 
-        # Register with hedge manager for trailing hedge tracking
+        # Register with hedge manager for trailing hedge tracking (outside lock)
         self.hedge_manager.register_position(
             instrument=etf,
             shares=shares,

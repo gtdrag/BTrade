@@ -3,79 +3,21 @@ Utility functions for IBIT Dip Bot.
 Handles timezone conversions, calculations, and common helpers.
 """
 
-import asyncio
 import datetime
 import logging
-from typing import Any, Coroutine, Optional, Tuple
+from typing import Optional, Tuple
 
 from zoneinfo import ZoneInfo
+
+# Re-export async utilities for backward compatibility
+# All async/sync bridging should use the unified async_utils module
+from .async_utils import run_async_from_sync as run_async  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
 # Eastern timezone for US markets
 ET = ZoneInfo("America/New_York")
 UTC = ZoneInfo("UTC")
-
-
-def run_async(coro: Coroutine) -> Any:
-    """
-    Run an async coroutine from sync code safely.
-
-    Handles threaded contexts (like APScheduler jobs) by creating a new
-    event loop. This is the correct approach for running async code from
-    sync code in a thread that doesn't have an event loop.
-
-    Uses a robust approach that handles:
-    - No running loop (creates isolated new one)
-    - Running loop exists (uses run_coroutine_threadsafe)
-    - Closed loop (creates isolated new one)
-
-    IMPORTANT: Uses new_event_loop() instead of asyncio.run() to avoid
-    corrupting global event loop policy state, which can cause
-    "Event loop is closed" errors in other threads.
-
-    Args:
-        coro: The coroutine to run
-
-    Returns:
-        The result of the coroutine
-    """
-    try:
-        # Check if we're in an async context with a running loop
-        loop = asyncio.get_running_loop()
-
-        # Check if the loop is closed (shouldn't happen but handle it)
-        if loop.is_closed():
-            logger.warning("run_async: Running loop is closed, creating new one")
-            return _run_in_new_loop(coro)
-
-        # Running loop exists - schedule the coroutine on it
-        future = asyncio.run_coroutine_threadsafe(coro, loop)
-        return future.result(timeout=30)
-
-    except RuntimeError as e:
-        # No running loop - this is the expected case for scheduler jobs
-        # The error message varies: "no running event loop" or "no current event loop"
-        if "no running" in str(e).lower() or "no current" in str(e).lower():
-            return _run_in_new_loop(coro)
-        # Some other RuntimeError - re-raise
-        logger.error(f"run_async: Unexpected RuntimeError: {e}")
-        raise
-
-
-def _run_in_new_loop(coro: Coroutine) -> Any:
-    """
-    Run a coroutine in a completely isolated event loop.
-
-    Unlike asyncio.run(), this doesn't modify the global event loop policy,
-    which prevents "Event loop is closed" errors in other threads that
-    might be checking the default loop.
-    """
-    loop = asyncio.new_event_loop()
-    try:
-        return loop.run_until_complete(coro)
-    finally:
-        loop.close()
 
 
 def get_et_now() -> datetime.datetime:
