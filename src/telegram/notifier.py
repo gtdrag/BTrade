@@ -4,11 +4,11 @@ Synchronous wrapper for TelegramBot.
 Use this in the trading bot where we're not running an async event loop.
 """
 
-import asyncio
 import logging
 import os
 from typing import Optional
 
+from ..async_utils import run_async_from_sync
 from .bot import TelegramBot
 from .utils import ApprovalResult
 
@@ -38,41 +38,10 @@ class TelegramNotifier:
     def _run_async(self, coro):
         """Run an async coroutine synchronously.
 
-        Handles all event loop states properly:
-        - If running loop exists and open: use run_coroutine_threadsafe
-        - If running loop is closed: create isolated new loop
-        - If no running loop: create isolated new loop
-
-        Uses new_event_loop() instead of asyncio.run() to avoid corrupting
-        global event loop policy state.
+        Uses the unified async/sync bridging from async_utils to properly
+        handle event loop lifecycle and prevent "event loop is closed" errors.
         """
-        try:
-            # Check if there's already a running event loop
-            loop = asyncio.get_running_loop()
-
-            # Check if the loop is closed (can happen after errors)
-            if loop.is_closed():
-                logger.warning("_run_async: Running loop is closed, creating new one")
-                return self._run_in_isolated_loop(coro)
-
-            # Running loop exists and is open - schedule on it and wait for result
-            future = asyncio.run_coroutine_threadsafe(coro, loop)
-            return future.result(timeout=30)
-        except RuntimeError as e:
-            # No running loop - create an isolated loop
-            if "no running" in str(e).lower() or "no current" in str(e).lower():
-                return self._run_in_isolated_loop(coro)
-            # Some other RuntimeError
-            logger.error(f"_run_async: Unexpected error: {e}")
-            raise
-
-    def _run_in_isolated_loop(self, coro):
-        """Run coroutine in isolated loop without affecting global policy."""
-        loop = asyncio.new_event_loop()
-        try:
-            return loop.run_until_complete(coro)
-        finally:
-            loop.close()
+        return run_async_from_sync(coro, timeout=60.0)
 
     def send_message(self, text: str) -> bool:
         """Send a simple message."""

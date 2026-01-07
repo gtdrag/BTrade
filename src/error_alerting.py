@@ -168,7 +168,6 @@ def alert_error(
     Example:
         alert_error(AlertSeverity.WARNING, "Backtest returned 0 trades", {"strategy": "MR"})
     """
-    import asyncio
     import inspect
 
     # Auto-detect category from caller if not provided
@@ -199,24 +198,17 @@ def alert_error(
     # Record alert
     _alert_state.record_alert(category, severity)
 
-    # Send async (fire-and-forget style)
-    async def _send():
-        await _send_telegram_alert(severity, category, message, context)
+    # Send synchronously using unified async utilities
+    # This handles all event loop states correctly (running, closed, none)
+    from .async_utils import run_async_from_sync
 
     try:
-        # Check if there's a running event loop (Python 3.7+)
-        # get_running_loop() raises RuntimeError if no loop is running
-        asyncio.get_running_loop()
-        # If we get here, there's an active running loop - schedule on it
-        asyncio.create_task(_send())
-    except RuntimeError:
-        # No running event loop - create a new one safely
-        # asyncio.run() handles loop creation and cleanup properly
-        try:
-            asyncio.run(_send())
-        except RuntimeError as e:
-            # Handle edge case where loop is closed mid-execution
-            logger.warning(f"Could not send alert (event loop issue): {e}")
+        run_async_from_sync(
+            _send_telegram_alert(severity, category, message, context),
+            timeout=10.0,
+        )
+    except Exception as send_err:
+        logger.warning(f"Could not send alert: {send_err}")
 
 
 def alert_critical(message: str, context: Optional[Dict[str, Any]] = None, category: str = None):

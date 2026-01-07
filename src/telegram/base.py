@@ -175,8 +175,14 @@ class TelegramBotBase:
     # Core Messaging Methods
     # =========================================================================
 
-    async def send_message(self, text: str, parse_mode: str = "Markdown") -> bool:
-        """Send a message to the configured chat."""
+    async def send_message(self, text: str, parse_mode: Optional[str] = None) -> bool:
+        """Send a message to the configured chat.
+
+        Args:
+            text: Message text to send
+            parse_mode: Optional parse mode ("Markdown", "HTML", or None for plain text).
+                        Defaults to None to avoid markdown parsing errors with dynamic content.
+        """
         if not self._app or not self.chat_id:
             return False
 

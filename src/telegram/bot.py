@@ -521,8 +521,13 @@ class TelegramBot(
     # Core Messaging Methods
     # =========================================================================
 
-    async def send_message(self, text: str, parse_mode: str = "Markdown") -> bool:
-        """Send a simple text message."""
+    async def send_message(self, text: str, parse_mode: Optional[str] = None) -> bool:
+        """Send a simple text message.
+
+        Args:
+            text: Message text to send
+            parse_mode: Optional ("Markdown", "HTML", or None). Defaults to None.
+        """
         if not self.chat_id:
             logger.warning("No chat_id configured, cannot send message")
             return False
