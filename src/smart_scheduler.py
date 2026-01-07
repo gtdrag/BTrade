@@ -764,7 +764,9 @@ class SmartScheduler:
                 # CRITICAL ALERT for failures
                 message = f"🚨 *EOD CLOSE FAILED* 🚨\n\n{mode} Failed to close positions:\n"
                 for etf, error in failures:
-                    message += f"• {etf}: {error}\n"
+                    # Escape error strings to prevent Markdown parsing issues
+                    safe_error = escape_markdown(str(error)) if error else "Unknown error"
+                    message += f"• {etf}: {safe_error}\n"
                 message += (
                     "\n⚠️ *POSITIONS MAY STILL BE OPEN*\nCheck your brokerage account immediately!"
                 )
