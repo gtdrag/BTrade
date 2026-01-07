@@ -5,15 +5,16 @@ Runs the smart strategy at market open and close.
 """
 
 import logging
+from datetime import datetime
 from enum import Enum
-from typing import Optional
+from typing import Any, Dict, List, Optional, Tuple
 
-from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_EXECUTED
+from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_EXECUTED, JobExecutionEvent
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from .database import get_database
-from .smart_strategy import Signal
+from .database import Database, get_database
+from .smart_strategy import Signal, TodaySignal
 from .telegram_bot import TelegramBot, escape_markdown
 from .trading_bot import TradeResult, TradingBot
 from .utils import ET, get_et_now, is_trading_day, run_async
@@ -40,25 +41,25 @@ class SmartScheduler:
     The strategy is intraday - never hold overnight.
     """
 
-    def __init__(self, bot: TradingBot, telegram_bot: Optional[TelegramBot] = None):
-        self.bot = bot
-        self.telegram_bot = telegram_bot  # Shared instance, set after creation if not passed
-        self.db = get_database()
-        self.scheduler = BackgroundScheduler(timezone=ET)
-        self.status = BotStatus.STOPPED
+    def __init__(self, bot: TradingBot, telegram_bot: Optional[TelegramBot] = None) -> None:
+        self.bot: TradingBot = bot
+        self.telegram_bot: Optional[TelegramBot] = telegram_bot  # Shared instance
+        self.db: Database = get_database()
+        self.scheduler: BackgroundScheduler = BackgroundScheduler(timezone=ET)
+        self.status: BotStatus = BotStatus.STOPPED
         self._last_result: Optional[TradeResult] = None
-        self._error_count = 0
+        self._error_count: int = 0
 
         # Add event listeners
         self.scheduler.add_listener(self._on_job_event, EVENT_JOB_ERROR | EVENT_JOB_EXECUTED)
 
-    def _send_notification(self, message: str, parse_mode: str = "Markdown"):
+    def _send_notification(self, message: str, parse_mode: Optional[str] = "Markdown") -> None:
         """Send a notification via the shared Telegram bot instance."""
         if not self.telegram_bot:
             logger.warning("Telegram bot not configured, skipping notification")
             return
 
-        async def _send():
+        async def _send() -> None:
             try:
                 await self.telegram_bot.send_message(message, parse_mode=parse_mode)
             except Exception as e:
@@ -66,14 +67,14 @@ class SmartScheduler:
 
         run_async(_send())
 
-    def _on_job_event(self, event):
+    def _on_job_event(self, event: JobExecutionEvent) -> None:
         """Handle job events."""
         if event.exception:
             self._error_count += 1
             logger.error(f"Job failed: {event.exception}")
             self.db.log_event("SCHEDULER_ERROR", str(event.exception))
 
-    def _log_signal_check(self, job_type: str, signal, now):
+    def _log_signal_check(self, job_type: str, signal: TodaySignal, now: datetime) -> None:
         """Log comprehensive signal check data for analytics."""
         details = {
             "job_type": job_type,
@@ -121,7 +122,7 @@ class SmartScheduler:
         self.db.log_event("SIGNAL_CHECK", f"{job_type}: {signal.signal.value}", details)
         logger.info(f"Signal check logged: {job_type} -> {signal.signal.value}")
 
-    def setup_jobs(self):
+    def setup_jobs(self) -> None:
         """Set up scheduled jobs."""
         self.scheduler.remove_all_jobs()
 
@@ -290,7 +291,7 @@ class SmartScheduler:
 
         logger.info("Scheduler jobs configured")
 
-    def _job_auth_reminder(self):
+    def _job_auth_reminder(self) -> None:
         """Send daily authentication reminder at 8:00 AM ET."""
         now = get_et_now()
 
@@ -338,9 +339,8 @@ class SmartScheduler:
         )
         logger.info(f"Auth reminder sent: {auth_status}")
 
-    def _job_morning_signal(self):
+    def _job_morning_signal(self) -> None:
         """Execute morning trading signal."""
-
         now = get_et_now()
 
         if not is_trading_day(now.date()):
@@ -380,7 +380,7 @@ class SmartScheduler:
             self._error_count += 1
             self._send_error_notification(f"Morning signal check failed: {e}")
 
-    def _send_no_signal_notification(self, now):
+    def _send_no_signal_notification(self, now: datetime) -> None:
         """Send notification when there's no trade signal."""
         day_name = now.strftime("%A")
 
@@ -404,7 +404,7 @@ class SmartScheduler:
         )
         logger.info("No-signal notification sent")
 
-    def _send_error_notification(self, error_msg: str):
+    def _send_error_notification(self, error_msg: str) -> None:
         """Send error notification via Telegram."""
         now = get_et_now()
 
@@ -418,7 +418,7 @@ class SmartScheduler:
         )
         logger.info("Error notification sent")
 
-    def _job_crash_day_check(self):
+    def _job_crash_day_check(self) -> None:
         """Check for intraday crash signal and execute if triggered.
 
         Thread-safe: Uses position lock to prevent TOCTOU race conditions.
@@ -505,7 +505,7 @@ class SmartScheduler:
             self._error_count += 1
             self._send_error_notification(f"Crash day check failed: {e}")
 
-    def _job_pump_day_check(self):
+    def _job_pump_day_check(self) -> None:
         """Check for intraday pump signal and execute if triggered.
 
         Thread-safe: Uses position lock to prevent TOCTOU race conditions.
@@ -592,7 +592,7 @@ class SmartScheduler:
             self._error_count += 1
             self._send_error_notification(f"Pump day check failed: {e}")
 
-    def _job_ten_am_dump_exit(self):
+    def _job_ten_am_dump_exit(self) -> None:
         """Exit 10 AM dump position at 10:30 AM ET."""
         now = get_et_now()
 
@@ -651,7 +651,9 @@ class SmartScheduler:
             self._error_count += 1
             self._send_error_notification(f"10 AM dump exit failed: {e}")
 
-    def _close_position_with_retry(self, etf: str, max_retries: int = 3) -> tuple:
+    def _close_position_with_retry(
+        self, etf: str, max_retries: int = 3
+    ) -> Tuple[bool, Optional[TradeResult]]:
         """
         Close a position with retry logic and exponential backoff.
 
@@ -660,7 +662,7 @@ class SmartScheduler:
             max_retries: Maximum number of retry attempts
 
         Returns:
-            Tuple of (success: bool, result_or_error: TradeResult|str)
+            Tuple of (success: bool, result: TradeResult or None)
         """
         import time
 
@@ -704,9 +706,9 @@ class SmartScheduler:
                 else:
                     return (False, f"Exception after {max_retries} attempts: {e}")
 
-        return (False, f"Failed after {max_retries} attempts")
+        return (False, None)
 
-    def _job_close_positions(self):
+    def _job_close_positions(self) -> None:
         """Close any open positions before market close with retry logic."""
         now = get_et_now()
 
@@ -745,7 +747,11 @@ class SmartScheduler:
         # Send Telegram notification for results
         self._send_close_positions_notification(close_successes, close_failures)
 
-    def _send_close_positions_notification(self, successes: list, failures: list):
+    def _send_close_positions_notification(
+        self,
+        successes: List[Tuple[str, TradeResult]],
+        failures: List[Tuple[str, Optional[str]]],
+    ) -> None:
         """Send Telegram notification for EOD close results."""
         try:
             from .utils import get_et_now
@@ -760,8 +766,7 @@ class SmartScheduler:
                 for etf, error in failures:
                     message += f"• {etf}: {error}\n"
                 message += (
-                    "\n⚠️ *POSITIONS MAY STILL BE OPEN*\n"
-                    "Check your brokerage account immediately!"
+                    "\n⚠️ *POSITIONS MAY STILL BE OPEN*\nCheck your brokerage account immediately!"
                 )
             elif successes:
                 # Success notification
@@ -782,7 +787,7 @@ class SmartScheduler:
         except Exception as e:
             logger.error(f"Failed to send close notification: {e}")
 
-    def _job_hedge_check(self):
+    def _job_hedge_check(self) -> None:
         """Check and execute trailing hedges if position has gained enough."""
         now = get_et_now()
 
@@ -827,7 +832,7 @@ class SmartScheduler:
             self._error_count += 1
             self._send_error_notification(f"Hedge check failed: {e}")
 
-    def _send_hedge_notification(self, result):
+    def _send_hedge_notification(self, result: TradeResult) -> None:
         """Send Telegram notification for hedge execution."""
         try:
             mode = "[PAPER]" if result.is_paper else "[LIVE]"
@@ -849,7 +854,7 @@ class SmartScheduler:
         except Exception as e:
             logger.warning(f"Failed to send hedge notification: {e}")
 
-    def _job_reversal_check(self):
+    def _job_reversal_check(self) -> None:
         """Check and execute position reversal if BITU is down enough."""
         now = get_et_now()
 
@@ -895,7 +900,7 @@ class SmartScheduler:
             self._error_count += 1
             self._send_error_notification(f"Reversal check failed: {e}")
 
-    def _send_reversal_notification(self, result):
+    def _send_reversal_notification(self, result: TradeResult) -> None:
         """Send Telegram notification for position reversal."""
         try:
             mode = "[PAPER]" if result.is_paper else "[LIVE]"
@@ -915,7 +920,7 @@ class SmartScheduler:
         except Exception as e:
             logger.warning(f"Failed to send reversal notification: {e}")
 
-    def _job_renew_token(self):
+    def _job_renew_token(self) -> None:
         """Renew E*TRADE token."""
         if self.bot.client and not self.bot.is_paper_mode:
             try:
@@ -924,7 +929,7 @@ class SmartScheduler:
             except Exception as e:
                 logger.error(f"Token renewal failed: {e}")
 
-    def _job_daily_summary(self):
+    def _job_daily_summary(self) -> None:
         """Send daily summary via Telegram at 4:00 PM ET."""
         now = get_et_now()
 
@@ -979,7 +984,7 @@ class SmartScheduler:
             logger.error(f"Daily summary failed: {e}")
             self._error_count += 1
 
-    def _job_premarket_reminder(self):
+    def _job_premarket_reminder(self) -> None:
         """Send pre-market reminder at 9:15 AM ET."""
         now = get_et_now()
 
@@ -1016,7 +1021,7 @@ class SmartScheduler:
         )
         logger.info("Pre-market reminder sent")
 
-    def _job_position_update(self):
+    def _job_position_update(self) -> None:
         """Send hourly position update if holding a position."""
         now = get_et_now()
 
@@ -1068,7 +1073,7 @@ class SmartScheduler:
         )
         logger.info("Position update sent")
 
-    def _job_health_check(self):
+    def _job_health_check(self) -> None:
         """Morning health check - verify account, data feeds, etc."""
         now = get_et_now()
 
@@ -1128,7 +1133,7 @@ class SmartScheduler:
         self._send_notification(message, parse_mode=None)
         logger.info(f"Health check sent: {len(issues)} issues found")
 
-    def _job_pattern_analysis(self):
+    def _job_pattern_analysis(self) -> None:
         """Monthly pattern analysis - runs LLM to discover new trading patterns."""
         from .pattern_discovery import (
             PatternStatus,
@@ -1202,7 +1207,7 @@ class SmartScheduler:
 
         run_async(_run_analysis())
 
-    def _job_strategy_review(self):
+    def _job_strategy_review(self) -> None:
         """Bi-weekly strategy review - backtests parameters and sends Claude analysis."""
         from .strategy_review import get_strategy_reviewer
 
@@ -1250,7 +1255,7 @@ class SmartScheduler:
 
         run_async(_run_review())
 
-    def start(self):
+    def start(self) -> None:
         """Start the scheduler."""
         if self.status == BotStatus.RUNNING:
             logger.warning("Scheduler already running")
@@ -1263,7 +1268,7 @@ class SmartScheduler:
 
         self.db.log_event("SCHEDULER_START", "Bot scheduler started")
 
-    def stop(self):
+    def stop(self) -> None:
         """Stop the scheduler."""
         if self.status != BotStatus.RUNNING:
             return
@@ -1279,7 +1284,7 @@ class SmartScheduler:
         logger.info("Manual signal execution triggered")
         return self.bot.execute_signal()
 
-    def get_status(self) -> dict:
+    def get_status(self) -> Dict[str, Any]:
         """Get scheduler status."""
         return {
             "status": self.status.value,
