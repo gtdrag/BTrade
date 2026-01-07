@@ -1,30 +1,31 @@
 """
-Strategy Review Module - BACKWARD COMPATIBILITY SHIM.
+Strategy Review Package.
 
-This module has been refactored into the strategy_review/ package.
-This shim maintains backward compatibility for existing imports.
-
-For new code, import directly from the package:
-    from src.strategy_review import StrategyReviewer
+Monthly strategy review using Claude for analysis.
+Combines market data, backtesting, and AI-powered recommendations.
 """
 
-# Re-export everything from the package for backward compatibility
-from .strategy_review import (
+from .config import (
     PARAMETER_CHANGE_TOOL,
     STRATEGY_PARAMETERS,
     STRATEGY_REVIEW_PROMPT,
     WATCH_ITEM_TOOL,
+)
+from .models import (
     BacktestResult,
     ParameterRecommendation,
     StrategyRecommendation,
-    StrategyReviewer,
 )
+from .reviewer import StrategyReviewer
 
 __all__ = [
+    # Main class
     "StrategyReviewer",
+    # Models
     "BacktestResult",
     "ParameterRecommendation",
     "StrategyRecommendation",
+    # Config
     "STRATEGY_PARAMETERS",
     "PARAMETER_CHANGE_TOOL",
     "WATCH_ITEM_TOOL",
