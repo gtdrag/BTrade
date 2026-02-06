@@ -295,6 +295,120 @@ class PositionsMixin:
                 is_paper=False,
             )
 
+    def liquidate_all_account_positions(self: "TradingBot") -> List[Dict[str, Any]]:
+        """
+        Sell ALL positions in the E*TRADE account (not just bot-tracked ETFs).
+
+        In paper mode, falls back to close_all_positions() since paper mode
+        only tracks BITU/SBIT positions.
+
+        In live mode, queries ALL account positions and sells each one.
+
+        Thread-safe: Uses position lock to prevent concurrent modifications.
+
+        Returns:
+            List of dicts with keys: symbol, shares, price, total_value, success, error, order_id
+        """
+        with self._position_lock:
+            if self.is_paper_mode:
+                # Paper mode only tracks bot positions, use existing logic
+                trade_results = self.close_all_positions(reason="SELLALL command")
+                results = []
+                for tr in trade_results:
+                    results.append(
+                        {
+                            "symbol": tr.etf,
+                            "shares": tr.shares or 0,
+                            "price": tr.price or 0.0,
+                            "total_value": tr.total_value or 0.0,
+                            "success": tr.success,
+                            "error": tr.error,
+                            "order_id": tr.order_id or "",
+                        }
+                    )
+                return results
+
+            # Live mode: sell EVERYTHING in the account
+            if not self.client:
+                raise ETradeAuthError("E*TRADE client not configured")
+
+            if not self.client.ensure_authenticated():
+                raise ETradeAuthError("E*TRADE client not authenticated")
+
+            all_positions = self.client.get_account_positions(self.config.account_id_key)
+            results = []
+
+            for pos in all_positions:
+                symbol = pos.get("Product", {}).get("symbol", pos.get("symbolDescription", ""))
+                shares = int(pos.get("quantity", 0))
+
+                if not symbol or shares <= 0:
+                    continue
+
+                result = {
+                    "symbol": symbol,
+                    "shares": shares,
+                    "price": 0.0,
+                    "total_value": 0.0,
+                    "success": False,
+                    "error": None,
+                    "order_id": "",
+                }
+
+                try:
+                    # Preview order
+                    preview = self.client.preview_order(
+                        account_id_key=self.config.account_id_key,
+                        symbol=symbol,
+                        action="SELL",
+                        quantity=shares,
+                        order_type="MARKET",
+                    )
+
+                    # Place sell order
+                    order_response = self.client.place_order(
+                        account_id_key=self.config.account_id_key,
+                        symbol=symbol,
+                        action="SELL",
+                        quantity=shares,
+                        order_type="MARKET",
+                        preview_ids=preview.get("PreviewIds", []),
+                    )
+
+                    order_id = str(order_response.get("OrderId", ""))
+                    result["order_id"] = order_id
+
+                    # Poll for fill
+                    fill_info = self._wait_for_order_fill(order_id)
+                    if fill_info:
+                        result["price"] = fill_info["avg_price"]
+                        result["shares"] = fill_info["filled_qty"]
+                        result["total_value"] = fill_info["filled_qty"] * fill_info["avg_price"]
+                        result["success"] = True
+                    else:
+                        # Fill unconfirmed but order was placed
+                        result["success"] = True
+                        result["error"] = "Fill unconfirmed - check E*TRADE"
+
+                    logger.info(f"[SELLALL] Sold {shares} {symbol} - Order {order_id}")
+
+                except ETradeAPIError as e:
+                    result["error"] = str(e)
+                    logger.error(f"[SELLALL] Failed to sell {symbol}: {e}")
+
+                results.append(result)
+
+            # Clear hedge manager since all positions are gone
+            self.hedge_manager.clear_position()
+
+            self.db.log_event(
+                "SELLALL",
+                f"Liquidated {len(results)} positions",
+                {"results": [r["symbol"] for r in results], "timestamp": get_et_now().isoformat()},
+            )
+
+            return results
+
     def get_portfolio_value(self: "TradingBot") -> Dict[str, Any]:
         """
         Get real-time portfolio value with unrealized P&L.

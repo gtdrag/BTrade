@@ -4,12 +4,14 @@ Trading command handlers for Telegram bot.
 Commands in this module:
 - Bot control: /mode, /pause, /resume
 - Information: /balance, /positions, /signal, /jobs, /logs
+- Risk management: /sellall
 """
 
 import logging
+from datetime import datetime
 from typing import TYPE_CHECKING
 
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
 from ..async_utils import run_sync_in_executor
@@ -31,6 +33,7 @@ class TradingCommandsMixin:
     - trading_bot: Optional[TradingBot]
     - scheduler: Optional[SmartScheduler]
     - _is_paused: bool
+    - _pending_sellall: Optional[dict]
     """
 
     # =========================================================================
@@ -397,3 +400,105 @@ class TradingCommandsMixin:
 
         except Exception as e:
             await update.message.reply_text(f"❌ Error fetching logs: {escape_markdown(str(e))}")
+
+    # =========================================================================
+    # Risk Management Commands
+    # =========================================================================
+
+    async def _cmd_sellall(self: "TelegramBot", update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /sellall command - liquidate all positions in the account."""
+        if not self._is_authorized(update):
+            await self._send_unauthorized_response(update)
+            return
+
+        if not self.trading_bot:
+            await update.message.reply_text("Trading bot not available.")
+            return
+
+        try:
+            # Get all positions based on mode
+            if self.trading_bot.is_paper_mode:
+                portfolio = await run_sync_in_executor(self.trading_bot.get_portfolio_value)
+                positions = portfolio.get("positions", [])
+            else:
+                # Live mode: get ALL account positions (unfiltered)
+                if not self.trading_bot.client or not self.trading_bot.client.is_authenticated():
+                    await update.message.reply_text("E*TRADE client not authenticated.")
+                    return
+
+                raw_positions = await run_sync_in_executor(
+                    self.trading_bot.client.get_account_positions,
+                    self.trading_bot.config.account_id_key,
+                )
+                positions = []
+                for pos in raw_positions:
+                    symbol = pos.get("Product", {}).get("symbol", pos.get("symbolDescription", "?"))
+                    shares = int(pos.get("quantity", 0))
+                    current_value = float(pos.get("marketValue", 0) or 0)
+                    current_price = current_value / shares if shares > 0 else 0
+                    if shares > 0:
+                        positions.append(
+                            {
+                                "symbol": symbol,
+                                "shares": shares,
+                                "current_price": current_price,
+                                "current_value": current_value,
+                            }
+                        )
+
+            if not positions:
+                await update.message.reply_text("No open positions to sell.")
+                return
+
+            # Build summary
+            mode = "PAPER" if self.trading_bot.is_paper_mode else "LIVE"
+            lines = [f"SELL ALL POSITIONS ({mode})\n"]
+
+            total_value = 0.0
+            for pos in positions:
+                symbol = pos.get("symbol", "?")
+                shares = pos.get("shares", 0)
+                price = pos.get("current_price", 0)
+                value = pos.get("current_value", 0)
+                total_value += value
+                lines.append(f"  {symbol}: {shares} shares @ ${price:.2f} = ${value:,.2f}")
+
+            lines.append(f"\nTotal value: ${total_value:,.2f}")
+            lines.append(f"\nThis will SELL ALL {len(positions)} position(s) at market price.")
+
+            callback_id = f"sellall_{datetime.now().strftime('%H%M%S')}"
+            keyboard = [
+                [
+                    InlineKeyboardButton(
+                        "Confirm - Sell All", callback_data=f"sellall_confirm_{callback_id}"
+                    ),
+                    InlineKeyboardButton("Cancel", callback_data=f"sellall_cancel_{callback_id}"),
+                ]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+
+            await update.message.reply_text(
+                "\n".join(lines),
+                parse_mode=None,
+                reply_markup=reply_markup,
+            )
+
+            # Store pending state
+            self._pending_sellall = {
+                "positions": positions,
+                "callback_id": callback_id,
+                "total_value": total_value,
+            }
+
+            # Log the request
+            from ..database import get_database
+
+            db = get_database()
+            db.log_event(
+                "SELLALL_REQUESTED",
+                f"Sell all requested: {len(positions)} positions, ${total_value:,.2f}",
+            )
+
+        except Exception as e:
+            logger.error(f"Error in /sellall: {e}")
+            await update.message.reply_text(f"Error: {str(e)}")

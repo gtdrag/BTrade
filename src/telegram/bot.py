@@ -18,6 +18,7 @@ from telegram.ext import (
     ContextTypes,
 )
 
+from ..async_utils import run_sync_in_executor
 from .analysis_commands import AnalysisCommandsMixin
 from .auth_commands import AuthCommandsMixin
 from .backtest_commands import BacktestCommandsMixin
@@ -49,7 +50,7 @@ class TelegramBot(
     - Interactive commands for bot control
 
     Command modules:
-    - TradingCommandsMixin: /mode, /pause, /resume, /balance, /positions, /signal, /jobs, /logs
+    - TradingCommandsMixin: /mode, /pause, /resume, /balance, /positions, /signal, /jobs, /logs, /sellall
     - AnalysisCommandsMixin: /analyze, /patterns, /analyses, /promote, /retire, /hedge, /review
     - AuthCommandsMixin: /auth, /verify
     - BacktestCommandsMixin: /backtest, /simulate
@@ -80,6 +81,7 @@ class TelegramBot(
         self._pending_approval: Optional[TradeApprovalRequest] = None
         self._approval_event: Optional[asyncio.Event] = None
         self._approval_result: Optional[ApprovalResult] = None
+        self._pending_sellall = None  # Stores pending sellall confirmation state
         self._is_running = False
 
     def _is_authorized(self, update: Update) -> bool:
@@ -134,6 +136,9 @@ class TelegramBot(
         self._app.add_handler(CommandHandler("signal", self._cmd_signal))
         self._app.add_handler(CommandHandler("jobs", self._cmd_jobs))
         self._app.add_handler(CommandHandler("logs", self._cmd_logs))
+
+        # Add command handlers - risk management (from TradingCommandsMixin)
+        self._app.add_handler(CommandHandler("sellall", self._cmd_sellall))
 
         # Add command handlers - analysis (from AnalysisCommandsMixin)
         self._app.add_handler(CommandHandler("analyze", self._cmd_analyze))
@@ -320,6 +325,7 @@ class TelegramBot(
             "/promote - Promote pattern to paper/live\n"
             "/retire - Retire a pattern\n\n"
             "🛡️ *Risk Management:*\n"
+            "/sellall - Sell ALL positions in account\n"
             "/hedge - Trailing hedge status/control\n"
             "/review - Run monthly strategy review now\n\n"
             "📈 *Backtesting & Simulation:*\n"
@@ -397,6 +403,11 @@ class TelegramBot(
 
         data = query.data
         logger.info(f"Received callback: {data}")
+
+        # Handle sellall confirmation/cancellation
+        if data.startswith("sellall_confirm_") or data.startswith("sellall_cancel_"):
+            await self._handle_sellall_callback(query, data)
+            return
 
         # Check if this is a test callback
         is_test = "_test_" in data
@@ -515,6 +526,104 @@ class TelegramBot(
                     f"Keeping current value: `{current_val}`"
                 ),
                 parse_mode="Markdown",
+            )
+
+    async def _handle_sellall_callback(self, query, data: str):
+        """Handle sellall confirm/cancel callbacks."""
+        if data.startswith("sellall_cancel_"):
+            self._pending_sellall = None
+            await query.edit_message_text(
+                text=query.message.text + "\n\nCANCELLED - No positions were sold.",
+                parse_mode=None,
+            )
+            return
+
+        # Confirm path
+        if not self._pending_sellall:
+            await query.edit_message_text(
+                text="Sell all request expired. Please run /sellall again.",
+                parse_mode=None,
+            )
+            return
+
+        if not self.trading_bot:
+            await query.edit_message_text(
+                text="Trading bot not available.",
+                parse_mode=None,
+            )
+            self._pending_sellall = None
+            return
+
+        self._pending_sellall = None
+
+        await query.edit_message_text(
+            text=query.message.text + "\n\nExecuting sell all...",
+            parse_mode=None,
+        )
+
+        try:
+            results = await run_sync_in_executor(self.trading_bot.liquidate_all_account_positions)
+
+            if not results:
+                await self._app.bot.send_message(
+                    chat_id=self.chat_id,
+                    text="No positions were sold (account may already be empty).",
+                    parse_mode=None,
+                )
+                return
+
+            # Build results summary
+            lines = ["SELL ALL RESULTS\n"]
+            total_sold = 0.0
+            successes = 0
+            failures = 0
+
+            for r in results:
+                symbol = r.get("symbol", "?")
+                shares = r.get("shares", 0)
+                price = r.get("price", 0)
+                value = r.get("total_value", 0)
+                success = r.get("success", False)
+                error = r.get("error")
+
+                if success:
+                    successes += 1
+                    total_sold += value
+                    status = "SOLD"
+                    if error:
+                        status = f"SOLD ({error})"
+                    lines.append(
+                        f"  {symbol}: {shares} shares @ ${price:.2f} = ${value:,.2f} - {status}"
+                    )
+                else:
+                    failures += 1
+                    lines.append(f"  {symbol}: FAILED - {error}")
+
+            lines.append(f"\nSummary: {successes} sold, {failures} failed")
+            if total_sold > 0:
+                lines.append(f"Total proceeds: ${total_sold:,.2f}")
+
+            await self._app.bot.send_message(
+                chat_id=self.chat_id,
+                text="\n".join(lines),
+                parse_mode=None,
+            )
+
+            # Log completion
+            from ..database import get_database
+
+            db = get_database()
+            db.log_event(
+                "SELLALL_COMPLETED",
+                f"Sold {successes} positions for ${total_sold:,.2f}",
+            )
+
+        except Exception as e:
+            logger.error(f"Error executing sell all: {e}")
+            await self._app.bot.send_message(
+                chat_id=self.chat_id,
+                text=f"Error executing sell all: {str(e)}",
+                parse_mode=None,
             )
 
     # =========================================================================
