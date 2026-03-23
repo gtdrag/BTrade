@@ -99,43 +99,43 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| API-01 | — | Pending |
-| API-02 | — | Pending |
-| API-03 | — | Pending |
-| API-04 | — | Pending |
-| DB-01 | — | Pending |
-| DB-02 | — | Pending |
-| DB-03 | — | Pending |
-| DB-04 | — | Pending |
-| CSP-01 | — | Pending |
-| CSP-02 | — | Pending |
-| CSP-03 | — | Pending |
-| CSP-04 | — | Pending |
-| CSP-05 | — | Pending |
-| CSP-06 | — | Pending |
-| ASGN-01 | — | Pending |
-| ASGN-02 | — | Pending |
-| ASGN-03 | — | Pending |
-| CC-01 | — | Pending |
-| CC-02 | — | Pending |
-| CC-03 | — | Pending |
-| CC-04 | — | Pending |
-| PM-01 | — | Pending |
-| PM-02 | — | Pending |
-| PM-03 | — | Pending |
-| PM-04 | — | Pending |
-| PM-05 | — | Pending |
-| TR-01 | — | Pending |
-| TR-02 | — | Pending |
-| TR-03 | — | Pending |
-| TR-04 | — | Pending |
-| TR-05 | — | Pending |
+| API-01 | Phase 1 | Pending |
+| API-02 | Phase 1 | Pending |
+| API-03 | Phase 1 | Pending |
+| API-04 | Phase 1 | Pending |
+| DB-01 | Phase 2 | Pending |
+| DB-02 | Phase 2 | Pending |
+| DB-03 | Phase 2 | Pending |
+| DB-04 | Phase 2 | Pending |
+| CSP-01 | Phase 3 | Pending |
+| CSP-02 | Phase 3 | Pending |
+| CSP-03 | Phase 3 | Pending |
+| CSP-04 | Phase 3 | Pending |
+| CSP-05 | Phase 3 | Pending |
+| CSP-06 | Phase 3 | Pending |
+| ASGN-01 | Phase 3 | Pending |
+| ASGN-02 | Phase 3 | Pending |
+| ASGN-03 | Phase 3 | Pending |
+| CC-01 | Phase 4 | Pending |
+| CC-02 | Phase 4 | Pending |
+| CC-03 | Phase 4 | Pending |
+| CC-04 | Phase 4 | Pending |
+| PM-01 | Phase 5 | Pending |
+| PM-02 | Phase 5 | Pending |
+| PM-03 | Phase 5 | Pending |
+| PM-04 | Phase 5 | Pending |
+| PM-05 | Phase 5 | Pending |
+| TR-01 | Phase 6 | Pending |
+| TR-02 | Phase 6 | Pending |
+| TR-03 | Phase 6 | Pending |
+| TR-04 | Phase 6 | Pending |
+| TR-05 | Phase 6 | Pending |
 
 **Coverage:**
 - v1 requirements: 31 total
-- Mapped to phases: 0
-- Unmapped: 31 ⚠️
+- Mapped to phases: 31
+- Unmapped: 0 ✓
 
 ---
 *Requirements defined: 2026-03-18*
-*Last updated: 2026-03-18 after initial definition*
+*Last updated: 2026-03-23 after roadmap creation*
