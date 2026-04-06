@@ -486,22 +486,13 @@ def _check_quote_freshness(self, timestamp_epoch: int, symbol: str) -> None:
 
 ---
 
-## Open Questions
+## Open Questions (RESOLVED)
 
-1. **OptionChainResponse exact JSON key structure**
-   - What we know: Endpoint is `/v1/market/optionchains`, returns `OptionChainResponse` with `optionPairs` (or `OptionPair`) array
-   - What's unclear: Whether the JSON key is `optionPairs` or `OptionPair` (XML-to-JSON conversion varies); whether `Call`/`Put` are direct keys or nested differently
-   - Recommendation: On first production/sandbox call, log `json.dumps(response, indent=2)` and update the parser. The mock should return a structure that mirrors what the real API returns once confirmed.
+1. **OptionChainResponse exact JSON key structure** — RESOLVED: Use `OptionPair` as primary key; on first real API call, log raw response shape with `json.dumps(response, indent=2)` and update parser if needed. Mock mirrors this structure.
 
-2. **DTE Filtering: Client-side vs Server-side**
-   - What we know: E*TRADE API accepts `expiryYear`/`expiryMonth`/`expiryDay` as request params but only for a single expiration date, not a range
-   - What's unclear: Whether the API supports a range filter or always returns all expirations for the given `chainType`
-   - Recommendation: Fetch all expirations, filter client-side to 30-45 DTE range. This is safe and avoids requiring multiple API calls.
+2. **DTE Filtering: Client-side vs Server-side** — RESOLVED: Fetch all expirations, filter client-side to 30-45 DTE range. E*TRADE API only supports single expiry params, not ranges.
 
-3. **Options Greeks in Sandbox**
-   - What we know: Sandbox returns stale AAPL 2013 data; real Greeks values may differ in structure
-   - What's unclear: Whether the `OptionGreeks` JSON block is always present or conditional on `includeGreeks` parameter
-   - Recommendation: Add `includeGreeks: "true"` to request params defensively; validate that `greeks.get("delta")` is not None before using.
+3. **Options Greeks in Sandbox** — RESOLVED: Add `includeGreeks: "true"` to request params defensively. Mock is primary test vehicle since sandbox returns stale 2013 data. Validate `greeks.get("delta")` is not None before using.
 
 ---
 

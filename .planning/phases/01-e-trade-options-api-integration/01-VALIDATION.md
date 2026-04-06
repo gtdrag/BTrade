@@ -41,7 +41,7 @@ created: 2026-04-06
 | 01-01-01 | 01 | 1 | API-01 | — | N/A | unit | `python -m pytest tests/test_etrade_options.py -k "chain" -v` | ❌ W0 | ⬜ pending |
 | 01-01-02 | 01 | 1 | API-04 | — | N/A | unit | `python -m pytest tests/test_etrade_options.py -k "freshness" -v` | ❌ W0 | ⬜ pending |
 | 01-02-01 | 02 | 1 | API-02 | — | N/A | unit | `python -m pytest tests/test_etrade_options.py -k "order" -v` | ❌ W0 | ⬜ pending |
-| 01-03-01 | 03 | 1 | API-03 | — | N/A | unit | `python -m pytest tests/test_etrade_options.py -k "positions" -v` | ❌ W0 | ⬜ pending |
+| 01-02-02 | 02 | 2 | API-03 | — | N/A | unit | `python -m pytest tests/test_etrade_options.py -k "positions" -v` | ❌ W0 | ⬜ pending |
 
 *Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
 
