@@ -31,10 +31,11 @@ Decimal phases appear between their surrounding integers in numeric order.
   3. Bot queries current options positions from E*TRADE portfolio API showing contract details
   4. Bot rejects stale quotes (older than 60 seconds) before suggesting trades
   5. All E*TRADE options responses are validated against expected schema without errors
-**Plans**: TBD
+**Plans:** 2 plans
 
 Plans:
-- [ ] TBD (defined during phase planning)
+- [ ] 01-01-PLAN.md — Options chain fetch with freshness validation and mock Greeks (API-01, API-04)
+- [ ] 01-02-PLAN.md — Options order flow (preview/place) and positions query (API-02, API-03)
 
 ### Phase 2: Options Database & State Management
 **Goal**: Options positions and wheel cycles are persistently tracked with accurate cost basis across assignments
@@ -119,7 +120,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. E*TRADE Options API Integration | 0/TBD | Not started | - |
+| 1. E*TRADE Options API Integration | 0/2 | Planning complete | - |
 | 2. Options Database & State Management | 0/TBD | Not started | - |
 | 3. Cash-Secured Put Cycle | 0/TBD | Not started | - |
 | 4. Covered Call Cycle | 0/TBD | Not started | - |
