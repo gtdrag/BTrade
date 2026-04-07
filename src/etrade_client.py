@@ -5,9 +5,11 @@ Handles OAuth authentication, quotes, orders, and account management.
 
 import json
 import logging
+import math
 import os
 import time
 import webbrowser
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -28,6 +30,8 @@ OAUTH_AUTHORIZE = "https://us.etrade.com/e/t/etws/authorize"
 OAUTH_ACCESS_TOKEN = "/oauth/access_token"
 OAUTH_RENEW_TOKEN = "/oauth/renew_access_token"
 OAUTH_REVOKE_TOKEN = "/oauth/revoke_access_token"
+
+QUOTE_FRESHNESS_SECONDS = 60  # Hardcoded per user decision — reject options quotes older than this
 
 
 class ETradeAuthError(Exception):
@@ -587,6 +591,99 @@ class ETradeClient:
             "change_pct": float(all_data.get("changeClose", 0)),
         }
 
+    # ==================== Options Chain Methods ====================
+
+    def get_ibit_options_chain(self) -> List[Dict[str, Any]]:
+        """Fetch IBIT options chain for 30-45 DTE expirations.
+
+        Raises ETradeAPIError if any quotes are stale (>60s).
+
+        Returns:
+            List of contract dicts, each with: symbol, option_type, strike,
+            expiry_date, dte, bid, ask, last, open_interest, delta, gamma,
+            theta, vega, iv, quote_timestamp.
+        """
+        now = get_et_now()
+        min_expiry = now + timedelta(days=30)
+        max_expiry = now + timedelta(days=45)
+
+        params = {
+            "symbol": "IBIT",
+            "chainType": "CALLPUT",
+            "includeWeekly": "false",
+            "skipAdjusted": "true",
+            "optionCategory": "STANDARD",
+        }
+
+        response = self._request("GET", "/v1/market/optionchains", params=params)
+
+        option_pairs = (
+            response.get("OptionChainResponse", {}).get("OptionPair", [])
+        )
+        if isinstance(option_pairs, dict):
+            option_pairs = [option_pairs]
+
+        contracts: List[Dict[str, Any]] = []
+
+        for pair in option_pairs:
+            for option_key, option_type in (("Call", "CALL"), ("Put", "PUT")):
+                option = pair.get(option_key)
+                if not option:
+                    continue
+
+                # Freshness check — T-01-02: reject stale quotes
+                timestamp_epoch = option.get("timeStamp", 0)
+                age_seconds = time.time() - timestamp_epoch
+                if age_seconds > QUOTE_FRESHNESS_SECONDS:
+                    raise ETradeAPIError(
+                        f"Stale options quote for {option.get('symbol', 'unknown')}: "
+                        f"{age_seconds:.0f}s old (max {QUOTE_FRESHNESS_SECONDS}s)"
+                    )
+
+                # Parse expiry — T-01-03: use .get() with defaults, skip bad data
+                expiry_year = int(option.get("expiryYear", 0))
+                expiry_month = int(option.get("expiryMonth", 0))
+                expiry_day = int(option.get("expiryDay", 0))
+                if not (expiry_year and expiry_month and expiry_day):
+                    continue
+
+                expiry_date = datetime(expiry_year, expiry_month, expiry_day)
+
+                # DTE filter: 30-45 days only
+                min_naive = min_expiry.replace(tzinfo=None)
+                max_naive = max_expiry.replace(tzinfo=None)
+                if not (min_naive <= expiry_date <= max_naive):
+                    continue
+
+                dte = (expiry_date - now.replace(tzinfo=None)).days
+
+                greeks = option.get("OptionGreeks", {})
+
+                contracts.append({
+                    "symbol": option.get("symbol", ""),
+                    "option_type": option_type,
+                    "strike": float(option.get("strikePrice", 0)),
+                    "expiry_year": expiry_year,
+                    "expiry_month": expiry_month,
+                    "expiry_day": expiry_day,
+                    "expiry_date": expiry_date.date(),
+                    "dte": dte,
+                    "bid": float(option.get("bid", 0)),
+                    "ask": float(option.get("ask", 0)),
+                    "last": float(option.get("lastPrice", 0)),
+                    "open_interest": int(option.get("openInterest", 0)),
+                    "delta": float(greeks.get("delta", 0)),
+                    "gamma": float(greeks.get("gamma", 0)),
+                    "theta": float(greeks.get("theta", 0)),
+                    "vega": float(greeks.get("vega", 0)),
+                    "iv": float(greeks.get("iv", 0)),
+                    "quote_timestamp": int(timestamp_epoch),
+                })
+
+        # Log only contract count — T-01-01: do not log raw API response
+        logger.info(f"get_ibit_options_chain: fetched {len(contracts)} contracts (30-45 DTE)")
+        return contracts
+
     # ==================== Order Methods ====================
 
     def preview_order(
@@ -786,6 +883,110 @@ class MockETradeClient:
             "volume": 1000000,
             "change_pct": -0.5,
         }
+
+    # ==================== Options Chain Methods ====================
+
+    def _normal_cdf(self, x: float) -> float:
+        """Normal CDF approximation using Abramowitz & Stegun formula."""
+        t = 1.0 / (1.0 + 0.2316419 * abs(x))
+        d = 0.3989422804014327  # 1/sqrt(2*pi)
+        p = d * math.exp(-x * x / 2.0) * (
+            t * (0.319381530 + t * (-0.356563782 + t * (1.781477937 + t * (-1.821255978 + t * 1.330274429))))
+        )
+        return 1.0 - p if x >= 0 else p
+
+    def _simulate_greeks(
+        self, spot: float, strike: float, dte: int, option_type: str, iv: float = 0.40
+    ) -> Dict[str, float]:
+        """Simulate realistic Black-Scholes Greeks for a given option."""
+        t = max(dte, 1) / 365.0
+        d1 = (math.log(spot / strike) + (0.05 + iv**2 / 2) * t) / (iv * math.sqrt(t))
+
+        if option_type == "CALL":
+            delta = self._normal_cdf(d1)
+        else:  # PUT
+            delta = self._normal_cdf(d1) - 1.0
+
+        gamma = (
+            0.3989422804014327 * math.exp(-d1**2 / 2.0) / (spot * iv * math.sqrt(t))
+        )
+
+        premium = max(spot * iv * math.sqrt(t) * 0.4, 0.10)
+        theta = -(premium / max(dte, 1)) * 0.5
+        vega = (
+            spot * math.sqrt(t) * 0.3989422804014327 * math.exp(-d1**2 / 2.0) / 100.0
+        )
+
+        return {
+            "delta": delta,
+            "gamma": gamma,
+            "theta": theta,
+            "vega": vega,
+            "iv": iv,
+        }
+
+    def get_ibit_options_chain(self) -> List[Dict[str, Any]]:
+        """Return simulated IBIT options chain for 30-45 DTE contracts.
+
+        Uses Black-Scholes approximation for realistic Greeks.
+        Raises ETradeAPIError if _force_stale_quotes is True.
+        """
+        spot = self._mock_prices.get("IBIT", 50.0)
+
+        if getattr(self, "_force_stale_quotes", False):
+            raise ETradeAPIError("Stale options quote for IBIT:MOCK: 120s old (max 60s)")
+
+        dte = 35  # Middle of 30-45 DTE range
+        now = get_et_now()
+        expiry_date = (now + timedelta(days=dte)).date()
+        quote_timestamp = int(time.time())
+
+        contracts: List[Dict[str, Any]] = []
+
+        # Generate strikes from spot-5 to spot+5 in $1 increments (11 strikes)
+        for strike_offset in range(-5, 6):
+            strike = round(spot + strike_offset, 2)
+
+            for option_type in ("PUT", "CALL"):
+                greeks = self._simulate_greeks(spot, strike, dte, option_type, iv=0.40)
+
+                # Build bid/ask from premium approximation
+                premium = abs(greeks["theta"]) * dte * 2
+                bid = round(max(premium - 0.05, 0.01), 2)
+                ask = round(premium + 0.05, 2)
+                last = round(premium, 2)
+
+                # Higher open interest near ATM
+                open_interest = max(100, int(1000 * (1 - abs(spot - strike) / spot)))
+
+                # OSI-style symbol: IBITyymmddX00000000 (strike * 1000, 8 digits)
+                symbol = (
+                    f"IBIT{expiry_date.strftime('%y%m%d')}"
+                    f"{option_type[0]}{int(strike * 1000):08d}"
+                )
+
+                contracts.append({
+                    "symbol": symbol,
+                    "option_type": option_type,
+                    "strike": float(strike),
+                    "expiry_year": expiry_date.year,
+                    "expiry_month": expiry_date.month,
+                    "expiry_day": expiry_date.day,
+                    "expiry_date": expiry_date,
+                    "dte": dte,
+                    "bid": float(bid),
+                    "ask": float(ask),
+                    "last": float(last),
+                    "open_interest": open_interest,
+                    "delta": float(greeks["delta"]),
+                    "gamma": float(greeks["gamma"]),
+                    "theta": float(greeks["theta"]),
+                    "vega": float(greeks["vega"]),
+                    "iv": float(greeks["iv"]),
+                    "quote_timestamp": quote_timestamp,
+                })
+
+        return contracts
 
     def preview_order(
         self,
