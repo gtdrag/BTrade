@@ -34,8 +34,8 @@ Decimal phases appear between their surrounding integers in numeric order.
 **Plans:** 2 plans
 
 Plans:
-- [ ] 01-01-PLAN.md — Options chain fetch with freshness validation and mock Greeks (API-01, API-04)
-- [ ] 01-02-PLAN.md — Options order flow (preview/place) and positions query (API-02, API-03)
+- [x] 01-01-PLAN.md — Options chain fetch with freshness validation and mock Greeks (API-01, API-04)
+- [x] 01-02-PLAN.md — Options order flow (preview/place) and positions query (API-02, API-03)
 
 ### Phase 2: Options Database & State Management
 **Goal**: Options positions and wheel cycles are persistently tracked with accurate cost basis across assignments
