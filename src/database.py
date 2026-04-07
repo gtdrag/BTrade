@@ -218,6 +218,55 @@ class Database:
             if "market_regime" not in columns:
                 cursor.execute("ALTER TABLE strategy_reviews ADD COLUMN market_regime TEXT")
 
+            # Wheel strategy tables (Phase 2)
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS wheel_cycles (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    state TEXT NOT NULL DEFAULT 'CASH',
+                    underlying TEXT NOT NULL DEFAULT 'IBIT',
+                    put_strike REAL,
+                    put_premium_received REAL DEFAULT 0.0,
+                    put_expiry_date TEXT,
+                    shares_held INTEGER DEFAULT 0,
+                    cost_basis REAL DEFAULT 0.0,
+                    covered_call_premiums_collected REAL DEFAULT 0.0,
+                    realized_pnl REAL,
+                    opened_at TEXT NOT NULL,
+                    closed_at TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+            """
+            )
+
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS options_positions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    cycle_id INTEGER NOT NULL REFERENCES wheel_cycles(id),
+                    symbol TEXT NOT NULL,
+                    option_type TEXT NOT NULL,
+                    strike REAL NOT NULL,
+                    expiry_date TEXT NOT NULL,
+                    dte_at_entry INTEGER NOT NULL,
+                    quantity INTEGER NOT NULL DEFAULT 1,
+                    premium_received REAL NOT NULL,
+                    delta REAL,
+                    gamma REAL,
+                    theta REAL,
+                    vega REAL,
+                    iv REAL,
+                    status TEXT NOT NULL DEFAULT 'OPEN',
+                    close_premium REAL,
+                    opened_at TEXT NOT NULL,
+                    closed_at TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+            """
+            )
+
             # Initialize bot state if not exists
             cursor.execute(
                 """
