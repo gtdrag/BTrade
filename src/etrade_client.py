@@ -684,6 +684,126 @@ class ETradeClient:
         logger.info(f"get_ibit_options_chain: fetched {len(contracts)} contracts (30-45 DTE)")
         return contracts
 
+    # ==================== Options Order Methods ====================
+
+    def _build_options_order_request(
+        self,
+        symbol: str,
+        option_type: str,
+        expiry_year: int,
+        expiry_month: int,
+        expiry_day: int,
+        strike_price: float,
+        order_action: str,
+        quantity: int,
+        limit_price: float,
+        preview: bool,
+    ) -> Dict[str, Any]:
+        """Build options order request payload (OPTN security type). Limit orders only."""
+        order = {
+            "allOrNone": "false",
+            "priceType": "LIMIT",
+            "limitPrice": limit_price,
+            "orderTerm": "GOOD_FOR_DAY",
+            "marketSession": "REGULAR",
+            "Instrument": [
+                {
+                    "Product": {
+                        "securityType": "OPTN",
+                        "symbol": symbol,
+                        "callPut": option_type,
+                        "expiryYear": str(expiry_year),
+                        "expiryMonth": str(expiry_month),
+                        "expiryDay": str(expiry_day),
+                        "strikePrice": str(strike_price),
+                    },
+                    "orderAction": order_action,
+                    "quantityType": "QUANTITY",
+                    "quantity": quantity,
+                }
+            ],
+        }
+
+        key = "PreviewOrderRequest" if preview else "PlaceOrderRequest"
+        return {
+            key: {
+                "orderType": "OPTN",
+                "clientOrderId": f"OPTN_{get_et_now().strftime('%Y%m%d%H%M%S')}",
+                "Order": [order],
+            }
+        }
+
+    def preview_options_order(
+        self,
+        account_id_key: str,
+        symbol: str,
+        option_type: str,
+        expiry_year: int,
+        expiry_month: int,
+        expiry_day: int,
+        strike_price: float,
+        order_action: str,
+        quantity: int,
+        limit_price: float,
+    ) -> Dict[str, Any]:
+        """Preview an options order. Returns preview with estimated cost and PreviewIds."""
+        order_data = self._build_options_order_request(
+            symbol, option_type, expiry_year, expiry_month, expiry_day,
+            strike_price, order_action, quantity, limit_price, preview=True
+        )
+        response = self._request(
+            "POST", f"/v1/accounts/{account_id_key}/orders/preview", json_data=order_data
+        )
+        return response.get("PreviewOrderResponse", {})
+
+    def place_options_order(
+        self,
+        account_id_key: str,
+        symbol: str,
+        option_type: str,
+        expiry_year: int,
+        expiry_month: int,
+        expiry_day: int,
+        strike_price: float,
+        order_action: str,
+        quantity: int,
+        limit_price: float,
+        preview_ids: Optional[List[Dict]] = None,
+    ) -> Dict[str, Any]:
+        """Place an options order. Limit orders only. Use preview_ids from preview_options_order() when available."""
+        order_data = self._build_options_order_request(
+            symbol, option_type, expiry_year, expiry_month, expiry_day,
+            strike_price, order_action, quantity, limit_price, preview=False
+        )
+        if preview_ids:
+            order_data["PlaceOrderRequest"]["PreviewIds"] = preview_ids
+        response = self._request(
+            "POST", f"/v1/accounts/{account_id_key}/orders/place", json_data=order_data
+        )
+        return response.get("PlaceOrderResponse", {})
+
+    def get_options_positions(self, account_id_key: str) -> List[Dict[str, Any]]:
+        """Get current options positions from portfolio. Filters for OPTN securityType."""
+        all_positions = self.get_account_positions(account_id_key)
+        options = []
+        for pos in all_positions:
+            product = pos.get("Product", {})
+            if product.get("securityType") == "OPTN":
+                options.append({
+                    "symbol": product.get("symbol"),
+                    "option_type": product.get("callPut"),
+                    "strike": float(product.get("strikePrice", 0)),
+                    "expiry_year": int(product.get("expiryYear", 0)),
+                    "expiry_month": int(product.get("expiryMonth", 0)),
+                    "expiry_day": int(product.get("expiryDay", 0)),
+                    "quantity": float(pos.get("quantity", 0)),
+                    "position_type": pos.get("positionType"),
+                    "market_value": float(pos.get("marketValue", 0)),
+                    "total_gain": float(pos.get("totalGain", 0)),
+                    "osi_key": product.get("osiKey"),
+                })
+        return options
+
     # ==================== Order Methods ====================
 
     def preview_order(
@@ -816,6 +936,7 @@ class MockETradeClient:
         self.positions: Dict[str, Dict] = {}
         self.orders: List[Dict] = []
         self._mock_prices: Dict[str, float] = {"IBIT": 50.0}
+        self._options_positions: Dict[str, Dict] = {}
 
     def is_authenticated(self) -> bool:
         return True
@@ -1061,6 +1182,154 @@ class MockETradeClient:
             "OrderIds": [{"orderId": order_id}],
             "Order": [{"orderId": order_id, "status": "EXECUTED"}],
         }
+
+    # ==================== Options Order Methods ====================
+
+    def _build_options_order_request(
+        self,
+        symbol: str,
+        option_type: str,
+        expiry_year: int,
+        expiry_month: int,
+        expiry_day: int,
+        strike_price: float,
+        order_action: str,
+        quantity: int,
+        limit_price: float,
+        preview: bool,
+    ) -> Dict[str, Any]:
+        """Build options order request payload (OPTN security type). Limit orders only."""
+        order = {
+            "allOrNone": "false",
+            "priceType": "LIMIT",
+            "limitPrice": limit_price,
+            "orderTerm": "GOOD_FOR_DAY",
+            "marketSession": "REGULAR",
+            "Instrument": [
+                {
+                    "Product": {
+                        "securityType": "OPTN",
+                        "symbol": symbol,
+                        "callPut": option_type,
+                        "expiryYear": str(expiry_year),
+                        "expiryMonth": str(expiry_month),
+                        "expiryDay": str(expiry_day),
+                        "strikePrice": str(strike_price),
+                    },
+                    "orderAction": order_action,
+                    "quantityType": "QUANTITY",
+                    "quantity": quantity,
+                }
+            ],
+        }
+
+        key = "PreviewOrderRequest" if preview else "PlaceOrderRequest"
+        return {
+            key: {
+                "orderType": "OPTN",
+                "clientOrderId": f"OPTN_{get_et_now().strftime('%Y%m%d%H%M%S')}",
+                "Order": [order],
+            }
+        }
+
+    def preview_options_order(
+        self,
+        account_id_key: str,
+        symbol: str,
+        option_type: str,
+        expiry_year: int,
+        expiry_month: int,
+        expiry_day: int,
+        strike_price: float,
+        order_action: str,
+        quantity: int,
+        limit_price: float,
+    ) -> Dict[str, Any]:
+        """Preview an options order. Returns preview with estimated cost and PreviewIds."""
+        total = limit_price * quantity * 100
+        return {
+            "PreviewIds": [{"previewId": f"mock_optn_preview_{len(self.orders) + 1:03d}"}],
+            "Order": [{"estimatedTotalAmount": total, "estimatedCommission": 0}],
+        }
+
+    def place_options_order(
+        self,
+        account_id_key: str,
+        symbol: str,
+        option_type: str,
+        expiry_year: int,
+        expiry_month: int,
+        expiry_day: int,
+        strike_price: float,
+        order_action: str,
+        quantity: int,
+        limit_price: float,
+        preview_ids: Optional[List[Dict]] = None,
+    ) -> Dict[str, Any]:
+        """Place an options order. Limit orders only. Use preview_ids from preview_options_order() when available."""
+        order_id = f"MOCK_OPTN_{len(self.orders) + 1:06d}"
+        pos_key = f"{symbol}_{option_type}_{strike_price}_{expiry_year}{expiry_month:02d}{expiry_day:02d}"
+
+        if order_action == "SELL_OPEN":
+            premium_received = limit_price * quantity * 100
+            self.cash += premium_received
+            self._options_positions[pos_key] = {
+                "symbol": symbol,
+                "option_type": option_type,
+                "strike": float(strike_price),
+                "expiry_year": expiry_year,
+                "expiry_month": expiry_month,
+                "expiry_day": expiry_day,
+                "quantity": int(quantity),
+                "position_type": "SHORT",
+                "premium_received": float(premium_received),
+                "limit_price": float(limit_price),
+            }
+        elif order_action == "BUY_CLOSE":
+            cost = limit_price * quantity * 100
+            if pos_key not in self._options_positions:
+                raise ETradeAPIError("No position to close")
+            self.cash -= cost
+            del self._options_positions[pos_key]
+
+        order = {
+            "orderId": order_id,
+            "symbol": symbol,
+            "option_type": option_type,
+            "order_action": order_action,
+            "quantity": quantity,
+            "limit_price": limit_price,
+            "status": "EXECUTED",
+            "timestamp": get_et_now().isoformat(),
+        }
+        self.orders.append(order)
+
+        logger.info(
+            f"Mock options order executed: {order_action} {quantity} {symbol} {option_type} {strike_price} @ ${limit_price:.2f}"
+        )
+
+        return {
+            "OrderIds": [{"orderId": order_id}],
+            "Order": [{"orderId": order_id, "status": "EXECUTED"}],
+        }
+
+    def get_options_positions(self, account_id_key: str) -> List[Dict[str, Any]]:
+        """Get current options positions. Returns tracked mock options positions."""
+        return [
+            {
+                "symbol": pos["symbol"],
+                "option_type": pos["option_type"],
+                "strike": pos["strike"],
+                "expiry_year": pos["expiry_year"],
+                "expiry_month": pos["expiry_month"],
+                "expiry_day": pos["expiry_day"],
+                "quantity": pos["quantity"],
+                "position_type": pos["position_type"],
+                "market_value": pos["limit_price"] * pos["quantity"] * 100,
+                "total_gain": 0.0,
+            }
+            for pos in self._options_positions.values()
+        ]
 
 
 def create_etrade_client(
