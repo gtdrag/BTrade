@@ -50,7 +50,7 @@ Plans:
 **Plans:** 2 plans
 
 Plans:
-- [ ] 02-01-PLAN.md — WheelState enum, transition validation, dataclasses, and database schema (DB-01, DB-02)
+- [x] 02-01-PLAN.md — WheelState enum, transition validation, dataclasses, and database schema (DB-01, DB-02)
 - [ ] 02-02-PLAN.md — Wheel cycle and options position CRUD methods with cost basis tracking (DB-01, DB-02, DB-03, DB-04)
 
 ### Phase 3: Cash-Secured Put Cycle
