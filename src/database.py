@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 
 from .utils import get_et_now
+from .wheel_state import WheelState, transition as validate_transition
 
 
 class NumpyJSONEncoder(json.JSONEncoder):
@@ -833,6 +834,301 @@ class Database:
                     continue
                 watch_items.append(item)
         return watch_items
+
+    # ==================== Wheel Strategy Operations ====================
+
+    def create_wheel_cycle(self) -> int:
+        """Create a new wheel cycle in CASH state.
+
+        Enforces single-active-cycle invariant: raises ValueError if an unclosed
+        cycle already exists (T-02-08 threat mitigation).
+
+        Returns:
+            Integer cycle_id of the newly created cycle.
+
+        Raises:
+            ValueError: If an active (unclosed) cycle already exists.
+        """
+        now = get_et_now().isoformat()
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT id FROM wheel_cycles WHERE closed_at IS NULL LIMIT 1"
+            )
+            existing = cursor.fetchone()
+            if existing:
+                raise ValueError(
+                    f"Active cycle already exists (id={existing['id']}). "
+                    "Close it before creating a new cycle."
+                )
+            cursor.execute(
+                """
+                INSERT INTO wheel_cycles
+                    (state, underlying, opened_at, created_at, updated_at)
+                VALUES ('CASH', 'IBIT', ?, ?, ?)
+                """,
+                (now, now, now),
+            )
+            return cursor.lastrowid
+
+    def get_active_cycle(self) -> Optional[Dict[str, Any]]:
+        """Get the current active (unclosed) wheel cycle.
+
+        Returns:
+            Dict with all wheel_cycles columns, or None if no active cycle.
+        """
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT * FROM wheel_cycles WHERE closed_at IS NULL ORDER BY id DESC LIMIT 1"
+            )
+            row = cursor.fetchone()
+            return dict(row) if row else None
+
+    def get_cycle_history(self, limit: int = 50) -> List[Dict[str, Any]]:
+        """Get wheel cycle history, most recent first.
+
+        Args:
+            limit: Maximum number of cycles to return.
+
+        Returns:
+            List of dicts for all cycles (including closed), ordered by id DESC.
+        """
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT * FROM wheel_cycles ORDER BY id DESC LIMIT ?",
+                (limit,),
+            )
+            return [dict(row) for row in cursor.fetchall()]
+
+    def transition_wheel_state(
+        self,
+        cycle_id: int,
+        next_state: WheelState,
+        reason: str,
+        **updates,
+    ) -> None:
+        """Transition the active wheel cycle to a new state.
+
+        Validates the transition via the state machine, updates the database
+        row, and logs the event. Optionally accepts extra keyword arguments
+        to update additional cycle fields (e.g., put_strike, cost_basis).
+
+        All state changes must go through this method — never direct SQL UPDATE
+        of the state column (T-02-05 threat mitigation).
+
+        Args:
+            cycle_id: ID of the cycle to transition.
+            next_state: The target WheelState.
+            reason: Human-readable reason for the transition (logged).
+            **updates: Additional wheel_cycles columns to set (e.g.,
+                       put_strike=48.0, put_premium_received=2.50,
+                       shares_held=100, cost_basis=47.50).
+
+        Raises:
+            ValueError: If cycle_id doesn't match the active cycle, or if the
+                        transition is invalid per the state machine.
+        """
+        cycle = self.get_active_cycle()
+        if cycle is None or cycle["id"] != cycle_id:
+            # Check history in case it's already closed
+            raise ValueError(
+                f"No active cycle with id={cycle_id}. "
+                "Only the active (unclosed) cycle can be transitioned."
+            )
+
+        current_state = WheelState(cycle["state"])
+        # Raises ValueError on invalid transition (T-02-05)
+        validate_transition(current_state, next_state)
+
+        now = get_et_now().isoformat()
+
+        # Build SET clause from fixed fields + caller-supplied updates
+        set_fields: Dict[str, Any] = {
+            "state": next_state.value,
+            "updated_at": now,
+        }
+        # Auto-set closed_at when transitioning to CASH (unless caller overrides)
+        if next_state == WheelState.CASH and "closed_at" not in updates:
+            set_fields["closed_at"] = now
+
+        set_fields.update(updates)
+
+        # Keys come from controlled caller code, not user input (T-02-06)
+        assignments = ", ".join(f"{k} = ?" for k in set_fields.keys())
+        values = list(set_fields.values()) + [cycle_id]
+
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"UPDATE wheel_cycles SET {assignments} WHERE id = ?",
+                values,
+            )
+
+        self.log_event(
+            "INFO",
+            "wheel_transition",
+            details={
+                "cycle_id": cycle_id,
+                "from_state": current_state.value,
+                "to_state": next_state.value,
+                "reason": reason,
+            },
+        )
+
+    def open_wheel_position(
+        self,
+        cycle_id: int,
+        symbol: str,
+        option_type: str,
+        strike: float,
+        expiry_date: str,
+        dte_at_entry: int,
+        premium_received: float,
+        quantity: int = 1,
+        delta: Optional[float] = None,
+        gamma: Optional[float] = None,
+        theta: Optional[float] = None,
+        vega: Optional[float] = None,
+        iv: Optional[float] = None,
+    ) -> int:
+        """Record a new options position within a wheel cycle.
+
+        Greeks are stored as individual columns (not JSON) to allow future
+        SQL-based analysis (DB-01 requirement).
+
+        Args:
+            cycle_id: The wheel cycle this position belongs to.
+            symbol: OCC option symbol (e.g., "IBIT260515P00048000").
+            option_type: "PUT" or "CALL" — validated before INSERT (T-02-07).
+            strike: Strike price of the option.
+            expiry_date: Expiry date string (YYYY-MM-DD).
+            dte_at_entry: Days to expiration at the time of entry.
+            premium_received: Premium collected per share (multiply by 100 for total).
+            quantity: Number of contracts (default 1).
+            delta: Delta greek at entry (optional).
+            gamma: Gamma greek at entry (optional).
+            theta: Theta greek at entry (optional).
+            vega: Vega greek at entry (optional).
+            iv: Implied volatility at entry (optional).
+
+        Returns:
+            Integer position_id of the newly created position.
+
+        Raises:
+            ValueError: If option_type is not "PUT" or "CALL".
+            ValueError: If cycle_id does not exist in wheel_cycles.
+        """
+        if option_type not in ("PUT", "CALL"):
+            raise ValueError(
+                f"Invalid option_type '{option_type}'. Must be 'PUT' or 'CALL'."
+            )
+
+        now = get_et_now().isoformat()
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            # Validate cycle_id exists (T-02-07)
+            cursor.execute(
+                "SELECT id FROM wheel_cycles WHERE id = ?",
+                (cycle_id,),
+            )
+            if cursor.fetchone() is None:
+                raise ValueError(
+                    f"cycle_id={cycle_id} does not exist in wheel_cycles."
+                )
+
+            cursor.execute(
+                """
+                INSERT INTO options_positions (
+                    cycle_id, symbol, option_type, strike, expiry_date,
+                    dte_at_entry, quantity, premium_received,
+                    delta, gamma, theta, vega, iv,
+                    status, opened_at, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?, ?, ?)
+                """,
+                (
+                    cycle_id, symbol, option_type, strike, expiry_date,
+                    dte_at_entry, quantity, premium_received,
+                    delta, gamma, theta, vega, iv,
+                    now, now, now,
+                ),
+            )
+            return cursor.lastrowid
+
+    def close_wheel_position(self, position_id: int, close_premium: float) -> None:
+        """Mark an options position as CLOSED with a closing premium.
+
+        Positions are NEVER deleted — they are marked CLOSED for audit trail.
+        (Locked decision per CONTEXT.md.)
+
+        Args:
+            position_id: ID of the options_positions row to close.
+            close_premium: The premium paid to close (buy back) the position.
+        """
+        now = get_et_now().isoformat()
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE options_positions
+                SET status = 'CLOSED',
+                    close_premium = ?,
+                    closed_at = ?,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (close_premium, now, now, position_id),
+            )
+
+    def get_cycle_positions(self, cycle_id: int) -> List[Dict[str, Any]]:
+        """Get all options positions for a given wheel cycle.
+
+        Args:
+            cycle_id: The wheel cycle ID to query.
+
+        Returns:
+            List of dicts for all positions in the cycle, ordered by id ASC.
+        """
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT * FROM options_positions WHERE cycle_id = ? ORDER BY id ASC",
+                (cycle_id,),
+            )
+            return [dict(row) for row in cursor.fetchall()]
+
+    def compute_cycle_pnl(
+        self, cycle: Dict[str, Any], current_price: float = 0.0
+    ) -> Dict[str, float]:
+        """Compute P&L for a wheel cycle from cycle data.
+
+        P&L is computed on READ, never stored — avoids stale data and keeps
+        the database as a source of truth for raw values only.
+
+        For HOLDING_SHARES or COVERED_CALL states, unrealized P&L is
+        (current_price - cost_basis) * shares_held.
+
+        Args:
+            cycle: A cycle dict as returned by get_active_cycle() or
+                   get_cycle_history().
+            current_price: Current market price per share (used for unrealized).
+
+        Returns:
+            Dict with keys:
+                - "unrealized_pnl": Float, 0.0 if not holding shares.
+                - "realized_pnl": Float, from cycle["realized_pnl"] or 0.0.
+        """
+        state = cycle.get("state", "")
+        if state in ("HOLDING_SHARES", "COVERED_CALL"):
+            shares = cycle.get("shares_held") or 100
+            cost_basis = cycle.get("cost_basis") or 0.0
+            unrealized = (current_price - cost_basis) * shares
+        else:
+            unrealized = 0.0
+
+        realized = cycle.get("realized_pnl") or 0.0
+        return {"unrealized_pnl": unrealized, "realized_pnl": realized}
 
 
 # Singleton instance
