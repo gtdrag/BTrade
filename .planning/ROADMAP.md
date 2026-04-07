@@ -47,10 +47,11 @@ Plans:
   3. Assigned shares appear in database with cost basis calculated as strike price minus premium received
   4. When covered call premium is collected, adjusted cost basis decreases correctly in database
   5. Database queries return accurate cycle status and P&L at any point in the wheel
-**Plans**: TBD
+**Plans:** 2 plans
 
 Plans:
-- [ ] TBD (defined during phase planning)
+- [ ] 02-01-PLAN.md — WheelState enum, transition validation, dataclasses, and database schema (DB-01, DB-02)
+- [ ] 02-02-PLAN.md — Wheel cycle and options position CRUD methods with cost basis tracking (DB-01, DB-02, DB-03, DB-04)
 
 ### Phase 3: Cash-Secured Put Cycle
 **Goal**: Bot can sell cash-secured puts with signal-based entry and automatically detect option assignments
@@ -121,7 +122,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. E*TRADE Options API Integration | 0/2 | Planning complete | - |
-| 2. Options Database & State Management | 0/TBD | Not started | - |
+| 2. Options Database & State Management | 0/2 | Planning complete | - |
 | 3. Cash-Secured Put Cycle | 0/TBD | Not started | - |
 | 4. Covered Call Cycle | 0/TBD | Not started | - |
 | 5. Profit Management | 0/TBD | Not started | - |
