@@ -30,7 +30,7 @@ from .utils import ApprovalResult, TradeApprovalRequest, escape_markdown
 if TYPE_CHECKING:
     from ..smart_scheduler import SmartScheduler
     from ..trading_bot import TradingBot
-    from ..wheel_strategy import PutSignal
+    from ..wheel_strategy import CallSignal, PutSignal
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +92,12 @@ class TelegramBot(
         self._put_approval_result: Optional[str] = None  # "approved", "rejected", or strike string
         self._put_approval_signal: Optional[Any] = None  # stores PutSignal for execution
         self._put_approval_chain: Optional[List[Dict]] = None  # stores full chain for adjust
+
+        # Call options approval — separate event/result to avoid collision with put and intraday approvals
+        self._call_approval_event: Optional[asyncio.Event] = None
+        self._call_approval_result: Optional[str] = None  # "approved", "rejected", or strike string
+        self._call_approval_signal: Optional[Any] = None  # stores CallSignal for execution
+        self._call_approval_chain: Optional[List[Dict]] = None  # stores full chain for adjust
 
     def _is_authorized(self, update: Update) -> bool:
         """
@@ -475,6 +481,65 @@ class TelegramBot(
             )
             if self._put_approval_event:
                 self._put_approval_event.set()
+            return
+
+        # Handle call options approval callbacks (BEFORE generic approve_/reject_ handlers)
+        elif data.startswith("call_approve_"):
+            self._call_approval_result = "approved"
+            await query.edit_message_text(
+                text=query.message.text + "\n\n--- Approved --- Executing call order...",
+                parse_mode="Markdown",
+            )
+            if self._call_approval_event:
+                self._call_approval_event.set()
+            return
+
+        elif data.startswith("call_adjust_"):
+            await self._handle_call_adjust(query, data)
+            return
+
+        elif data.startswith("call_alt_reject_"):
+            self._call_approval_result = "rejected"
+            await query.edit_message_text(
+                text="All alternatives rejected. Call suggestion cancelled.",
+                parse_mode="Markdown",
+            )
+            if self._call_approval_event:
+                self._call_approval_event.set()
+            return
+
+        elif data.startswith("call_alt_"):
+            # User selected an alternative strike: call_alt_{strike}_{callback_id}
+            parts = data.split("_")
+            # parts: ["call", "alt", strike, callback_id...]
+            try:
+                selected_strike = float(parts[2])
+                self._call_approval_result = str(selected_strike)
+                await query.edit_message_text(
+                    text=f"--- Approved --- Executing call at strike ${selected_strike}...",
+                    parse_mode="Markdown",
+                )
+                if self._call_approval_event:
+                    self._call_approval_event.set()
+            except (IndexError, ValueError) as e:
+                logger.error(f"Failed to parse call_alt callback data '{data}': {e}")
+                await query.edit_message_text(
+                    text="Error parsing selection. Call suggestion cancelled.",
+                    parse_mode="Markdown",
+                )
+                self._call_approval_result = "rejected"
+                if self._call_approval_event:
+                    self._call_approval_event.set()
+            return
+
+        elif data.startswith("call_reject_"):
+            self._call_approval_result = "rejected"
+            await query.edit_message_text(
+                text=query.message.text + "\n\n--- Rejected --- Call suggestion cancelled.",
+                parse_mode="Markdown",
+            )
+            if self._call_approval_event:
+                self._call_approval_event.set()
             return
 
         # Check if this is a test callback
@@ -862,6 +927,389 @@ class TelegramBot(
         reply_markup = InlineKeyboardMarkup(keyboard)
         await query.edit_message_text(
             text="🔄 *SELECT ALTERNATIVE STRIKE*\n\nChoose a put strike or reject all:",
+            parse_mode="Markdown",
+            reply_markup=reply_markup,
+        )
+
+    # =========================================================================
+    # Covered Call Approval Flow
+    # =========================================================================
+
+    async def request_call_approval(
+        self,
+        signal: "CallSignal",
+        chain: List[Dict],
+        client: Any,
+        db: Any,
+        account_id_key: str = "default",
+    ) -> ApprovalResult:
+        """Send a covered call approval request and wait for user response.
+
+        Sends a Telegram message with strike/expiry/greeks/cost_basis details and 3 inline
+        buttons: Approve, Adjust (show alternatives above cost basis), Reject. Uses a separate
+        _call_approval_event so it cannot collide with the intraday or put _approval_events.
+
+        Returns ApprovalResult indicating the user's decision or timeout.
+        """
+        if not self.chat_id:
+            logger.error("No chat_id configured, cannot request call approval")
+            return ApprovalResult.ERROR
+
+        try:
+            if not self._app:
+                await self.initialize()
+
+            callback_id = f"call_{get_et_now().strftime('%H%M%S')}"
+
+            # Store for use in callback handlers
+            self._call_approval_signal = signal
+            self._call_approval_chain = chain
+
+            # Build message
+            message = (
+                "📈 *COVERED CALL SIGNAL*\n\n"
+                f"• Symbol: {escape_markdown(signal.symbol)}\n"
+                f"• Strike: ${signal.strike:.2f}\n"
+                f"• Expiry: {escape_markdown(signal.expiry_date)} ({signal.dte} DTE)\n"
+                f"• Delta: {signal.delta:.3f}\n"
+                f"• Premium (bid): ${signal.premium:.2f}/share\n"
+                f"• Total Premium: ${signal.total_premium:.2f} (1 contract)\n"
+                f"• Cost Basis: ${signal.cost_basis:.2f}/share\n"
+                f"• IV: {signal.iv:.1%}\n\n"
+                f"⏱ Timeout: {self.approval_timeout // 60} minutes"
+            )
+
+            keyboard = [
+                [
+                    InlineKeyboardButton("✅ Approve", callback_data=f"call_approve_{callback_id}"),
+                    InlineKeyboardButton("🔄 Adjust", callback_data=f"call_adjust_{callback_id}"),
+                    InlineKeyboardButton("❌ Reject", callback_data=f"call_reject_{callback_id}"),
+                ]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+
+            await self._app.bot.send_message(
+                chat_id=self.chat_id,
+                text=message,
+                parse_mode="Markdown",
+                reply_markup=reply_markup,
+            )
+
+            # Set up separate event for call approval (avoids collision with put/intraday)
+            self._call_approval_event = asyncio.Event()
+            self._call_approval_result = None
+
+            try:
+                await asyncio.wait_for(
+                    self._call_approval_event.wait(),
+                    timeout=self.approval_timeout,
+                )
+            except asyncio.TimeoutError:
+                await self.send_message(
+                    f"⏰ *TIMEOUT*\n\nNo response received for call signal at ${signal.strike:.2f}. "
+                    "Suggestion cancelled."
+                )
+                return ApprovalResult.TIMEOUT
+
+            result = self._call_approval_result
+
+            if result == "rejected":
+                return ApprovalResult.REJECTED
+
+            # result is either "approved" or a numeric string (alternative strike selected)
+            if result is not None and result != "approved":
+                # User selected an alternative strike from the adjust flow
+                try:
+                    alt_strike = float(result)
+                    # Find the matching CALL contract in the stored chain
+                    matching = next(
+                        (
+                            c for c in (chain or [])
+                            if c.get("option_type") == "CALL"
+                            and abs(float(c.get("strike", 0)) - alt_strike) < 0.01
+                        ),
+                        None,
+                    )
+                    if matching:
+                        from ..wheel_strategy import CallSignal as CS  # local import — avoid circular
+                        expiry_date = matching.get("expiry_date", signal.expiry_date)
+                        if hasattr(expiry_date, "isoformat"):
+                            expiry_date = expiry_date.isoformat()
+                        else:
+                            expiry_date = str(expiry_date)
+                        alt_signal = CS(
+                            strike=float(matching["strike"]),
+                            expiry_date=expiry_date,
+                            expiry_year=int(matching.get("expiry_year", signal.expiry_year)),
+                            expiry_month=int(matching.get("expiry_month", signal.expiry_month)),
+                            expiry_day=int(matching.get("expiry_day", signal.expiry_day)),
+                            delta=float(matching.get("delta", signal.delta)),
+                            premium=float(matching.get("bid", signal.premium)),
+                            dte=int(matching.get("dte", signal.dte)),
+                            total_premium=float(matching.get("bid", signal.premium)) * 100,
+                            symbol=str(matching.get("symbol", signal.symbol)),
+                            iv=float(matching.get("iv", signal.iv)),
+                            gamma=float(matching.get("gamma", signal.gamma)),
+                            theta=float(matching.get("theta", signal.theta)),
+                            vega=float(matching.get("vega", signal.vega)),
+                            cost_basis=signal.cost_basis,
+                        )
+                        signal = alt_signal
+                    else:
+                        logger.warning(
+                            "Could not find chain entry for call_alt_strike=%.2f; using original signal",
+                            alt_strike,
+                        )
+                except ValueError:
+                    logger.error("Could not parse call approval result as float: %s", result)
+
+            success = await self._execute_call_order(signal, client, db, account_id_key)
+            return ApprovalResult.APPROVED if success else ApprovalResult.ERROR
+
+        except Exception as e:
+            logger.error(f"Failed to request call approval: {e}", exc_info=True)
+            return ApprovalResult.ERROR
+
+    async def _execute_call_order(
+        self,
+        signal: "CallSignal",
+        client: Any,
+        db: Any,
+        account_id_key: str,
+    ) -> bool:
+        """Preview, place a covered call sell-to-open order, then record it in the DB.
+
+        STALE SIGNAL GUARD (T-04-08): Re-reads active cycle and verifies signal.strike >= cycle cost_basis
+        before placing order. Rejects if cost basis has changed since signal was generated.
+
+        Order is only recorded if placement succeeds.
+        Logs only summary data (T-04-11).
+
+        Returns True on success, False on any failure.
+        """
+        try:
+            # STALE SIGNAL GUARD: re-read fresh cycle from DB before placing order
+            cycle = db.get_active_cycle()
+            if cycle is None:
+                logger.error("_execute_call_order: no active cycle found")
+                await self._app.bot.send_message(
+                    chat_id=self.chat_id,
+                    text="⚠️ *CALL ORDER REJECTED*\n\nNo active wheel cycle found.",
+                    parse_mode="Markdown",
+                )
+                return False
+
+            current_cost_basis = cycle.get("cost_basis", 0.0) or 0.0
+            if signal.strike < current_cost_basis:
+                # Stale signal — strike is now below cost basis
+                logger.warning(
+                    "Call strike %.2f is below current cost basis %.2f — rejecting stale signal",
+                    signal.strike,
+                    current_cost_basis,
+                )
+                await self._app.bot.send_message(
+                    chat_id=self.chat_id,
+                    text=(
+                        f"⚠️ *CALL ORDER REJECTED*\n\n"
+                        f"Call strike ${signal.strike:.2f} is below current cost basis "
+                        f"${current_cost_basis:.2f}. Order rejected."
+                    ),
+                    parse_mode="Markdown",
+                )
+                return False
+
+            # Use bid as limit price (conservative for sell-to-open)
+            limit_price = signal.premium
+
+            # Preview first
+            preview_response = client.preview_options_order(
+                account_id_key,
+                "IBIT",
+                "CALL",
+                signal.expiry_year,
+                signal.expiry_month,
+                signal.expiry_day,
+                signal.strike,
+                "SELL_OPEN",
+                1,
+                limit_price,
+            )
+            preview_ids = preview_response.get("PreviewIds")
+
+            # Place the order
+            place_response = client.place_options_order(
+                account_id_key,
+                "IBIT",
+                "CALL",
+                signal.expiry_year,
+                signal.expiry_month,
+                signal.expiry_day,
+                signal.strike,
+                "SELL_OPEN",
+                1,
+                limit_price,
+                preview_ids=preview_ids,
+            )
+
+            order_id = place_response.get("orderId") or place_response.get("OrderIds", [{}])[0].get("orderId")
+
+            # Record in DB — only after successful placement
+            cycle_id = cycle["id"]
+            old_cost_basis = current_cost_basis
+            old_premiums = cycle.get("covered_call_premiums_collected") or 0.0
+            new_cost_basis = old_cost_basis - signal.premium
+            new_total_premiums = old_premiums + signal.premium
+
+            db.transition_wheel_state(
+                cycle_id,
+                WheelState.COVERED_CALL,
+                "call_sold",
+                cost_basis=new_cost_basis,
+                covered_call_premiums_collected=new_total_premiums,
+            )
+            db.open_wheel_position(
+                cycle_id,
+                signal.symbol,
+                "CALL",
+                signal.strike,
+                signal.expiry_date,
+                signal.dte,
+                signal.premium,
+                1,
+                signal.delta,
+                signal.gamma,
+                signal.theta,
+                signal.vega,
+                signal.iv,
+            )
+
+            # T-04-11: Audit log
+            db.log_event(
+                "INFO",
+                "call_order_placed",
+                {
+                    "strike": signal.strike,
+                    "delta": signal.delta,
+                    "premium": signal.premium,
+                    "dte": signal.dte,
+                    "cycle_id": cycle_id,
+                    "order_id": str(order_id) if order_id else "unknown",
+                    "new_cost_basis": new_cost_basis,
+                },
+            )
+
+            await self._app.bot.send_message(
+                chat_id=self.chat_id,
+                text=(
+                    "✅ *CALL ORDER PLACED*\n\n"
+                    f"• Strike: ${signal.strike:.2f}\n"
+                    f"• Expiry: {escape_markdown(signal.expiry_date)}\n"
+                    f"• Premium: ${signal.premium:.2f}/share (${signal.premium * 100:.2f} total)\n"
+                    f"• New Cost Basis: ${new_cost_basis:.2f}/share\n"
+                    f"• Order ID: {escape_markdown(str(order_id) if order_id else 'pending')}\n"
+                    f"• Cycle ID: {cycle_id}"
+                ),
+                parse_mode="Markdown",
+            )
+            logger.info(
+                "Call order placed: strike=%.2f dte=%d cycle_id=%d new_cost_basis=%.2f",
+                signal.strike,
+                signal.dte,
+                cycle_id,
+                new_cost_basis,
+            )
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to execute call order: {e}", exc_info=True)
+            try:
+                await self._app.bot.send_message(
+                    chat_id=self.chat_id,
+                    text=f"⚠️ *CALL ORDER FAILED*\n\n{escape_markdown(str(e))}",
+                    parse_mode="Markdown",
+                )
+            except Exception:
+                pass
+            return False
+
+    async def _handle_call_adjust(self, query: Any, data: str) -> None:
+        """Show 3-5 nearby alternative call strikes for user selection.
+
+        Filters the stored chain to calls with delta in [0.20, 0.45], then applies a
+        HARD COST BASIS FILTER (T-04-10): only shows strikes >= cost_basis. If no
+        qualifying strikes exist, shows a warning instead of presenting options.
+        """
+        chain = self._call_approval_chain or []
+        signal = self._call_approval_signal
+
+        # Extract callback_id suffix from the call_adjust_ prefix
+        callback_id = data[len("call_adjust_"):]  # e.g. "call_HHMMSS"
+
+        # Cost basis from signal (protected by T-04-10)
+        cost_basis = signal.cost_basis if signal else 0.0
+
+        # Filter to CALL contracts with wider delta range for alternatives
+        # HARD FILTER: only strikes >= cost_basis (T-04-10)
+        candidates = [
+            c for c in chain
+            if c.get("option_type") == "CALL"
+            and 0.20 <= abs(float(c.get("delta", 0))) <= 0.45
+            and float(c.get("strike", 0)) >= cost_basis
+        ]
+        # Sort by strike ascending
+        candidates.sort(key=lambda c: float(c.get("strike", 0)))
+
+        if not candidates:
+            await query.edit_message_text(
+                text=(
+                    f"⚠️ No profitable call strikes above cost basis ${cost_basis:.2f}. "
+                    "Consider waiting for price recovery."
+                ),
+                parse_mode="Markdown",
+            )
+            return
+
+        # Find the suggested strike's index and take 2 below and 2 above
+        suggested_strike = signal.strike if signal else None
+        if suggested_strike is not None:
+            strikes = [float(c.get("strike", 0)) for c in candidates]
+            nearest_idx = min(range(len(strikes)), key=lambda i: abs(strikes[i] - suggested_strike))
+            start = max(0, nearest_idx - 2)
+            end = min(len(candidates), nearest_idx + 3)
+            alternatives = [
+                c for c in candidates[start:end]
+                if abs(float(c.get("strike", 0)) - suggested_strike) > 0.01
+            ]
+        else:
+            alternatives = candidates[:5]
+
+        if not alternatives:
+            await query.edit_message_text(
+                text="⚠️ No alternative call strikes different from the suggested strike.",
+                parse_mode="Markdown",
+            )
+            return
+
+        # Build buttons: one per alternative strike
+        keyboard = []
+        for c in alternatives:
+            alt_strike = float(c.get("strike", 0))
+            alt_delta = abs(float(c.get("delta", 0)))
+            alt_bid = float(c.get("bid", 0))
+            alt_dte = int(c.get("dte", 0))
+            label = f"${alt_strike:.2f} | δ={alt_delta:.2f} | ${alt_bid:.2f}bid | {alt_dte}DTE"
+            keyboard.append(
+                [InlineKeyboardButton(label, callback_data=f"call_alt_{alt_strike}_{callback_id}")]
+            )
+
+        # Reject all button
+        keyboard.append(
+            [InlineKeyboardButton("❌ Reject All", callback_data=f"call_alt_reject_{callback_id}")]
+        )
+
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(
+            text="🔄 *SELECT ALTERNATIVE CALL STRIKE*\n\nChoose a call strike or reject all:",
             parse_mode="Markdown",
             reply_markup=reply_markup,
         )
