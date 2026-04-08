@@ -7,6 +7,13 @@ WHETHER the account can afford it (cash validation), WHAT happened at put expiry
 to sell (cost-basis-protected, delta-targeted), and WHAT happened at call expiry
 (called away vs OTM expiry).
 
+Also provides the 30-min monitoring layer (Plan 05-01):
+  check_profit_target: True when ask <= 50% of premium_received (T-05-02)
+  check_position_tested: True when IBIT within 2% of strike
+  check_dte_warning: True when DTE <= 21 and dte_alert_sent == 0 (T-05-03)
+  select_roll_strike: Picks further-OTM contract in 30-45 DTE range
+  run_monitoring_checks: Orchestrates all checks; handles ETradeAPIError (T-05-05)
+
 Threat mitigations:
   T-03-01: Log only summary data (pullback_pct, strike, delta) — never raw chain/balance.
   T-03-02: yfinance read-only; signal will fire/not-fire but no damage without approval.
@@ -22,16 +29,19 @@ Threat mitigations:
   T-04-04: API calls in call expiry detection wrapped in try/except; no state mutation on failure.
   T-04-05: Every call expiry outcome logged via db.log_event() for audit trail.
   T-04-06: Log only summary data (strike, delta, cost_basis) for call signal — never raw chain.
+  T-05-02: Use ask price (conservative) for profit target check — prevents premature triggers.
+  T-05-05: get_ibit_options_chain wrapped in try/except ETradeAPIError; return all-False on error.
 """
 
 import logging
 from dataclasses import dataclass
 from datetime import date
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import yfinance as yf
 
 from src.database import Database
+from src.etrade_client import ETradeAPIError
 from src.utils import get_et_now
 from src.wheel_state import WheelState
 
@@ -120,6 +130,7 @@ class WheelStrategy:
         self.delta_max = 0.30
         self.call_delta_min = 0.25
         self.call_delta_max = 0.35
+        self.profit_target_pct = 0.50  # Close when 50% of premium captured
 
     def get_put_signal(self) -> Optional[PutSignal]:
         """Check conditions and return a PutSignal if all gates pass.
@@ -644,3 +655,212 @@ class WheelStrategy:
                 state,
             )
             return None
+
+    # =========================================================================
+    # Profit management monitoring (Phase 05 — Plan 05-01)
+    # =========================================================================
+
+    def check_profit_target(self, position: dict, chain: list) -> bool:
+        """Return True when the position has reached 50% profit (ask <= 50% of premium_received).
+
+        Uses ask price (T-05-02: conservative — prevents premature buy-to-close triggers
+        caused by stale or wide bid/ask spreads).
+
+        Args:
+            position: Open options_positions row dict (must have 'symbol', 'premium_received').
+            chain: List of contract dicts from get_ibit_options_chain().
+
+        Returns:
+            True if profit_pct >= profit_target_pct, False otherwise.
+            Returns False if the option symbol is not found in the chain (e.g., outside DTE range).
+        """
+        symbol = position["symbol"]
+        premium_received = float(position["premium_received"])
+
+        # Find our specific contract in the chain by OCC symbol
+        contract = next((c for c in chain if c["symbol"] == symbol), None)
+        if contract is None:
+            logger.debug(
+                "check_profit_target: symbol %s not found in chain (outside DTE range?)", symbol
+            )
+            return False
+
+        current_ask = float(contract["ask"])
+        profit_pct = (premium_received - current_ask) / premium_received
+        result = profit_pct >= self.profit_target_pct
+        logger.debug(
+            "check_profit_target: symbol=%s premium=%.2f ask=%.2f profit_pct=%.2f%% target=%.0f%% hit=%s",
+            symbol, premium_received, current_ask, profit_pct * 100, self.profit_target_pct * 100, result,
+        )
+        return result
+
+    def check_position_tested(self, position: dict) -> bool:
+        """Return True when IBIT price is within 2% of the option strike price.
+
+        A "tested" position means the underlying is trading close to the strike,
+        increasing assignment risk (for puts) or call-away risk (for calls).
+
+        Args:
+            position: Open options_positions row dict (must have 'strike').
+
+        Returns:
+            True if abs(ibit_price - strike) / strike <= 0.02, False otherwise.
+            Returns False on API failure (logged as warning).
+        """
+        try:
+            quote = self.client.get_ibit_quote()
+            ibit_price = float(quote["last_price"])
+            strike = float(position["strike"])
+            distance_pct = abs(ibit_price - strike) / strike
+            result = distance_pct <= 0.02
+            logger.debug(
+                "check_position_tested: ibit=%.2f strike=%.2f distance=%.2f%% tested=%s",
+                ibit_price, strike, distance_pct * 100, result,
+            )
+            return result
+        except Exception as exc:
+            logger.warning("check_position_tested: failed to get IBIT quote — %s", exc)
+            return False
+
+    def check_dte_warning(self, position: dict) -> bool:
+        """Return True when the position has 21 or fewer DTE and no alert has been sent.
+
+        Respects the dte_alert_sent flag to prevent repeated alerts (T-05-03).
+
+        Args:
+            position: Open options_positions row dict (must have 'expiry_date', 'dte_alert_sent').
+
+        Returns:
+            True if DTE <= 21 and dte_alert_sent == 0, False otherwise.
+        """
+        if position.get("dte_alert_sent", 0) == 1:
+            return False
+        expiry = date.fromisoformat(position["expiry_date"])
+        dte = (expiry - get_et_now().date()).days
+        return dte <= 21
+
+    def select_roll_strike(self, current_strike: float, option_type: str) -> Optional[Dict]:
+        """Select an appropriate roll-to strike for an existing position.
+
+        Fetches the live options chain and filters for contracts that are:
+        - The same option_type as the current position
+        - Further OTM than the current strike:
+            PUT: strike < current_strike (lower strike = more OTM for puts)
+            CALL: strike > current_strike (higher strike = more OTM for calls)
+        - Within the 30-45 DTE range (standard wheel roll window)
+        - Within the appropriate delta range:
+            PUT: abs(delta) in [delta_min, delta_max] (0.20-0.30)
+            CALL: abs(delta) in [call_delta_min, call_delta_max] (0.25-0.35)
+        Returns the qualifying contract with the highest bid (maximum premium income).
+
+        Args:
+            current_strike: Strike price of the existing position.
+            option_type: "PUT" or "CALL".
+
+        Returns:
+            Contract dict with the highest bid among qualifying contracts, or None.
+        """
+        chain: List[Dict] = self.client.get_ibit_options_chain()
+
+        # Filter by option type and DTE range
+        candidates = [
+            c for c in chain
+            if c["option_type"] == option_type
+            and 30 <= int(c["dte"]) <= 45
+        ]
+
+        if option_type == "PUT":
+            candidates = [
+                c for c in candidates
+                if float(c["strike"]) < current_strike
+                and self.delta_min <= abs(float(c["delta"])) <= self.delta_max
+            ]
+        else:  # CALL
+            candidates = [
+                c for c in candidates
+                if float(c["strike"]) > current_strike
+                and self.call_delta_min <= abs(float(c["delta"])) <= self.call_delta_max
+            ]
+
+        if not candidates:
+            logger.debug(
+                "select_roll_strike: no qualifying %s contracts further OTM than %.2f in 30-45 DTE",
+                option_type, current_strike,
+            )
+            return None
+
+        return max(candidates, key=lambda c: float(c["bid"]))
+
+    async def run_monitoring_checks(self, cycle: dict) -> Dict[str, Any]:
+        """Orchestrate all profit management checks for the active options position.
+
+        Runs in the following priority order (per RESEARCH.md Open Questions #3):
+          1. DTE warning — independent of market conditions, always checked.
+          2. Profit target — if hit, skip position-tested check (profit takes priority).
+          3. Position tested — only checked when profit target is NOT hit.
+
+        Returns a dict that Plan 02 will consume to trigger Telegram notification flows:
+          - profit_target_hit: bool
+          - position_tested: bool
+          - dte_warning: bool
+          - position: dict | None (the open position row, for Plan 02 use)
+          - chain: list | None (the options chain, for Plan 02 use)
+
+        Threat mitigations:
+          T-05-05: get_ibit_options_chain wrapped in try/except ETradeAPIError;
+                   returns all-False dict on stale quote error.
+
+        Args:
+            cycle: Active wheel cycle dict from get_active_cycle().
+
+        Returns:
+            Dict with five keys as described above.
+        """
+        _empty = {
+            "profit_target_hit": False,
+            "position_tested": False,
+            "dte_warning": False,
+            "position": None,
+            "chain": None,
+        }
+
+        position = self.db.get_open_position_for_cycle(cycle["id"])
+        if position is None:
+            logger.debug("run_monitoring_checks: no open position for cycle %d, skipping", cycle["id"])
+            return _empty
+
+        # T-05-05: wrap chain fetch in try/except; stale quotes must not trigger false actions
+        try:
+            chain = self.client.get_ibit_options_chain()
+        except ETradeAPIError as exc:
+            logger.warning(
+                "run_monitoring_checks: get_ibit_options_chain failed — %s; "
+                "skipping this cycle (T-05-05)",
+                exc,
+            )
+            return _empty
+
+        # Check DTE warning (always evaluated — independent of price)
+        dte_warning = self.check_dte_warning(position)
+
+        # Check profit target using ask price (T-05-02: conservative)
+        profit_target_hit = self.check_profit_target(position, chain)
+
+        # Check position tested — skipped when profit target already hit (profit takes priority)
+        if profit_target_hit:
+            position_tested = False
+        else:
+            position_tested = self.check_position_tested(position)
+
+        logger.debug(
+            "run_monitoring_checks: cycle=%d profit_target=%s tested=%s dte_warning=%s",
+            cycle["id"], profit_target_hit, position_tested, dte_warning,
+        )
+
+        return {
+            "profit_target_hit": profit_target_hit,
+            "position_tested": position_tested,
+            "dte_warning": dte_warning,
+            "position": position,
+            "chain": chain,
+        }
