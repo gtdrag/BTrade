@@ -97,10 +97,11 @@ Plans:
   3. Bot suggests defensive roll with new strike/expiration when position tested (price near strike)
   4. Bot prevents rolls that would result in net debit or exceed 2 rolls per position
   5. Bot sends Telegram alert at 21 DTE warning of approaching expiration
-**Plans**: TBD
+**Plans:** 2 plans
 
 Plans:
-- [ ] TBD (defined during phase planning)
+- [ ] 05-01-PLAN.md — DB migration, monitoring methods, scheduler 30-min job (PM-01)
+- [ ] 05-02-PLAN.md — Telegram BTC/roll approval flows and DTE alerts (PM-02, PM-03, PM-04, PM-05)
 
 ### Phase 6: Transition & User Interface
 **Goal**: Wheel strategy replaces intraday strategies with full user visibility, control, and daily position reporting
@@ -128,5 +129,5 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 | 2. Options Database & State Management | 0/2 | Planning complete | - |
 | 3. Cash-Secured Put Cycle | 0/3 | Planning complete | - |
 | 4. Covered Call Cycle | 0/2 | Planning complete | - |
-| 5. Profit Management | 0/TBD | Not started | - |
+| 5. Profit Management | 0/2 | Planning complete | - |
 | 6. Transition & User Interface | 0/TBD | Not started | - |
