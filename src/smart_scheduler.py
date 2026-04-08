@@ -308,6 +308,16 @@ class SmartScheduler:
             misfire_grace_time=300,
         )
 
+        # Wheel strategy: Assignment detection — 8:30 AM ET daily
+        # Runs after overnight settlement to detect put assignment or OTM expiry.
+        self.scheduler.add_job(
+            self._job_assignment_detection,
+            CronTrigger(day_of_week="mon-fri", hour=8, minute=30, timezone=ET),
+            id="assignment_detection",
+            name="Assignment Detection",
+            misfire_grace_time=600,
+        )
+
         logger.info("Scheduler jobs configured")
 
     def _job_put_signal_check(self) -> None:
@@ -379,6 +389,76 @@ class SmartScheduler:
             logger.error(f"Put signal check failed: {e}", exc_info=True)
             self.db.log_event("ERROR", "put_signal_check_error", {"error": str(e)})
             self._send_notification(f"⚠️ Put signal check error: {escape_markdown(str(e))}")
+
+    def _job_assignment_detection(self) -> None:
+        """Check for put assignment or OTM expiry after the expiry date passes.
+
+        Runs at 8:30 AM ET on weekdays. Delegates to WheelStrategy.detect_and_process_expiry()
+        which reconciles live E*TRADE positions against the database record to determine
+        whether the sold put was assigned (shares delivered) or expired worthless.
+
+        On assignment: sends Telegram notification with cost basis and covered call hint.
+        On OTM expiry: sends Telegram notification with realized P&L.
+        No active cycle / not expired yet / API error: silently logs and returns.
+        """
+        now = get_et_now()
+        if not is_trading_day(now.date()):
+            logger.info("Not a trading day, skipping assignment detection")
+            return
+
+        if not self.wheel_strategy:
+            logger.warning("WheelStrategy not initialized, skipping assignment detection")
+            return
+
+        try:
+            result = self.wheel_strategy.detect_and_process_expiry()
+
+            if result is None:
+                logger.info("Assignment detection: no action needed")
+                return
+
+            if result == "assigned":
+                cycle = self.wheel_strategy.db.get_active_cycle()
+                cost_basis = cycle["cost_basis"] if cycle else 0.0
+                strike = cycle["put_strike"] if cycle else 0.0
+                message = (
+                    "*PUT ASSIGNMENT DETECTED*\n\n"
+                    f"Shares acquired: 100 IBIT\n"
+                    f"Strike: ${strike:.2f}\n"
+                    f"Cost basis: ${cost_basis:.2f}/share\n\n"
+                    "Next step: Covered call suggestion coming (Phase 4)."
+                )
+                self._send_notification(message)
+                self.db.log_event(
+                    "INFO",
+                    "assignment_notified",
+                    {"cost_basis": cost_basis, "strike": strike},
+                )
+
+            elif result == "expired_otm":
+                # Cycle is now CASH (closed) — read from history
+                history = self.db.get_cycle_history(limit=1)
+                last_cycle = history[0] if history else {}
+                pnl = last_cycle.get("realized_pnl", 0.0) or 0.0
+                message = (
+                    "*PUT EXPIRED WORTHLESS (OTM)*\n\n"
+                    f"Full premium kept\n"
+                    f"Realized P&L: ${pnl:.2f}\n\n"
+                    "Cycle complete. Ready for next put signal."
+                )
+                self._send_notification(message)
+                self.db.log_event(
+                    "INFO",
+                    "otm_expiry_notified",
+                    {"realized_pnl": pnl},
+                )
+
+        except Exception as e:
+            logger.error(f"Assignment detection failed: {e}", exc_info=True)
+            self.db.log_event("ERROR", "assignment_detection_error", {"error": str(e)})
+            self._send_notification(
+                f"Assignment detection error: {escape_markdown(str(e))}"
+            )
 
     def _job_auth_reminder(self) -> None:
         """Send daily authentication reminder at 8:00 AM ET."""
