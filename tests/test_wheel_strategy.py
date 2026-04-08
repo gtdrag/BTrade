@@ -10,6 +10,8 @@ import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from typing import Optional
+
 import pandas as pd
 import pytest
 
@@ -36,7 +38,7 @@ def _make_contract(
     expiry_month: int = 5,
     expiry_day: int = 15,
     dte: int = 35,
-    symbol: str | None = None,
+    symbol: Optional[str] = None,
     iv: float = 0.35,
     gamma: float = 0.05,
     theta: float = -0.04,
