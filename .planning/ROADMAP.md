@@ -67,9 +67,9 @@ Plans:
 **Plans:** 3 plans
 
 Plans:
-- [ ] 03-01-PLAN.md — WheelStrategy class with signal generation, strike selection, and cash validation (CSP-01, CSP-02, CSP-03, CSP-06)
-- [ ] 03-02-PLAN.md — Telegram put approval flow and scheduler put signal job (CSP-04, CSP-05)
-- [ ] 03-03-PLAN.md — Assignment detection, OTM expiry handling, and scheduler wiring (ASGN-01, ASGN-02, ASGN-03)
+- [x] 03-01-PLAN.md — WheelStrategy class with signal generation, strike selection, and cash validation (CSP-01, CSP-02, CSP-03, CSP-06)
+- [x] 03-02-PLAN.md — Telegram put approval flow and scheduler put signal job (CSP-04, CSP-05)
+- [x] 03-03-PLAN.md — Assignment detection, OTM expiry handling, and scheduler wiring (ASGN-01, ASGN-02, ASGN-03)
 
 ### Phase 4: Covered Call Cycle
 **Goal**: Bot completes full wheel cycle by automatically suggesting covered calls after put assignment
