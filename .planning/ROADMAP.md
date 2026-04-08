@@ -64,10 +64,12 @@ Plans:
   4. Bot validates sufficient cash collateral (strike price × 100) before allowing put execution
   5. Bot detects assignment by 9 AM ET the Monday after expiration and sends Telegram notification
   6. Assignment notification shows shares acquired and adjusted cost basis
-**Plans**: TBD
+**Plans:** 3 plans
 
 Plans:
-- [ ] TBD (defined during phase planning)
+- [ ] 03-01-PLAN.md — WheelStrategy class with signal generation, strike selection, and cash validation (CSP-01, CSP-02, CSP-03, CSP-06)
+- [ ] 03-02-PLAN.md — Telegram put approval flow and scheduler put signal job (CSP-04, CSP-05)
+- [ ] 03-03-PLAN.md — Assignment detection, OTM expiry handling, and scheduler wiring (ASGN-01, ASGN-02, ASGN-03)
 
 ### Phase 4: Covered Call Cycle
 **Goal**: Bot completes full wheel cycle by automatically suggesting covered calls after put assignment
@@ -123,7 +125,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 |-------|----------------|--------|-----------|
 | 1. E*TRADE Options API Integration | 0/2 | Planning complete | - |
 | 2. Options Database & State Management | 0/2 | Planning complete | - |
-| 3. Cash-Secured Put Cycle | 0/TBD | Not started | - |
+| 3. Cash-Secured Put Cycle | 0/3 | Planning complete | - |
 | 4. Covered Call Cycle | 0/TBD | Not started | - |
 | 5. Profit Management | 0/TBD | Not started | - |
 | 6. Transition & User Interface | 0/TBD | Not started | - |
