@@ -394,7 +394,7 @@ class TestDatabaseSchema:
         assert len(columns) > 0, "options_positions table does not exist"
 
     def test_options_positions_has_all_columns(self, db):
-        """options_positions table has all 20 expected columns."""
+        """options_positions table has all 22 expected columns (including Phase 5 additions)."""
         columns = self._get_table_columns(db, "options_positions")
         expected_columns = {
             "id",
@@ -417,6 +417,9 @@ class TestDatabaseSchema:
             "closed_at",
             "created_at",
             "updated_at",
+            # Phase 5 — profit management columns (added via backward-compatible migration)
+            "roll_count",
+            "dte_alert_sent",
         }
         assert set(columns.keys()) == expected_columns
 

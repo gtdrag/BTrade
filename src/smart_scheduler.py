@@ -63,6 +63,11 @@ class SmartScheduler:
                 account_id_key=getattr(self.bot.config, "account_id_key", "default"),
             )
 
+        # Guard flag: prevents overlapping monitoring approval requests.
+        # Set to True while a Telegram approval for profit-take or roll is in flight.
+        # Plan 02 will set/clear this around request_profit_take_approval / request_roll_approval.
+        self._monitoring_approval_pending: bool = False
+
     def _send_notification(self, message: str, parse_mode: Optional[str] = "Markdown") -> None:
         """Send a notification via the shared Telegram bot instance."""
         if not self.telegram_bot:
@@ -316,6 +321,21 @@ class SmartScheduler:
             id="assignment_detection",
             name="Assignment Detection",
             misfire_grace_time=600,
+        )
+
+        # Wheel strategy: Options monitoring — every 30 min during market hours
+        # Checks profit target, position tested, and DTE warning for open options.
+        self.scheduler.add_job(
+            self._job_wheel_monitoring,
+            CronTrigger(
+                day_of_week="mon-fri",
+                hour="9-15",
+                minute="0,30",
+                timezone=ET,
+            ),
+            id="wheel_monitoring",
+            name="Wheel Options Monitoring",
+            misfire_grace_time=120,
         )
 
         logger.info("Scheduler jobs configured")
@@ -583,6 +603,78 @@ class SmartScheduler:
             self._send_notification(
                 f"Assignment detection error: {escape_markdown(str(e))}"
             )
+
+    def _job_wheel_monitoring(self) -> None:
+        """Monitor open options positions for profit target, tested, and DTE warning.
+
+        Runs every 30 min on trading days (9:00 AM – 3:30 PM ET). Delegates to
+        WheelStrategy.run_monitoring_checks() which returns a dict of boolean flags.
+        Plan 02 will wire the Telegram notification flows based on these flags.
+
+        Guards (in order):
+        - Non-trading day: skip
+        - No WheelStrategy (client not configured): skip
+        - _monitoring_approval_pending: skip (approval already in flight)
+        - No active cycle: skip
+        - Cycle state not SHORT_PUT or COVERED_CALL: skip (no open option to monitor)
+        """
+        now = get_et_now()
+        if not is_trading_day(now.date()):
+            logger.info("Not a trading day, skipping wheel monitoring")
+            return
+
+        if not self.wheel_strategy:
+            logger.warning("WheelStrategy not initialized, skipping wheel monitoring")
+            return
+
+        if self._monitoring_approval_pending:
+            logger.info("Monitoring approval pending, skipping wheel monitoring")
+            return
+
+        try:
+            cycle = self.db.get_active_cycle()
+            if cycle is None:
+                logger.debug("wheel_monitoring: no active cycle, skipping")
+                return
+
+            state = cycle["state"]
+            from .wheel_state import WheelState
+            if state not in (WheelState.SHORT_PUT.value, WheelState.COVERED_CALL.value):
+                logger.debug(
+                    "wheel_monitoring: cycle state=%s has no open option, skipping", state
+                )
+                return
+
+            result = run_async(self.wheel_strategy.run_monitoring_checks(cycle))
+            logger.info(
+                "wheel_monitoring: profit_target=%s tested=%s dte_warning=%s",
+                result["profit_target_hit"],
+                result["position_tested"],
+                result["dte_warning"],
+            )
+
+            # T-05-03: Log only cycle_id, state, and boolean flags — no premium amounts or raw API
+            self.db.log_event(
+                "INFO",
+                "wheel_monitoring_check",
+                {
+                    "cycle_id": cycle["id"],
+                    "state": state,
+                    "profit_target_hit": result["profit_target_hit"],
+                    "position_tested": result["position_tested"],
+                    "dte_warning": result["dte_warning"],
+                },
+            )
+
+            # Telegram notification flows will be wired in Plan 02.
+            # Plan 02 will add: if result["dte_warning"]: send DTE alert
+            # Plan 02 will add: if result["profit_target_hit"]: request_profit_take_approval
+            # Plan 02 will add: if result["position_tested"]: request_roll_approval
+
+        except Exception as e:
+            logger.error(f"Wheel monitoring failed: {e}", exc_info=True)
+            self.db.log_event("ERROR", "wheel_monitoring_error", {"error": str(e)})
+            self._send_notification(f"Wheel monitoring error: {str(e)[:200]}")
 
     def _job_auth_reminder(self) -> None:
         """Send daily authentication reminder at 8:00 AM ET."""
