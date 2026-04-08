@@ -1142,6 +1142,24 @@ class Database:
                 (now, position_id),
             )
 
+    def set_roll_count(self, position_id: int, count: int) -> None:
+        """Set the roll_count on a position to a specific value.
+
+        Used after opening a rolled position to carry forward the roll history
+        (new_position.roll_count = old_position.roll_count + 1).
+
+        Args:
+            position_id: ID of the options_positions row to update.
+            count: The exact roll_count value to set.
+        """
+        now = get_et_now().isoformat()
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE options_positions SET roll_count = ?, updated_at = ? WHERE id = ?",
+                (count, now, position_id),
+            )
+
     def get_open_position_for_cycle(self, cycle_id: int) -> Optional[Dict[str, Any]]:
         """Get the most recent OPEN options position for a wheel cycle.
 

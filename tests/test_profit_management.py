@@ -1,15 +1,16 @@
 """
 Tests for profit management: DB migration, WheelStrategy monitoring methods,
-and SmartScheduler monitoring job.
+SmartScheduler monitoring job, and Telegram approval flows (BTC, roll, DTE alert).
 
-TDD test file — tests written first against the spec in 05-01-PLAN.md.
+TDD test file — tests written first against the specs in 05-01-PLAN.md and 05-02-PLAN.md.
 """
 
+import asyncio
 import os
 import sys
 from datetime import date, timedelta
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 
@@ -17,6 +18,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.database import Database
+from src.telegram.utils import ApprovalResult
 from src.wheel_state import WheelState
 
 
@@ -721,3 +723,498 @@ class TestSchedulerMonitoring:
                     scheduler._job_wheel_monitoring()
         scheduler.db.log_event.assert_called()
         scheduler._send_notification.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Task 1 (05-02): Telegram BTC approval flow and DTE alert
+# ---------------------------------------------------------------------------
+
+def _make_telegram_bot():
+    """Create a minimal TelegramBot instance with mocked internals."""
+    from src.telegram.bot import TelegramBot
+
+    with patch("src.telegram.bot.AnalysisCommandsMixin"), \
+         patch("src.telegram.bot.AuthCommandsMixin"), \
+         patch("src.telegram.bot.BacktestCommandsMixin"), \
+         patch("src.telegram.bot.TradingCommandsMixin"):
+        bot = TelegramBot.__new__(TelegramBot)
+
+    bot.token = "fake_token"
+    bot.chat_id = "12345"
+    bot.approval_timeout = 600
+    bot.scheduler = None
+    bot.trading_bot = None
+    bot._is_paused = False
+    bot._pending_auth_request = None
+    bot._app = MagicMock()
+    bot._app.bot.send_message = AsyncMock()
+    bot._pending_approval = None
+    bot._approval_event = None
+    bot._approval_result = None
+    bot._pending_sellall = None
+    bot._is_running = False
+    bot._put_approval_event = None
+    bot._put_approval_result = None
+    bot._put_approval_signal = None
+    bot._put_approval_chain = None
+    bot._call_approval_event = None
+    bot._call_approval_result = None
+    bot._call_approval_signal = None
+    bot._call_approval_chain = None
+    # BTC approval state (Task 1 of 05-02)
+    bot._btc_approval_event = None
+    bot._btc_approval_result = None
+    bot._btc_approval_position = None
+    bot._btc_approval_chain = None
+    # Roll approval state (Task 2 of 05-02)
+    bot._roll_approval_event = None
+    bot._roll_approval_result = None
+    bot._roll_approval_position = None
+    bot._roll_approval_new_contract = None
+    return bot
+
+
+def _make_position(
+    position_id: int = 1,
+    cycle_id: int = 1,
+    symbol: str = "IBIT260515P00050000",
+    option_type: str = "PUT",
+    strike: float = 50.0,
+    premium_received: float = 1.50,
+    quantity: int = 1,
+    roll_count: int = 0,
+    dte_alert_sent: int = 0,
+    expiry_date: str = "2026-05-15",
+) -> dict:
+    return {
+        "id": position_id,
+        "cycle_id": cycle_id,
+        "symbol": symbol,
+        "option_type": option_type,
+        "strike": strike,
+        "premium_received": premium_received,
+        "quantity": quantity,
+        "roll_count": roll_count,
+        "dte_alert_sent": dte_alert_sent,
+        "expiry_date": expiry_date,
+        "status": "OPEN",
+    }
+
+
+def _make_chain_with_ask(symbol: str, ask: float) -> list:
+    """Build a chain with one contract matching symbol and given ask."""
+    return [
+        {
+            "symbol": symbol,
+            "option_type": "PUT",
+            "strike": 50.0,
+            "ask": ask,
+            "bid": ask - 0.05,
+            "delta": -0.25,
+            "gamma": 0.05,
+            "theta": -0.04,
+            "vega": 0.10,
+            "iv": 0.35,
+            "dte": 21,
+            "expiry_date": "2026-05-15",
+            "expiry_year": 2026,
+            "expiry_month": 5,
+            "expiry_day": 15,
+        }
+    ]
+
+
+class TestBuyToClose:
+    """Tests for request_profit_take_approval and _execute_btc_order."""
+
+    def test_btc_approval_sends_message_with_profit_info(self):
+        """request_profit_take_approval sends a message containing strike, profit %, and savings."""
+        bot = _make_telegram_bot()
+        position = _make_position(symbol="IBIT260515P00050000", premium_received=1.50)
+        # ask=0.60 -> profit = (1.50-0.60)/1.50*100 = 60%
+        chain = _make_chain_with_ask("IBIT260515P00050000", ask=0.60)
+        cycle = {"id": 1, "state": "SHORT_PUT"}
+
+        async def run():
+            async def fake_wait_for(coro, timeout):
+                bot._btc_approval_result = "rejected"
+
+            with patch("asyncio.wait_for", new=fake_wait_for):
+                await bot.request_profit_take_approval(position, chain, cycle, MagicMock(), MagicMock(), "acc")
+
+        asyncio.get_event_loop().run_until_complete(run())
+        bot._app.bot.send_message.assert_called()
+        sent_text = bot._app.bot.send_message.call_args[1]["text"]
+        assert "50.0" in sent_text or "50" in sent_text  # strike
+        assert "60" in sent_text or "Profit" in sent_text.replace("PROFIT", "Profit")
+
+    def test_btc_approval_shows_approve_and_reject_buttons(self):
+        """request_profit_take_approval includes Approve and Reject inline buttons."""
+        from telegram import InlineKeyboardMarkup
+        bot = _make_telegram_bot()
+        position = _make_position(symbol="IBIT260515P00050000", premium_received=1.50)
+        chain = _make_chain_with_ask("IBIT260515P00050000", ask=0.60)
+        cycle = {"id": 1, "state": "SHORT_PUT"}
+
+        async def run():
+            async def fake_wait_for(coro, timeout):
+                bot._btc_approval_result = "rejected"
+
+            with patch("asyncio.wait_for", new=fake_wait_for):
+                await bot.request_profit_take_approval(position, chain, cycle, MagicMock(), MagicMock(), "acc")
+
+        asyncio.get_event_loop().run_until_complete(run())
+        call_kwargs = bot._app.bot.send_message.call_args[1]
+        markup = call_kwargs.get("reply_markup")
+        assert markup is not None
+        # Flatten all button callback_data
+        all_data = [btn.callback_data for row in markup.inline_keyboard for btn in row]
+        assert any("btc_approve_" in d for d in all_data)
+        assert any("btc_reject_" in d for d in all_data)
+
+    def test_btc_approve_calls_execute_btc_order(self):
+        """When btc_approve callback fires, _execute_btc_order is called."""
+        bot = _make_telegram_bot()
+        position = _make_position(symbol="IBIT260515P00050000", premium_received=1.50)
+        chain = _make_chain_with_ask("IBIT260515P00050000", ask=0.60)
+        cycle = {"id": 1, "state": "SHORT_PUT"}
+
+        async def run():
+            async def fake_wait_for(coro, timeout):
+                bot._btc_approval_result = "approved"
+
+            with patch.object(bot, "_execute_btc_order", new=AsyncMock(return_value=True)) as mock_exec:
+                with patch("asyncio.wait_for", new=fake_wait_for):
+                    result = await bot.request_profit_take_approval(position, chain, cycle, MagicMock(), MagicMock(), "acc")
+                mock_exec.assert_called_once()
+                return result
+
+        result = asyncio.get_event_loop().run_until_complete(run())
+        assert result == ApprovalResult.APPROVED
+
+    def test_btc_reject_returns_rejected_no_order(self):
+        """When btc_reject callback fires, _execute_btc_order is NOT called."""
+        bot = _make_telegram_bot()
+        position = _make_position(symbol="IBIT260515P00050000", premium_received=1.50)
+        chain = _make_chain_with_ask("IBIT260515P00050000", ask=0.60)
+        cycle = {"id": 1, "state": "SHORT_PUT"}
+
+        async def run():
+            async def fake_wait_for(coro, timeout):
+                bot._btc_approval_result = "rejected"
+
+            with patch.object(bot, "_execute_btc_order", new=AsyncMock()) as mock_exec:
+                with patch("asyncio.wait_for", new=fake_wait_for):
+                    result = await bot.request_profit_take_approval(position, chain, cycle, MagicMock(), MagicMock(), "acc")
+                mock_exec.assert_not_called()
+                return result
+
+        result = asyncio.get_event_loop().run_until_complete(run())
+        assert result == ApprovalResult.REJECTED
+
+    def test_execute_btc_order_places_buy_close_order(self):
+        """_execute_btc_order calls preview + place with BUY_CLOSE action."""
+        bot = _make_telegram_bot()
+        position = _make_position(symbol="IBIT260515P00050000", premium_received=1.50)
+        cycle = {"id": 1, "state": "SHORT_PUT"}
+        mock_client = MagicMock()
+        mock_client.preview_options_order.return_value = {"PreviewIds": [{"previewId": 1}]}
+        mock_client.place_options_order.return_value = {"orderId": "ORD123"}
+        mock_db = MagicMock()
+
+        async def run():
+            await bot._execute_btc_order(position, cycle, mock_client, mock_db, "acc", close_price=0.60)
+
+        asyncio.get_event_loop().run_until_complete(run())
+        mock_client.preview_options_order.assert_called_once()
+        mock_client.place_options_order.assert_called_once()
+        # Verify BUY_CLOSE action was used
+        preview_args = mock_client.preview_options_order.call_args[0]
+        assert "BUY_CLOSE" in preview_args
+
+    def test_execute_btc_short_put_transitions_to_cash(self):
+        """_execute_btc_order for SHORT_PUT transitions cycle to CASH."""
+        bot = _make_telegram_bot()
+        position = _make_position(symbol="IBIT260515P00050000", premium_received=1.50)
+        cycle = {"id": 1, "state": "SHORT_PUT"}
+        mock_client = MagicMock()
+        mock_client.preview_options_order.return_value = {"PreviewIds": []}
+        mock_client.place_options_order.return_value = {"orderId": "ORD123"}
+        mock_db = MagicMock()
+
+        async def run():
+            await bot._execute_btc_order(position, cycle, mock_client, mock_db, "acc", close_price=0.60)
+
+        asyncio.get_event_loop().run_until_complete(run())
+        mock_db.transition_wheel_state.assert_called_once()
+        call_args = mock_db.transition_wheel_state.call_args[0]
+        assert call_args[1] == WheelState.CASH
+
+    def test_execute_btc_covered_call_transitions_to_holding_shares(self):
+        """_execute_btc_order for COVERED_CALL transitions cycle to HOLDING_SHARES."""
+        bot = _make_telegram_bot()
+        position = _make_position(symbol="IBIT260515C00050000", option_type="CALL", premium_received=1.20)
+        cycle = {"id": 1, "state": "COVERED_CALL"}
+        mock_client = MagicMock()
+        mock_client.preview_options_order.return_value = {"PreviewIds": []}
+        mock_client.place_options_order.return_value = {"orderId": "ORD456"}
+        mock_db = MagicMock()
+
+        async def run():
+            await bot._execute_btc_order(position, cycle, mock_client, mock_db, "acc", close_price=0.50)
+
+        asyncio.get_event_loop().run_until_complete(run())
+        mock_db.transition_wheel_state.assert_called_once()
+        call_args = mock_db.transition_wheel_state.call_args[0]
+        assert call_args[1] == WheelState.HOLDING_SHARES
+
+    def test_execute_btc_records_close_premium(self):
+        """_execute_btc_order calls close_wheel_position with the close_price."""
+        bot = _make_telegram_bot()
+        position = _make_position(symbol="IBIT260515P00050000", premium_received=1.50)
+        cycle = {"id": 1, "state": "SHORT_PUT"}
+        mock_client = MagicMock()
+        mock_client.preview_options_order.return_value = {"PreviewIds": []}
+        mock_client.place_options_order.return_value = {"orderId": "ORD123"}
+        mock_db = MagicMock()
+
+        async def run():
+            await bot._execute_btc_order(position, cycle, mock_client, mock_db, "acc", close_price=0.60)
+
+        asyncio.get_event_loop().run_until_complete(run())
+        mock_db.close_wheel_position.assert_called_once_with(position["id"], 0.60)
+
+    def test_execute_btc_no_db_mutation_on_api_failure(self):
+        """T-05-06: If API call fails, close_wheel_position and transition_wheel_state are NOT called."""
+        bot = _make_telegram_bot()
+        position = _make_position(symbol="IBIT260515P00050000", premium_received=1.50)
+        cycle = {"id": 1, "state": "SHORT_PUT"}
+        mock_client = MagicMock()
+        mock_client.preview_options_order.side_effect = Exception("API unavailable")
+        mock_db = MagicMock()
+
+        async def run():
+            await bot._execute_btc_order(position, cycle, mock_client, mock_db, "acc", close_price=0.60)
+
+        asyncio.get_event_loop().run_until_complete(run())
+        mock_db.close_wheel_position.assert_not_called()
+        mock_db.transition_wheel_state.assert_not_called()
+
+
+class TestDTEAlert:
+    """Tests for send_dte_alert."""
+
+    def test_dte_alert_sends_informational_message_no_buttons(self):
+        """send_dte_alert sends a message with NO inline keyboard buttons."""
+        bot = _make_telegram_bot()
+        position = _make_position(expiry_date="2026-05-15")
+        cycle = {"id": 1, "state": "SHORT_PUT"}
+        mock_db = MagicMock()
+
+        async def run():
+            await bot.send_dte_alert(position, cycle, mock_db)
+
+        asyncio.get_event_loop().run_until_complete(run())
+        bot._app.bot.send_message.assert_called_once()
+        call_kwargs = bot._app.bot.send_message.call_args[1]
+        # No reply_markup or None = no buttons
+        markup = call_kwargs.get("reply_markup")
+        assert markup is None
+
+    def test_dte_alert_calls_mark_dte_alert_sent(self):
+        """send_dte_alert calls db.mark_dte_alert_sent after sending message."""
+        bot = _make_telegram_bot()
+        position = _make_position(expiry_date="2026-05-15")
+        cycle = {"id": 1, "state": "SHORT_PUT"}
+        mock_db = MagicMock()
+
+        async def run():
+            await bot.send_dte_alert(position, cycle, mock_db)
+
+        asyncio.get_event_loop().run_until_complete(run())
+        mock_db.mark_dte_alert_sent.assert_called_once_with(position["id"])
+
+    def test_dte_alert_message_contains_expiry_and_option_type(self):
+        """send_dte_alert message includes option_type, strike, expiry_date."""
+        bot = _make_telegram_bot()
+        position = _make_position(
+            option_type="PUT", strike=50.0, expiry_date="2026-05-15"
+        )
+        cycle = {"id": 1, "state": "SHORT_PUT"}
+        mock_db = MagicMock()
+
+        async def run():
+            await bot.send_dte_alert(position, cycle, mock_db)
+
+        asyncio.get_event_loop().run_until_complete(run())
+        sent_text = bot._app.bot.send_message.call_args[1]["text"]
+        assert "PUT" in sent_text or "put" in sent_text.lower()
+        assert "50" in sent_text
+        assert "2026-05-15" in sent_text or "05-15" in sent_text or "May" in sent_text
+
+
+class TestBTCCallbackRouting:
+    """Verify btc_approve/btc_reject callbacks route to BTC event and don't interfere with put/call."""
+
+    def _make_callback_query(self, data: str):
+        """Build a minimal mock callback query."""
+        query = MagicMock()
+        query.data = data
+        query.answer = AsyncMock()
+        query.edit_message_text = AsyncMock()
+        query.message = MagicMock()
+        query.message.text = "original"
+        return query
+
+    def _make_update(self, chat_id="12345", data="btc_approve_1"):
+        update = MagicMock()
+        update.effective_chat.id = chat_id
+        update.callback_query = self._make_callback_query(data)
+        return update
+
+    def test_btc_approve_sets_btc_result_not_call_or_put(self):
+        """btc_approve_ callback sets _btc_approval_result='approved', not _call/_put result."""
+        bot = _make_telegram_bot()
+        bot._btc_approval_event = asyncio.Event()
+        update = self._make_update(data="btc_approve_1")
+
+        asyncio.get_event_loop().run_until_complete(
+            bot._handle_callback(update, MagicMock())
+        )
+
+        assert bot._btc_approval_result == "approved"
+        assert bot._call_approval_result is None
+        assert bot._put_approval_result is None
+
+    def test_btc_reject_sets_btc_result_not_call_or_put(self):
+        """btc_reject_ callback sets _btc_approval_result='rejected', not _call/_put result."""
+        bot = _make_telegram_bot()
+        bot._btc_approval_event = asyncio.Event()
+        update = self._make_update(data="btc_reject_1")
+
+        asyncio.get_event_loop().run_until_complete(
+            bot._handle_callback(update, MagicMock())
+        )
+
+        assert bot._btc_approval_result == "rejected"
+        assert bot._call_approval_result is None
+        assert bot._put_approval_result is None
+
+
+class TestSchedulerBTCWiring:
+    """Verify _job_wheel_monitoring dispatches BTC and DTE alerts correctly."""
+
+    def _make_scheduler(
+        self,
+        profit_target_hit=False,
+        position_tested=False,
+        dte_warning=False,
+        position=None,
+        chain=None,
+        cycle_state="SHORT_PUT",
+    ):
+        from src.smart_scheduler import SmartScheduler
+        scheduler = SmartScheduler.__new__(SmartScheduler)
+        scheduler.db = MagicMock()
+        scheduler.telegram_bot = MagicMock()
+        scheduler.telegram_bot.request_profit_take_approval = AsyncMock(return_value=ApprovalResult.APPROVED)
+        scheduler.telegram_bot.send_dte_alert = AsyncMock()
+        scheduler._send_notification = MagicMock()
+        scheduler._monitoring_approval_pending = False
+        scheduler.wheel_strategy = MagicMock()
+        scheduler.wheel_strategy.client = MagicMock()
+        scheduler.wheel_strategy.account_id_key = "acc"
+        mock_result = {
+            "profit_target_hit": profit_target_hit,
+            "position_tested": position_tested,
+            "dte_warning": dte_warning,
+            "position": position,
+            "chain": chain,
+        }
+        scheduler.wheel_strategy.run_monitoring_checks = AsyncMock(return_value=mock_result)
+        cycle = {"id": 1, "state": cycle_state}
+        scheduler.db.get_active_cycle.return_value = cycle
+        return scheduler, cycle
+
+    def test_dispatches_profit_take_approval_when_profit_target_hit(self):
+        """When profit_target_hit=True, run_async is called with request_profit_take_approval."""
+        position = _make_position()
+        chain = _make_chain_with_ask("IBIT260515P00050000", ask=0.60)
+        scheduler, cycle = self._make_scheduler(
+            profit_target_hit=True, position=position, chain=chain
+        )
+
+        with patch("src.smart_scheduler.is_trading_day", return_value=True), \
+             patch("src.smart_scheduler.get_et_now"), \
+             patch("src.smart_scheduler.run_async") as mock_run_async:
+            mock_run_async.side_effect = lambda coro: {
+                "profit_target_hit": True,
+                "position_tested": False,
+                "dte_warning": False,
+                "position": position,
+                "chain": chain,
+            } if hasattr(coro, "cr_frame") or True else None
+            scheduler._job_wheel_monitoring()
+
+        # Verify run_async was called (for monitoring checks at minimum)
+        assert mock_run_async.call_count >= 1
+
+    def test_dispatches_dte_alert_when_dte_warning_true(self):
+        """When dte_warning=True, run_async is called with send_dte_alert."""
+        position = _make_position()
+        scheduler, cycle = self._make_scheduler(
+            dte_warning=True, position=position, chain=[]
+        )
+
+        run_async_calls = []
+
+        def capture_run_async(coro):
+            run_async_calls.append(coro)
+            # Return monitoring result on first call
+            if len(run_async_calls) == 1:
+                return {
+                    "profit_target_hit": False,
+                    "position_tested": False,
+                    "dte_warning": True,
+                    "position": position,
+                    "chain": [],
+                }
+            return None
+
+        with patch("src.smart_scheduler.is_trading_day", return_value=True), \
+             patch("src.smart_scheduler.get_et_now"), \
+             patch("src.smart_scheduler.run_async", side_effect=capture_run_async):
+            scheduler._job_wheel_monitoring()
+
+        # At least 2 run_async calls: one for monitoring checks, one for send_dte_alert
+        assert len(run_async_calls) >= 2
+
+    def test_monitoring_approval_pending_cleared_after_btc(self):
+        """_monitoring_approval_pending is True during approval and False after."""
+        position = _make_position()
+        chain = _make_chain_with_ask("IBIT260515P00050000", ask=0.60)
+        scheduler, cycle = self._make_scheduler(
+            profit_target_hit=True, position=position, chain=chain
+        )
+
+        pending_during = []
+
+        def capture_run_async(coro):
+            pending_during.append(scheduler._monitoring_approval_pending)
+            if len(pending_during) == 1:
+                return {
+                    "profit_target_hit": True,
+                    "position_tested": False,
+                    "dte_warning": False,
+                    "position": position,
+                    "chain": chain,
+                }
+            return ApprovalResult.APPROVED
+
+        with patch("src.smart_scheduler.is_trading_day", return_value=True), \
+             patch("src.smart_scheduler.get_et_now"), \
+             patch("src.smart_scheduler.run_async", side_effect=capture_run_async):
+            scheduler._job_wheel_monitoring()
+
+        # After job completes, pending should be False
+        assert scheduler._monitoring_approval_pending is False

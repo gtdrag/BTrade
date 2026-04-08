@@ -666,10 +666,90 @@ class SmartScheduler:
                 },
             )
 
-            # Telegram notification flows will be wired in Plan 02.
-            # Plan 02 will add: if result["dte_warning"]: send DTE alert
-            # Plan 02 will add: if result["profit_target_hit"]: request_profit_take_approval
-            # Plan 02 will add: if result["position_tested"]: request_roll_approval
+            position = result.get("position")
+            chain = result.get("chain")
+
+            # DTE alert (informational, no approval needed) — send before profit-take check
+            if result["dte_warning"] and position and self.telegram_bot:
+                run_async(self.telegram_bot.send_dte_alert(position, cycle, self.db))
+                self.db.log_event(
+                    "INFO",
+                    "dte_alert_sent",
+                    {"position_id": position["id"], "dte": "<=21"},
+                )
+
+            # Profit-take approval (blocks until user responds or times out)
+            if result["profit_target_hit"] and position and chain and self.telegram_bot:
+                self._monitoring_approval_pending = True
+                try:
+                    approval = run_async(
+                        self.telegram_bot.request_profit_take_approval(
+                            position=position,
+                            chain=chain,
+                            cycle=cycle,
+                            client=self.wheel_strategy.client,
+                            db=self.db,
+                            account_id_key=self.wheel_strategy.account_id_key,
+                        )
+                    )
+                    self.db.log_event(
+                        "INFO",
+                        "profit_take_result",
+                        {"result": approval.value if approval else "unknown"},
+                    )
+                finally:
+                    self._monitoring_approval_pending = False
+
+            # Roll suggestion (only if profit target NOT hit — profit takes priority)
+            elif result["position_tested"] and position and chain and self.telegram_bot:
+                if position.get("roll_count", 0) >= 2:
+                    self._send_notification(
+                        f"Position tested but max rolls reached "
+                        f"({position.get('roll_count', 0)}/2). "
+                        f"Manual intervention may be needed."
+                    )
+                    self.db.log_event(
+                        "INFO",
+                        "roll_blocked_max_rolls",
+                        {
+                            "position_id": position["id"],
+                            "roll_count": position.get("roll_count", 0),
+                        },
+                    )
+                else:
+                    new_contract = self.wheel_strategy.select_roll_strike(
+                        float(position["strike"]), position["option_type"]
+                    )
+                    if new_contract is None:
+                        self._send_notification(
+                            "Position tested but no suitable roll strike found in chain."
+                        )
+                        self.db.log_event(
+                            "INFO",
+                            "roll_no_strike_found",
+                            {"position_id": position["id"]},
+                        )
+                    else:
+                        self._monitoring_approval_pending = True
+                        try:
+                            approval = run_async(
+                                self.telegram_bot.request_roll_approval(
+                                    position=position,
+                                    new_contract=new_contract,
+                                    cycle=cycle,
+                                    chain=chain,
+                                    client=self.wheel_strategy.client,
+                                    db=self.db,
+                                    account_id_key=self.wheel_strategy.account_id_key,
+                                )
+                            )
+                            self.db.log_event(
+                                "INFO",
+                                "roll_approval_result",
+                                {"result": approval.value if approval else "unknown"},
+                            )
+                        finally:
+                            self._monitoring_approval_pending = False
 
         except Exception as e:
             logger.error(f"Wheel monitoring failed: {e}", exc_info=True)

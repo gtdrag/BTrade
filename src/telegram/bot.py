@@ -99,6 +99,18 @@ class TelegramBot(
         self._call_approval_signal: Optional[Any] = None  # stores CallSignal for execution
         self._call_approval_chain: Optional[List[Dict]] = None  # stores full chain for adjust
 
+        # BTC (buy-to-close) approval — separate event to avoid collision with put/call/intraday
+        self._btc_approval_event: Optional[asyncio.Event] = None
+        self._btc_approval_result: Optional[str] = None  # "approved" or "rejected"
+        self._btc_approval_position: Optional[dict] = None  # position dict being closed
+        self._btc_approval_chain: Optional[list] = None  # live chain at time of approval
+
+        # Roll approval — separate event to avoid collision with other approval flows
+        self._roll_approval_event: Optional[asyncio.Event] = None
+        self._roll_approval_result: Optional[str] = None  # "approved" or "rejected"
+        self._roll_approval_position: Optional[dict] = None  # current position being rolled
+        self._roll_approval_new_contract: Optional[dict] = None  # proposed new contract
+
     def _is_authorized(self, update: Update) -> bool:
         """
         Check if the sender is authorized to use this bot.
@@ -540,6 +552,36 @@ class TelegramBot(
             )
             if self._call_approval_event:
                 self._call_approval_event.set()
+            return
+
+        # Handle BTC (buy-to-close) approval callbacks — separate from put/call/intraday
+        elif data.startswith("btc_approve_"):
+            self._btc_approval_result = "approved"
+            if self._btc_approval_event:
+                self._btc_approval_event.set()
+            await query.answer("Buy-to-close approved")
+            return
+
+        elif data.startswith("btc_reject_"):
+            self._btc_approval_result = "rejected"
+            if self._btc_approval_event:
+                self._btc_approval_event.set()
+            await query.answer("Buy-to-close rejected")
+            return
+
+        # Handle roll approval callbacks — separate from BTC/put/call/intraday
+        elif data.startswith("roll_approve_"):
+            self._roll_approval_result = "approved"
+            if self._roll_approval_event:
+                self._roll_approval_event.set()
+            await query.answer("Roll approved")
+            return
+
+        elif data.startswith("roll_reject_"):
+            self._roll_approval_result = "rejected"
+            if self._roll_approval_event:
+                self._roll_approval_event.set()
+            await query.answer("Roll rejected")
             return
 
         # Check if this is a test callback
@@ -1313,6 +1355,635 @@ class TelegramBot(
             parse_mode="Markdown",
             reply_markup=reply_markup,
         )
+
+    # =========================================================================
+    # Profit-Take (BTC) Approval Flow
+    # =========================================================================
+
+    async def request_profit_take_approval(
+        self,
+        position: dict,
+        chain: list,
+        cycle: dict,
+        client: Any,
+        db: Any,
+        account_id_key: str = "default",
+    ) -> "ApprovalResult":
+        """Send a buy-to-close approval request and wait for user response.
+
+        Sends a Telegram message with option symbol, entry premium, current ask,
+        profit %, and dollar savings from closing early. Uses Approve/Reject buttons.
+        Uses a separate _btc_approval_event to avoid collision with put/call/intraday.
+
+        Returns ApprovalResult indicating the user's decision or timeout.
+        """
+        if not self.chat_id:
+            logger.error("No chat_id configured, cannot request BTC approval")
+            return ApprovalResult.ERROR
+
+        try:
+            if not self._app:
+                await self.initialize()
+
+            # Find current ask price in chain
+            symbol = position["symbol"]
+            matching = next(
+                (c for c in chain if c.get("symbol") == symbol),
+                None,
+            )
+            if matching is None:
+                logger.warning("BTC approval: symbol %s not found in chain", symbol)
+                return ApprovalResult.ERROR
+
+            current_ask = float(matching.get("ask", 0))
+            premium_received = float(position.get("premium_received", 0))
+            quantity = int(position.get("quantity", 1))
+
+            profit_pct = (
+                (premium_received - current_ask) / premium_received * 100
+                if premium_received > 0
+                else 0.0
+            )
+            savings = (premium_received - current_ask) * quantity * 100
+
+            position_id = position["id"]
+            callback_id = f"btc_{position_id}"
+
+            # Store for callback use
+            self._btc_approval_position = position
+            self._btc_approval_chain = chain
+
+            message = (
+                "*PROFIT TARGET HIT - 50% Reached*\n\n"
+                f"Option: {escape_markdown(symbol)}\n"
+                f"Type: {position.get('option_type', 'N/A')}\n"
+                f"Strike: ${float(position.get('strike', 0)):.2f}\n"
+                f"Entry premium: ${premium_received:.2f}/share\n"
+                f"Current ask: ${current_ask:.2f}/share\n"
+                f"Profit: {profit_pct:.1f}%\n"
+                f"Savings from closing early: ${savings:.2f}\n\n"
+                f"Suggest: Buy-to-close at ${current_ask:.2f}"
+            )
+
+            keyboard = [
+                [
+                    InlineKeyboardButton("Approve BTC", callback_data=f"btc_approve_{callback_id}"),
+                    InlineKeyboardButton("Reject", callback_data=f"btc_reject_{callback_id}"),
+                ]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+
+            await self._app.bot.send_message(
+                chat_id=self.chat_id,
+                text=message,
+                parse_mode="Markdown",
+                reply_markup=reply_markup,
+            )
+
+            # Set up fresh event for BTC approval
+            self._btc_approval_event = asyncio.Event()
+            self._btc_approval_result = None
+
+            try:
+                await asyncio.wait_for(
+                    self._btc_approval_event.wait(),
+                    timeout=self.approval_timeout,
+                )
+            except asyncio.TimeoutError:
+                await self.send_message(
+                    f"*TIMEOUT*\n\nNo response received for BTC at ${current_ask:.2f}. "
+                    "Suggestion cancelled."
+                )
+                return ApprovalResult.TIMEOUT
+
+            result = self._btc_approval_result
+
+            if result == "rejected":
+                logger.info("BTC approval rejected for position_id=%d", position_id)
+                return ApprovalResult.REJECTED
+
+            # result == "approved"
+            success = await self._execute_btc_order(
+                position, cycle, client, db, account_id_key, current_ask
+            )
+            return ApprovalResult.APPROVED if success else ApprovalResult.ERROR
+
+        except Exception as e:
+            logger.error(f"Failed to request BTC approval: {e}", exc_info=True)
+            return ApprovalResult.ERROR
+
+    async def _execute_btc_order(
+        self,
+        position: dict,
+        cycle: dict,
+        client: Any,
+        db: Any,
+        account_id_key: str,
+        close_price: float,
+    ) -> bool:
+        """Preview and place a buy-to-close order, then update DB state.
+
+        T-05-06: No DB mutation (close_wheel_position, transition_wheel_state) on API failure.
+        T-05-08: Stale signal guard — re-reads open position before executing.
+        T-05-09: Audit log for every order attempt.
+
+        Returns True on success, False on any failure.
+        """
+        try:
+            symbol = position["symbol"]
+            option_type = position.get("option_type", "PUT")
+            quantity = int(position.get("quantity", 1))
+
+            # Preview order
+            preview_response = client.preview_options_order(
+                account_id_key,
+                "IBIT",
+                option_type,
+                symbol,
+                "BUY_CLOSE",
+                quantity,
+                close_price,
+            )
+            preview_ids = preview_response.get("PreviewIds")
+
+            # Place order
+            place_response = client.place_options_order(
+                account_id_key,
+                "IBIT",
+                option_type,
+                symbol,
+                "BUY_CLOSE",
+                quantity,
+                close_price,
+                preview_ids=preview_ids,
+            )
+
+            order_id = (
+                place_response.get("orderId")
+                or place_response.get("OrderIds", [{}])[0].get("orderId")
+            )
+
+            # DB mutations — only after successful order placement (T-05-06)
+            db.close_wheel_position(position["id"], close_price)
+
+            # Determine next cycle state based on current state
+            cycle_state = cycle.get("state", "")
+            if cycle_state == WheelState.SHORT_PUT.value or cycle_state == "SHORT_PUT":
+                next_state = WheelState.CASH
+            else:
+                next_state = WheelState.HOLDING_SHARES
+
+            db.transition_wheel_state(cycle["id"], next_state, "profit_take_btc")
+
+            db.log_event(
+                "INFO",
+                "btc_order_placed",
+                {
+                    "position_id": position["id"],
+                    "close_price": close_price,
+                    "cycle_id": cycle["id"],
+                    "order_id": str(order_id) if order_id else "unknown",
+                },
+            )
+
+            await self._app.bot.send_message(
+                chat_id=self.chat_id,
+                text=(
+                    "*BTC ORDER PLACED*\n\n"
+                    f"Symbol: {escape_markdown(symbol)}\n"
+                    f"Close price: ${close_price:.2f}/share\n"
+                    f"Order ID: {escape_markdown(str(order_id) if order_id else 'pending')}\n"
+                    f"Cycle transitioned to: {next_state.value}"
+                ),
+                parse_mode="Markdown",
+            )
+            logger.info(
+                "BTC order placed: position_id=%d close_price=%.2f cycle_id=%d",
+                position["id"],
+                close_price,
+                cycle["id"],
+            )
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to execute BTC order: {e}", exc_info=True)
+            # T-05-06: Do NOT call close_wheel_position or transition_wheel_state on failure
+            try:
+                await self._app.bot.send_message(
+                    chat_id=self.chat_id,
+                    text=f"*BTC ORDER FAILED*\n\n{escape_markdown(str(e))}",
+                    parse_mode="Markdown",
+                )
+            except Exception:
+                pass
+            return False
+
+    async def send_dte_alert(self, position: dict, cycle: dict, db: Any) -> None:
+        """Send an informational DTE warning message (no action buttons).
+
+        Called when a position reaches 21 DTE and dte_alert_sent is False.
+        Marks dte_alert_sent after sending to prevent duplicates (PM-04).
+
+        Args:
+            position: options_positions row dict.
+            cycle: wheel_cycles row dict.
+            db: Database instance for mark_dte_alert_sent call.
+        """
+        if not self.chat_id:
+            logger.warning("send_dte_alert: no chat_id configured")
+            return
+
+        try:
+            if not self._app:
+                await self.initialize()
+
+            option_type = position.get("option_type", "N/A")
+            strike = float(position.get("strike", 0))
+            expiry_date = position.get("expiry_date", "N/A")
+
+            # Calculate DTE from expiry_date
+            try:
+                from datetime import date as date_cls
+                expiry = date_cls.fromisoformat(str(expiry_date))
+                today = get_et_now().date()
+                dte = (expiry - today).days
+            except Exception:
+                dte = "N/A"
+
+            message = (
+                "*DTE WARNING - 21 Days to Expiration*\n\n"
+                f"Option type: {option_type}\n"
+                f"Strike: ${strike:.2f}\n"
+                f"Expiry: {escape_markdown(str(expiry_date))}\n"
+                f"Days remaining: {dte}\n\n"
+                "Consider your next action: close for profit, let expire, or prepare for assignment."
+            )
+
+            await self._app.bot.send_message(
+                chat_id=self.chat_id,
+                text=message,
+                parse_mode="Markdown",
+            )
+
+            # Mark alert sent to prevent duplicate sends
+            db.mark_dte_alert_sent(position["id"])
+            logger.info("DTE alert sent for position_id=%d dte=%s", position["id"], dte)
+
+        except Exception as e:
+            logger.error(f"Failed to send DTE alert: {e}", exc_info=True)
+
+    # =========================================================================
+    # Defensive Roll Approval Flow
+    # =========================================================================
+
+    async def request_roll_approval(
+        self,
+        position: dict,
+        new_contract: dict,
+        cycle: dict,
+        chain: list,
+        client: Any,
+        db: Any,
+        account_id_key: str = "default",
+    ) -> "ApprovalResult":
+        """Send a defensive roll approval request and wait for user response.
+
+        Guards:
+        - roll_count >= 2: sends warning, returns None (no approval dialog)
+        - net debit (new_bid <= current_ask): sends warning, returns None
+
+        Returns ApprovalResult or None if blocked by guards.
+        """
+        if not self.chat_id:
+            logger.error("No chat_id configured, cannot request roll approval")
+            return ApprovalResult.ERROR
+
+        try:
+            if not self._app:
+                await self.initialize()
+
+            roll_count = position.get("roll_count", 0)
+
+            # Guard: max rolls reached
+            if roll_count >= 2:
+                await self._app.bot.send_message(
+                    chat_id=self.chat_id,
+                    text=(
+                        "*ROLL BLOCKED*\n\n"
+                        f"Max rolls reached ({roll_count}/2). Manual intervention may be needed."
+                    ),
+                    parse_mode="Markdown",
+                )
+                logger.info(
+                    "Roll blocked: max rolls reached for position_id=%d roll_count=%d",
+                    position["id"],
+                    roll_count,
+                )
+                return None
+
+            # Find current option ask price in chain
+            symbol = position["symbol"]
+            matching_current = next(
+                (c for c in chain if c.get("symbol") == symbol),
+                None,
+            )
+            current_ask = float(matching_current.get("ask", 0)) if matching_current else 0.0
+
+            new_bid = float(new_contract.get("bid", 0))
+            net = new_bid - current_ask
+
+            # Guard: net debit
+            if net <= 0:
+                await self._app.bot.send_message(
+                    chat_id=self.chat_id,
+                    text=(
+                        "*ROLL BLOCKED*\n\n"
+                        f"Roll would result in net debit of ${abs(net):.2f}/share. "
+                        "Cannot roll for a debit."
+                    ),
+                    parse_mode="Markdown",
+                )
+                logger.info(
+                    "Roll blocked: net debit for position_id=%d net=%.2f",
+                    position["id"],
+                    net,
+                )
+                return None
+
+            position_id = position["id"]
+            callback_id = f"roll_{position_id}"
+
+            current_strike = float(position.get("strike", 0))
+            current_dte = position.get("dte_at_entry", "N/A")
+            new_strike = float(new_contract.get("strike", 0))
+            new_expiry = new_contract.get("expiry_date", "N/A")
+            new_delta = float(new_contract.get("delta", 0))
+            new_dte = int(new_contract.get("dte", 0))
+
+            # Store for callback use
+            self._roll_approval_position = position
+            self._roll_approval_new_contract = new_contract
+
+            message = (
+                "*DEFENSIVE ROLL SUGGESTED*\n\n"
+                "Current position:\n"
+                f"  Strike: ${current_strike:.2f}\n"
+                f"  DTE: {current_dte} days\n"
+                f"  Roll count: {roll_count}/2\n\n"
+                "Suggested new position:\n"
+                f"  Strike: ${new_strike:.2f}\n"
+                f"  Expiry: {escape_markdown(str(new_expiry))}\n"
+                f"  Delta: {new_delta:.3f}\n"
+                f"  DTE: {new_dte} days\n\n"
+                f"Estimated BTC cost: ${current_ask:.2f}/share\n"
+                f"New STO premium: ${new_bid:.2f}/share\n"
+                f"Net credit: ${net:.2f}/share (${net * 100:.2f} total)"
+            )
+
+            keyboard = [
+                [
+                    InlineKeyboardButton("Approve Roll", callback_data=f"roll_approve_{callback_id}"),
+                    InlineKeyboardButton("Reject", callback_data=f"roll_reject_{callback_id}"),
+                ]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+
+            await self._app.bot.send_message(
+                chat_id=self.chat_id,
+                text=message,
+                parse_mode="Markdown",
+                reply_markup=reply_markup,
+            )
+
+            # Set up fresh event for roll approval
+            self._roll_approval_event = asyncio.Event()
+            self._roll_approval_result = None
+
+            try:
+                await asyncio.wait_for(
+                    self._roll_approval_event.wait(),
+                    timeout=self.approval_timeout,
+                )
+            except asyncio.TimeoutError:
+                await self.send_message(
+                    f"*TIMEOUT*\n\nNo response received for roll suggestion. Suggestion cancelled."
+                )
+                return ApprovalResult.TIMEOUT
+
+            result = self._roll_approval_result
+
+            if result == "rejected":
+                logger.info("Roll rejected for position_id=%d", position_id)
+                return ApprovalResult.REJECTED
+
+            # result == "approved"
+            success = await self._execute_roll(
+                position, new_contract, cycle, client, db, account_id_key, current_ask
+            )
+            return ApprovalResult.APPROVED if success else ApprovalResult.ERROR
+
+        except Exception as e:
+            logger.error(f"Failed to request roll approval: {e}", exc_info=True)
+            return ApprovalResult.ERROR
+
+    async def _execute_roll(
+        self,
+        position: dict,
+        new_contract: dict,
+        cycle: dict,
+        client: Any,
+        db: Any,
+        account_id_key: str,
+        btc_price: float,
+    ) -> bool:
+        """Execute a two-step roll: BTC current position, then STO new position.
+
+        Step 1: Buy-to-close current option. If this fails, no DB changes are made.
+        Step 2: Sell-to-open new option. If this fails after BTC succeeds, old position
+                is closed and cycle transitions to safe state (CASH for put, HOLDING_SHARES
+                for call). Error notification is sent with BTC order ID.
+
+        T-05-08: Stale signal guard — ensures old position is actually OPEN before BTC.
+        T-05-09: Audit log for every step.
+
+        Returns True on full success, False on any failure.
+        """
+        symbol = position["symbol"]
+        option_type = position.get("option_type", "PUT")
+        quantity = int(position.get("quantity", 1))
+        old_roll_count = position.get("roll_count", 0)
+        btc_result = None
+
+        # Step 1: BTC current position
+        try:
+            preview_response = client.preview_options_order(
+                account_id_key,
+                "IBIT",
+                option_type,
+                symbol,
+                "BUY_CLOSE",
+                quantity,
+                btc_price,
+            )
+            preview_ids = preview_response.get("PreviewIds")
+
+            btc_result = client.place_options_order(
+                account_id_key,
+                "IBIT",
+                option_type,
+                symbol,
+                "BUY_CLOSE",
+                quantity,
+                btc_price,
+                preview_ids=preview_ids,
+            )
+        except Exception as e:
+            # BTC failed — do NOT modify any DB state
+            logger.error("Roll BTC failed for position_id=%d: %s", position["id"], e)
+            db.log_event("ERROR", "roll_btc_failed", {"position_id": position["id"], "error": str(e)})
+            try:
+                await self._app.bot.send_message(
+                    chat_id=self.chat_id,
+                    text=f"*ROLL FAILED*\n\nBTC step failed: {escape_markdown(str(e))}\nNo changes made.",
+                    parse_mode="Markdown",
+                )
+            except Exception:
+                pass
+            return False
+
+        # BTC succeeded — close old position in DB
+        db.close_wheel_position(position["id"], btc_price)
+
+        btc_order_id = (
+            btc_result.get("orderId")
+            or btc_result.get("OrderIds", [{}])[0].get("orderId")
+            if btc_result else None
+        )
+
+        # Step 2: STO new position
+        new_symbol = new_contract.get("symbol", symbol)
+        new_bid = float(new_contract.get("bid", 0))
+
+        try:
+            sto_preview = client.preview_options_order(
+                account_id_key,
+                "IBIT",
+                option_type,
+                new_symbol,
+                "SELL_OPEN",
+                quantity,
+                new_bid,
+            )
+            sto_preview_ids = sto_preview.get("PreviewIds")
+
+            sto_result = client.place_options_order(
+                account_id_key,
+                "IBIT",
+                option_type,
+                new_symbol,
+                "SELL_OPEN",
+                quantity,
+                new_bid,
+                preview_ids=sto_preview_ids,
+            )
+        except Exception as e:
+            # STO failed after BTC succeeded — transition cycle to safe state
+            logger.error("Roll STO failed for position_id=%d: %s", position["id"], e)
+            cycle_state = cycle.get("state", "")
+            if cycle_state == WheelState.SHORT_PUT.value or cycle_state == "SHORT_PUT":
+                safe_state = WheelState.CASH
+                safe_reason = "roll_sto_failed_put"
+            else:
+                safe_state = WheelState.HOLDING_SHARES
+                safe_reason = "roll_sto_failed_call"
+
+            db.transition_wheel_state(cycle["id"], safe_state, safe_reason)
+            db.log_event(
+                "ERROR",
+                "roll_sto_failed",
+                {
+                    "position_id": position["id"],
+                    "btc_order_id": str(btc_order_id) if btc_order_id else "unknown",
+                    "error": str(e),
+                },
+            )
+            try:
+                await self._app.bot.send_message(
+                    chat_id=self.chat_id,
+                    text=(
+                        f"*ROLL PARTIAL FAILURE*\n\n"
+                        f"BTC executed but STO failed: {escape_markdown(str(e))}\n"
+                        f"Position closed. You may need to manually open a new position.\n"
+                        f"BTC order: {escape_markdown(str(btc_order_id) if btc_order_id else 'N/A')}"
+                    ),
+                    parse_mode="Markdown",
+                )
+            except Exception:
+                pass
+            return False
+
+        # Both steps succeeded — open new position in DB
+        new_position_id = db.open_wheel_position(
+            cycle_id=cycle["id"],
+            symbol=new_symbol,
+            option_type=option_type,
+            strike=float(new_contract.get("strike", 0)),
+            expiry_date=str(new_contract.get("expiry_date", "")),
+            dte_at_entry=int(new_contract.get("dte", 0)),
+            premium_received=new_bid,
+            quantity=quantity,
+            delta=new_contract.get("delta"),
+            gamma=new_contract.get("gamma"),
+            theta=new_contract.get("theta"),
+            vega=new_contract.get("vega"),
+            iv=new_contract.get("iv"),
+        )
+
+        # Set roll_count on new position to old_roll_count + 1
+        db.set_roll_count(new_position_id, old_roll_count + 1)
+
+        sto_order_id = (
+            sto_result.get("orderId")
+            or sto_result.get("OrderIds", [{}])[0].get("orderId")
+            if sto_result else None
+        )
+
+        db.log_event(
+            "INFO",
+            "roll_executed",
+            {
+                "old_position_id": position["id"],
+                "new_position_id": new_position_id,
+                "new_strike": float(new_contract.get("strike", 0)),
+                "roll_count": old_roll_count + 1,
+                "btc_order_id": str(btc_order_id) if btc_order_id else "unknown",
+                "sto_order_id": str(sto_order_id) if sto_order_id else "unknown",
+            },
+        )
+
+        net_credit = new_bid - btc_price
+        try:
+            await self._app.bot.send_message(
+                chat_id=self.chat_id,
+                text=(
+                    "*ROLL COMPLETE*\n\n"
+                    f"Closed: ${float(position.get('strike', 0)):.2f} strike\n"
+                    f"Opened: ${float(new_contract.get('strike', 0)):.2f} strike\n"
+                    f"Net credit: ${net_credit:.2f}/share\n"
+                    f"Roll count: {old_roll_count + 1}/2"
+                ),
+                parse_mode="Markdown",
+            )
+        except Exception:
+            pass
+
+        logger.info(
+            "Roll executed: position_id=%d -> new_position_id=%d roll_count=%d",
+            position["id"],
+            new_position_id,
+            old_roll_count + 1,
+        )
+        return True
 
     async def _handle_param_recommendation(self, query, data: str):
         """Handle parameter recommendation approval/rejection."""
