@@ -268,6 +268,18 @@ class Database:
             """
             )
 
+            # Migration: Add roll_count and dte_alert_sent columns for profit management (Phase 5)
+            cursor.execute("PRAGMA table_info(options_positions)")
+            options_columns = [row[1] for row in cursor.fetchall()]
+            if "roll_count" not in options_columns:
+                cursor.execute(
+                    "ALTER TABLE options_positions ADD COLUMN roll_count INTEGER DEFAULT 0"
+                )
+            if "dte_alert_sent" not in options_columns:
+                cursor.execute(
+                    "ALTER TABLE options_positions ADD COLUMN dte_alert_sent INTEGER DEFAULT 0"
+                )
+
             # Initialize bot state if not exists
             cursor.execute(
                 """
@@ -1097,6 +1109,59 @@ class Database:
                 (cycle_id,),
             )
             return [dict(row) for row in cursor.fetchall()]
+
+    def increment_roll_count(self, position_id: int) -> None:
+        """Increment the roll_count for an options position by 1.
+
+        Called each time a position is rolled to a later expiry.
+
+        Args:
+            position_id: ID of the options_positions row to update.
+        """
+        now = get_et_now().isoformat()
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE options_positions SET roll_count = roll_count + 1, updated_at = ? WHERE id = ?",
+                (now, position_id),
+            )
+
+    def mark_dte_alert_sent(self, position_id: int) -> None:
+        """Mark that the 21-DTE alert has been sent for this position.
+
+        Idempotent — safe to call multiple times; dte_alert_sent stays at 1.
+
+        Args:
+            position_id: ID of the options_positions row to update.
+        """
+        now = get_et_now().isoformat()
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE options_positions SET dte_alert_sent = 1, updated_at = ? WHERE id = ?",
+                (now, position_id),
+            )
+
+    def get_open_position_for_cycle(self, cycle_id: int) -> Optional[Dict[str, Any]]:
+        """Get the most recent OPEN options position for a wheel cycle.
+
+        Returns the latest open position (by id DESC) or None if no open
+        position exists. Used by monitoring checks to find the active contract.
+
+        Args:
+            cycle_id: The wheel cycle ID to query.
+
+        Returns:
+            Dict of the open options_positions row, or None if no OPEN row.
+        """
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT * FROM options_positions WHERE cycle_id = ? AND status = 'OPEN' ORDER BY id DESC LIMIT 1",
+                (cycle_id,),
+            )
+            row = cursor.fetchone()
+            return dict(row) if row else None
 
     def compute_cycle_pnl(
         self, cycle: Dict[str, Any], current_price: float = 0.0
