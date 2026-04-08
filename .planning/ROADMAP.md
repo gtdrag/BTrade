@@ -81,10 +81,11 @@ Plans:
   3. Bot prevents user from approving call strikes below adjusted cost basis with warning message
   4. When shares are called away, wheel cycle state returns to CASH and full-cycle P&L is recorded
   5. User can see complete cycle history in database (put entry → assignment → call entry → call away → profit)
-**Plans**: TBD
+**Plans:** 2 plans
 
 Plans:
-- [ ] TBD (defined during phase planning)
+- [ ] 04-01-PLAN.md — CallSignal dataclass, call strike selection with cost basis protection, and call-away/OTM detection (CC-01, CC-03, CC-04)
+- [ ] 04-02-PLAN.md — Telegram call approval flow, callback routing, and scheduler wiring for call suggestions (CC-02, CC-03, CC-04)
 
 ### Phase 5: Profit Management
 **Goal**: Bot optimizes wheel returns through 50% profit-taking, defensive rolling, and expiration monitoring
@@ -126,6 +127,6 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 | 1. E*TRADE Options API Integration | 0/2 | Planning complete | - |
 | 2. Options Database & State Management | 0/2 | Planning complete | - |
 | 3. Cash-Secured Put Cycle | 0/3 | Planning complete | - |
-| 4. Covered Call Cycle | 0/TBD | Not started | - |
+| 4. Covered Call Cycle | 0/2 | Planning complete | - |
 | 5. Profit Management | 0/TBD | Not started | - |
 | 6. Transition & User Interface | 0/TBD | Not started | - |
