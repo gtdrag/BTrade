@@ -101,7 +101,7 @@ Plans:
 
 Plans:
 - [x] 05-01-PLAN.md — DB migration, monitoring methods, scheduler 30-min job (PM-01)
-- [ ] 05-02-PLAN.md — Telegram BTC/roll approval flows and DTE alerts (PM-02, PM-03, PM-04, PM-05)
+- [x] 05-02-PLAN.md — Telegram BTC/roll approval flows and DTE alerts (PM-02, PM-03, PM-04, PM-05)
 
 ### Phase 6: Transition & User Interface
 **Goal**: Wheel strategy replaces intraday strategies with full user visibility, control, and daily position reporting
