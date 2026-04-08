@@ -8,7 +8,7 @@ import asyncio
 import logging
 import os
 from datetime import datetime
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
@@ -19,6 +19,8 @@ from telegram.ext import (
 )
 
 from ..async_utils import run_sync_in_executor
+from ..utils import get_et_now
+from ..wheel_state import WheelState
 from .analysis_commands import AnalysisCommandsMixin
 from .auth_commands import AuthCommandsMixin
 from .backtest_commands import BacktestCommandsMixin
@@ -28,6 +30,7 @@ from .utils import ApprovalResult, TradeApprovalRequest, escape_markdown
 if TYPE_CHECKING:
     from ..smart_scheduler import SmartScheduler
     from ..trading_bot import TradingBot
+    from ..wheel_strategy import PutSignal
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +86,12 @@ class TelegramBot(
         self._approval_result: Optional[ApprovalResult] = None
         self._pending_sellall = None  # Stores pending sellall confirmation state
         self._is_running = False
+
+        # Put options approval — separate event/result to avoid collision with intraday approvals
+        self._put_approval_event: Optional[asyncio.Event] = None
+        self._put_approval_result: Optional[str] = None  # "approved", "rejected", or strike string
+        self._put_approval_signal: Optional[Any] = None  # stores PutSignal for execution
+        self._put_approval_chain: Optional[List[Dict]] = None  # stores full chain for adjust
 
     def _is_authorized(self, update: Update) -> bool:
         """
@@ -409,6 +418,65 @@ class TelegramBot(
             await self._handle_sellall_callback(query, data)
             return
 
+        # Handle put options approval callbacks (before intraday approve_/reject_ handlers)
+        if data.startswith("put_approve_"):
+            self._put_approval_result = "approved"
+            await query.edit_message_text(
+                text=query.message.text + "\n\n✅ *APPROVED* — Executing put order...",
+                parse_mode="Markdown",
+            )
+            if self._put_approval_event:
+                self._put_approval_event.set()
+            return
+
+        elif data.startswith("put_adjust_"):
+            await self._handle_put_adjust(query, data)
+            return
+
+        elif data.startswith("put_alt_reject_"):
+            self._put_approval_result = "rejected"
+            await query.edit_message_text(
+                text="❌ All alternatives rejected. Put suggestion cancelled.",
+                parse_mode="Markdown",
+            )
+            if self._put_approval_event:
+                self._put_approval_event.set()
+            return
+
+        elif data.startswith("put_alt_"):
+            # User selected an alternative strike: put_alt_{strike}_{callback_id}
+            parts = data.split("_")
+            # parts: ["put", "alt", strike, callback_id...]
+            try:
+                selected_strike = float(parts[2])
+                self._put_approval_result = str(selected_strike)
+                await query.edit_message_text(
+                    text=f"✅ *APPROVED* — Executing put at strike ${selected_strike}...",
+                    parse_mode="Markdown",
+                )
+                if self._put_approval_event:
+                    self._put_approval_event.set()
+            except (IndexError, ValueError) as e:
+                logger.error(f"Failed to parse put_alt callback data '{data}': {e}")
+                await query.edit_message_text(
+                    text="❌ Error parsing selection. Put suggestion cancelled.",
+                    parse_mode="Markdown",
+                )
+                self._put_approval_result = "rejected"
+                if self._put_approval_event:
+                    self._put_approval_event.set()
+            return
+
+        elif data.startswith("put_reject_"):
+            self._put_approval_result = "rejected"
+            await query.edit_message_text(
+                text=query.message.text + "\n\n❌ *REJECTED* — Put suggestion cancelled.",
+                parse_mode="Markdown",
+            )
+            if self._put_approval_event:
+                self._put_approval_event.set()
+            return
+
         # Check if this is a test callback
         is_test = "_test_" in data
 
@@ -461,6 +529,342 @@ class TelegramBot(
         # Signal that we got a response
         if self._approval_event:
             self._approval_event.set()
+
+    # =========================================================================
+    # Put Options Approval Flow
+    # =========================================================================
+
+    async def request_put_approval(
+        self,
+        signal: "PutSignal",
+        chain: List[Dict],
+        client: Any,
+        db: Any,
+        account_id_key: str = "default",
+    ) -> ApprovalResult:
+        """Send a put options approval request and wait for user response.
+
+        Sends a Telegram message with strike/expiry/greeks details and 3 inline
+        buttons: Approve, Adjust (show alternatives), Reject.  Uses a separate
+        _put_approval_event so it cannot collide with the intraday _approval_event.
+
+        Returns ApprovalResult indicating the user's decision or timeout.
+        """
+        if not self.chat_id:
+            logger.error("No chat_id configured, cannot request put approval")
+            return ApprovalResult.ERROR
+
+        try:
+            if not self._app:
+                await self.initialize()
+
+            callback_id = f"put_{get_et_now().strftime('%H%M%S')}"
+
+            # Store for use in callback handlers
+            self._put_approval_signal = signal
+            self._put_approval_chain = chain
+
+            # Build message
+            message = (
+                "📉 *CASH-SECURED PUT SIGNAL*\n\n"
+                f"• Symbol: {escape_markdown(signal.symbol)}\n"
+                f"• Strike: ${signal.strike:.2f}\n"
+                f"• Expiry: {escape_markdown(signal.expiry_date)} ({signal.dte} DTE)\n"
+                f"• Delta: {signal.delta:.3f}\n"
+                f"• Premium (bid): ${signal.premium:.2f}/share\n"
+                f"• Max Risk: ${signal.max_risk:,.0f} (1 contract)\n"
+                f"• IV: {signal.iv:.1%}\n"
+                f"• Pullback: {signal.pullback_pct:.1f}%\n\n"
+                f"⏱ Timeout: {self.approval_timeout // 60} minutes"
+            )
+
+            keyboard = [
+                [
+                    InlineKeyboardButton("✅ Approve", callback_data=f"put_approve_{callback_id}"),
+                    InlineKeyboardButton("🔄 Adjust", callback_data=f"put_adjust_{callback_id}"),
+                    InlineKeyboardButton("❌ Reject", callback_data=f"put_reject_{callback_id}"),
+                ]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+
+            await self._app.bot.send_message(
+                chat_id=self.chat_id,
+                text=message,
+                parse_mode="Markdown",
+                reply_markup=reply_markup,
+            )
+
+            # Set up separate event for put approval (T-03-05: no collision)
+            self._put_approval_event = asyncio.Event()
+            self._put_approval_result = None
+
+            try:
+                await asyncio.wait_for(
+                    self._put_approval_event.wait(),
+                    timeout=self.approval_timeout,
+                )
+            except asyncio.TimeoutError:
+                await self.send_message(
+                    f"⏰ *TIMEOUT*\n\nNo response received for put signal at ${signal.strike:.2f}. "
+                    "Suggestion cancelled."
+                )
+                return ApprovalResult.TIMEOUT
+
+            result = self._put_approval_result
+
+            if result == "rejected":
+                return ApprovalResult.REJECTED
+
+            # result is either "approved" or a numeric string (alternative strike selected)
+            if result is not None and result != "approved":
+                # User selected an alternative strike from the adjust flow
+                try:
+                    alt_strike = float(result)
+                    # Find the matching contract in the stored chain
+                    matching = next(
+                        (
+                            c for c in (chain or [])
+                            if c.get("option_type") == "PUT"
+                            and abs(float(c.get("strike", 0)) - alt_strike) < 0.01
+                        ),
+                        None,
+                    )
+                    if matching:
+                        from ..wheel_strategy import PutSignal as PS  # local import — avoid circular
+                        expiry_date = matching.get("expiry_date", signal.expiry_date)
+                        if hasattr(expiry_date, "isoformat"):
+                            expiry_date = expiry_date.isoformat()
+                        else:
+                            expiry_date = str(expiry_date)
+                        alt_signal = PS(
+                            strike=float(matching["strike"]),
+                            expiry_date=expiry_date,
+                            expiry_year=int(matching.get("expiry_year", signal.expiry_year)),
+                            expiry_month=int(matching.get("expiry_month", signal.expiry_month)),
+                            expiry_day=int(matching.get("expiry_day", signal.expiry_day)),
+                            delta=float(matching.get("delta", signal.delta)),
+                            premium=float(matching.get("bid", signal.premium)),
+                            dte=int(matching.get("dte", signal.dte)),
+                            max_risk=float(matching["strike"]) * 100.0,
+                            symbol=str(matching.get("symbol", signal.symbol)),
+                            iv=float(matching.get("iv", signal.iv)),
+                            gamma=float(matching.get("gamma", signal.gamma)),
+                            theta=float(matching.get("theta", signal.theta)),
+                            vega=float(matching.get("vega", signal.vega)),
+                            pullback_pct=signal.pullback_pct,
+                        )
+                        signal = alt_signal
+                    else:
+                        logger.warning(
+                            "Could not find chain entry for alt_strike=%.2f; using original signal",
+                            alt_strike,
+                        )
+                except ValueError:
+                    logger.error("Could not parse put approval result as float: %s", result)
+
+            success = await self._execute_put_order(signal, client, db, account_id_key)
+            return ApprovalResult.APPROVED if success else ApprovalResult.ERROR
+
+        except Exception as e:
+            logger.error(f"Failed to request put approval: {e}", exc_info=True)
+            return ApprovalResult.ERROR
+
+    async def _execute_put_order(
+        self,
+        signal: "PutSignal",
+        client: Any,
+        db: Any,
+        account_id_key: str,
+    ) -> bool:
+        """Preview, place a put sell-to-open order, then record it in the DB.
+
+        Order is only recorded if placement succeeds (T-03-08: no DB write on failure).
+        Logs only summary data (T-03-09).
+
+        Returns True on success, False on any failure.
+        """
+        try:
+            # Use bid as limit price (conservative for sell-to-open)
+            limit_price = signal.premium
+
+            # Preview first
+            preview_response = client.preview_options_order(
+                account_id_key,
+                "IBIT",
+                "PUT",
+                signal.expiry_year,
+                signal.expiry_month,
+                signal.expiry_day,
+                signal.strike,
+                "SELL_OPEN",
+                1,
+                limit_price,
+            )
+            preview_ids = preview_response.get("PreviewIds")
+
+            # Place the order
+            place_response = client.place_options_order(
+                account_id_key,
+                "IBIT",
+                "PUT",
+                signal.expiry_year,
+                signal.expiry_month,
+                signal.expiry_day,
+                signal.strike,
+                "SELL_OPEN",
+                1,
+                limit_price,
+                preview_ids=preview_ids,
+            )
+
+            order_id = place_response.get("orderId") or place_response.get("OrderIds", [{}])[0].get("orderId")
+
+            # Record in DB — only after successful placement (T-03-08)
+            cycle_id = db.create_wheel_cycle()
+            db.transition_wheel_state(
+                cycle_id,
+                WheelState.SHORT_PUT,
+                "put_sold",
+                put_strike=signal.strike,
+                put_premium_received=signal.premium,
+                put_expiry_date=signal.expiry_date,
+            )
+            db.open_wheel_position(
+                cycle_id,
+                signal.symbol,
+                "PUT",
+                signal.strike,
+                signal.expiry_date,
+                signal.dte,
+                signal.premium,
+                1,
+                signal.delta,
+                signal.gamma,
+                signal.theta,
+                signal.vega,
+                signal.iv,
+            )
+
+            # T-03-10: Audit log
+            db.log_event(
+                "INFO",
+                "put_order_placed",
+                {
+                    "strike": signal.strike,
+                    "delta": signal.delta,
+                    "premium": signal.premium,
+                    "dte": signal.dte,
+                    "cycle_id": cycle_id,
+                    "order_id": str(order_id) if order_id else "unknown",
+                },
+            )
+
+            await self._app.bot.send_message(
+                chat_id=self.chat_id,
+                text=(
+                    "✅ *PUT ORDER PLACED*\n\n"
+                    f"• Strike: ${signal.strike:.2f}\n"
+                    f"• Expiry: {escape_markdown(signal.expiry_date)}\n"
+                    f"• Premium: ${signal.premium:.2f}/share (${signal.premium * 100:.2f} total)\n"
+                    f"• Order ID: {escape_markdown(str(order_id) if order_id else 'pending')}\n"
+                    f"• Cycle ID: {cycle_id}"
+                ),
+                parse_mode="Markdown",
+            )
+            logger.info(
+                "Put order placed: strike=%.2f dte=%d cycle_id=%d",
+                signal.strike,
+                signal.dte,
+                cycle_id,
+            )
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to execute put order: {e}", exc_info=True)
+            try:
+                await self._app.bot.send_message(
+                    chat_id=self.chat_id,
+                    text=f"⚠️ *PUT ORDER FAILED*\n\n{escape_markdown(str(e))}",
+                    parse_mode="Markdown",
+                )
+            except Exception:
+                pass
+            return False
+
+    async def _handle_put_adjust(self, query: Any, data: str) -> None:
+        """Show 3-5 nearby alternative put strikes for user selection.
+
+        Filters the stored chain to puts with abs(delta) in [0.15, 0.40],
+        finds strikes around the originally suggested strike, and renders them
+        as inline buttons so the user can pick one or reject all.
+        """
+        chain = self._put_approval_chain or []
+        signal = self._put_approval_signal
+
+        # Extract callback_id suffix from the put_adjust_ prefix
+        callback_id = data[len("put_adjust_"):]  # e.g. "put_HHMMSS"
+
+        # Filter to wider delta range for alternatives
+        candidates = [
+            c for c in chain
+            if c.get("option_type") == "PUT"
+            and 0.15 <= abs(float(c.get("delta", 0))) <= 0.40
+        ]
+        # Sort by strike ascending
+        candidates.sort(key=lambda c: float(c.get("strike", 0)))
+
+        if not candidates:
+            await query.edit_message_text(
+                text="⚠️ No alternative strikes available in the 0.15–0.40 delta range.",
+                parse_mode="Markdown",
+            )
+            return
+
+        # Find the suggested strike's index and take 2 below and 2 above
+        suggested_strike = signal.strike if signal else None
+        if suggested_strike is not None:
+            # Find nearest index
+            strikes = [float(c.get("strike", 0)) for c in candidates]
+            nearest_idx = min(range(len(strikes)), key=lambda i: abs(strikes[i] - suggested_strike))
+            start = max(0, nearest_idx - 2)
+            end = min(len(candidates), nearest_idx + 3)
+            alternatives = [
+                c for c in candidates[start:end]
+                if abs(float(c.get("strike", 0)) - suggested_strike) > 0.01
+            ]
+        else:
+            alternatives = candidates[:5]
+
+        if not alternatives:
+            await query.edit_message_text(
+                text="⚠️ No alternative strikes different from the suggested strike.",
+                parse_mode="Markdown",
+            )
+            return
+
+        # Build buttons: one per alternative strike
+        keyboard = []
+        for c in alternatives:
+            alt_strike = float(c.get("strike", 0))
+            alt_delta = abs(float(c.get("delta", 0)))
+            alt_bid = float(c.get("bid", 0))
+            alt_dte = int(c.get("dte", 0))
+            label = f"${alt_strike:.2f} | δ={alt_delta:.2f} | ${alt_bid:.2f}bid | {alt_dte}DTE"
+            keyboard.append(
+                [InlineKeyboardButton(label, callback_data=f"put_alt_{alt_strike}_{callback_id}")]
+            )
+
+        # Reject all button
+        keyboard.append(
+            [InlineKeyboardButton("❌ Reject All", callback_data=f"put_alt_reject_{callback_id}")]
+        )
+
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(
+            text="🔄 *SELECT ALTERNATIVE STRIKE*\n\nChoose a put strike or reject all:",
+            parse_mode="Markdown",
+            reply_markup=reply_markup,
+        )
 
     async def _handle_param_recommendation(self, query, data: str):
         """Handle parameter recommendation approval/rejection."""
