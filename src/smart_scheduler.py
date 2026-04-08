@@ -18,6 +18,7 @@ from .smart_strategy import Signal, TodaySignal
 from .telegram_bot import TelegramBot, escape_markdown
 from .trading_bot import TradeResult, TradingBot
 from .utils import ET, get_et_now, is_trading_day, run_async
+from .wheel_strategy import WheelStrategy, PutSignal
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +53,15 @@ class SmartScheduler:
 
         # Add event listeners
         self.scheduler.add_listener(self._on_job_event, EVENT_JOB_ERROR | EVENT_JOB_EXECUTED)
+
+        # Wheel strategy — constructed with bot's client and database
+        self.wheel_strategy: Optional[WheelStrategy] = None
+        if self.bot.client:
+            self.wheel_strategy = WheelStrategy(
+                client=self.bot.client,
+                db=self.db,
+                account_id_key=getattr(self.bot.config, "account_id_key", "default"),
+            )
 
     def _send_notification(self, message: str, parse_mode: Optional[str] = "Markdown") -> None:
         """Send a notification via the shared Telegram bot instance."""
@@ -289,7 +299,86 @@ class SmartScheduler:
             misfire_grace_time=3600,
         )
 
+        # Wheel strategy: Put signal check — 10:00 AM ET daily
+        self.scheduler.add_job(
+            self._job_put_signal_check,
+            CronTrigger(day_of_week="mon-fri", hour=10, minute=0, timezone=ET),
+            id="put_signal_check",
+            name="Wheel Put Signal Check",
+            misfire_grace_time=300,
+        )
+
         logger.info("Scheduler jobs configured")
+
+    def _job_put_signal_check(self) -> None:
+        """Check for put entry signal and send Telegram approval if signal fires.
+
+        Runs at 10:00 AM ET on trading days. Calls WheelStrategy.get_put_signal()
+        and, if a signal fires, bridges to the async Telegram approval flow via
+        run_async() (CLAUDE.md async/sync bridge pattern).
+        """
+        now = get_et_now()
+        if not is_trading_day(now.date()):
+            logger.info("Not a trading day, skipping put signal check")
+            return
+
+        if not self.wheel_strategy:
+            logger.warning("WheelStrategy not initialized, skipping put signal check")
+            return
+
+        try:
+            signal = self.wheel_strategy.get_put_signal()
+            if signal is None:
+                logger.info("No put signal — conditions not met")
+                self.db.log_event("INFO", "put_signal_check", {"result": "no_signal"})
+                return
+
+            logger.info(
+                "Put signal fired: strike=%.2f delta=%.3f premium=%.2f",
+                signal.strike,
+                signal.delta,
+                signal.premium,
+            )
+            self.db.log_event(
+                "INFO",
+                "put_signal_fired",
+                {
+                    "strike": signal.strike,
+                    "delta": signal.delta,
+                    "premium": signal.premium,
+                    "dte": signal.dte,
+                    "pullback_pct": signal.pullback_pct,
+                },
+            )
+
+            if not self.telegram_bot:
+                logger.warning("Telegram bot not configured, cannot request put approval")
+                return
+
+            # Get full chain for adjust flow
+            chain = self.wheel_strategy.client.get_ibit_options_chain()
+
+            # Bridge sync scheduler -> async Telegram (CLAUDE.md pattern)
+            result = run_async(
+                self.telegram_bot.request_put_approval(
+                    signal=signal,
+                    chain=chain,
+                    client=self.wheel_strategy.client,
+                    db=self.db,
+                    account_id_key=self.wheel_strategy.account_id_key,
+                )
+            )
+
+            self.db.log_event(
+                "INFO",
+                "put_approval_result",
+                {"result": result.value if result else "unknown"},
+            )
+
+        except Exception as e:
+            logger.error(f"Put signal check failed: {e}", exc_info=True)
+            self.db.log_event("ERROR", "put_signal_check_error", {"error": str(e)})
+            self._send_notification(f"⚠️ Put signal check error: {escape_markdown(str(e))}")
 
     def _job_auth_reminder(self) -> None:
         """Send daily authentication reminder at 8:00 AM ET."""
