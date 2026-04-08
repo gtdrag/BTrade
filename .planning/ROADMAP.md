@@ -84,8 +84,8 @@ Plans:
 **Plans:** 2 plans
 
 Plans:
-- [ ] 04-01-PLAN.md — CallSignal dataclass, call strike selection with cost basis protection, and call-away/OTM detection (CC-01, CC-03, CC-04)
-- [ ] 04-02-PLAN.md — Telegram call approval flow, callback routing, and scheduler wiring for call suggestions (CC-02, CC-03, CC-04)
+- [x] 04-01-PLAN.md — CallSignal dataclass, call strike selection with cost basis protection, and call-away/OTM detection (CC-01, CC-03, CC-04)
+- [x] 04-02-PLAN.md — Telegram call approval flow, callback routing, and scheduler wiring for call suggestions (CC-02, CC-03, CC-04)
 
 ### Phase 5: Profit Management
 **Goal**: Bot optimizes wheel returns through 50% profit-taking, defensive rolling, and expiration monitoring
