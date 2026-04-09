@@ -25,8 +25,8 @@ from .analysis_commands import AnalysisCommandsMixin
 from .auth_commands import AuthCommandsMixin
 from .backtest_commands import BacktestCommandsMixin
 from .trading_commands import TradingCommandsMixin
-from .wheel_commands import WheelCommandsMixin
 from .utils import ApprovalResult, TradeApprovalRequest, escape_markdown
+from .wheel_commands import WheelCommandsMixin
 
 if TYPE_CHECKING:
     from ..smart_scheduler import SmartScheduler
@@ -736,14 +736,18 @@ class TelegramBot(
                     # Find the matching contract in the stored chain
                     matching = next(
                         (
-                            c for c in (chain or [])
+                            c
+                            for c in (chain or [])
                             if c.get("option_type") == "PUT"
                             and abs(float(c.get("strike", 0)) - alt_strike) < 0.01
                         ),
                         None,
                     )
                     if matching:
-                        from ..wheel_strategy import PutSignal as PS  # local import — avoid circular
+                        from ..wheel_strategy import (  # noqa: N817
+                            PutSignal as PS,  # local import — avoid circular
+                        )
+
                         expiry_date = matching.get("expiry_date", signal.expiry_date)
                         if hasattr(expiry_date, "isoformat"):
                             expiry_date = expiry_date.isoformat()
@@ -830,7 +834,9 @@ class TelegramBot(
                 preview_ids=preview_ids,
             )
 
-            order_id = place_response.get("orderId") or place_response.get("OrderIds", [{}])[0].get("orderId")
+            order_id = place_response.get("orderId") or place_response.get("OrderIds", [{}])[0].get(
+                "orderId"
+            )
 
             # Record in DB — only after successful placement (T-03-08)
             cycle_id = db.create_wheel_cycle()
@@ -915,13 +921,13 @@ class TelegramBot(
         signal = self._put_approval_signal
 
         # Extract callback_id suffix from the put_adjust_ prefix
-        callback_id = data[len("put_adjust_"):]  # e.g. "put_HHMMSS"
+        callback_id = data[len("put_adjust_") :]  # e.g. "put_HHMMSS"
 
         # Filter to wider delta range for alternatives
         candidates = [
-            c for c in chain
-            if c.get("option_type") == "PUT"
-            and 0.15 <= abs(float(c.get("delta", 0))) <= 0.40
+            c
+            for c in chain
+            if c.get("option_type") == "PUT" and 0.15 <= abs(float(c.get("delta", 0))) <= 0.40
         ]
         # Sort by strike ascending
         candidates.sort(key=lambda c: float(c.get("strike", 0)))
@@ -942,7 +948,8 @@ class TelegramBot(
             start = max(0, nearest_idx - 2)
             end = min(len(candidates), nearest_idx + 3)
             alternatives = [
-                c for c in candidates[start:end]
+                c
+                for c in candidates[start:end]
                 if abs(float(c.get("strike", 0)) - suggested_strike) > 0.01
             ]
         else:
@@ -1072,14 +1079,18 @@ class TelegramBot(
                     # Find the matching CALL contract in the stored chain
                     matching = next(
                         (
-                            c for c in (chain or [])
+                            c
+                            for c in (chain or [])
                             if c.get("option_type") == "CALL"
                             and abs(float(c.get("strike", 0)) - alt_strike) < 0.01
                         ),
                         None,
                     )
                     if matching:
-                        from ..wheel_strategy import CallSignal as CS  # local import — avoid circular
+                        from ..wheel_strategy import (  # noqa: N817
+                            CallSignal as CS,  # local import — avoid circular
+                        )
+
                         expiry_date = matching.get("expiry_date", signal.expiry_date)
                         if hasattr(expiry_date, "isoformat"):
                             expiry_date = expiry_date.isoformat()
@@ -1199,7 +1210,9 @@ class TelegramBot(
                 preview_ids=preview_ids,
             )
 
-            order_id = place_response.get("orderId") or place_response.get("OrderIds", [{}])[0].get("orderId")
+            order_id = place_response.get("orderId") or place_response.get("OrderIds", [{}])[0].get(
+                "orderId"
+            )
 
             # Record in DB — only after successful placement
             cycle_id = cycle["id"]
@@ -1291,7 +1304,7 @@ class TelegramBot(
         signal = self._call_approval_signal
 
         # Extract callback_id suffix from the call_adjust_ prefix
-        callback_id = data[len("call_adjust_"):]  # e.g. "call_HHMMSS"
+        callback_id = data[len("call_adjust_") :]  # e.g. "call_HHMMSS"
 
         # Cost basis from signal (protected by T-04-10)
         cost_basis = signal.cost_basis if signal else 0.0
@@ -1299,7 +1312,8 @@ class TelegramBot(
         # Filter to CALL contracts with wider delta range for alternatives
         # HARD FILTER: only strikes >= cost_basis (T-04-10)
         candidates = [
-            c for c in chain
+            c
+            for c in chain
             if c.get("option_type") == "CALL"
             and 0.20 <= abs(float(c.get("delta", 0))) <= 0.45
             and float(c.get("strike", 0)) >= cost_basis
@@ -1325,7 +1339,8 @@ class TelegramBot(
             start = max(0, nearest_idx - 2)
             end = min(len(candidates), nearest_idx + 3)
             alternatives = [
-                c for c in candidates[start:end]
+                c
+                for c in candidates[start:end]
                 if abs(float(c.get("strike", 0)) - suggested_strike) > 0.01
             ]
         else:
@@ -1499,13 +1514,31 @@ class TelegramBot(
             symbol = position["symbol"]
             option_type = position.get("option_type", "PUT")
             quantity = int(position.get("quantity", 1))
+            strike_price = float(position.get("strike", 0))
+
+            # Parse expiry from position's expiry_date (ISO format: YYYY-MM-DD)
+            from datetime import date as _date
+
+            expiry_str = position.get("expiry_date", "")
+            if isinstance(expiry_str, str) and expiry_str:
+                expiry_date = _date.fromisoformat(expiry_str)
+            elif hasattr(expiry_str, "year"):
+                expiry_date = expiry_str
+            else:
+                raise ValueError(f"Cannot parse expiry_date: {expiry_str}")
+            expiry_year = expiry_date.year
+            expiry_month = expiry_date.month
+            expiry_day = expiry_date.day
 
             # Preview order
             preview_response = client.preview_options_order(
                 account_id_key,
                 "IBIT",
                 option_type,
-                symbol,
+                expiry_year,
+                expiry_month,
+                expiry_day,
+                strike_price,
                 "BUY_CLOSE",
                 quantity,
                 close_price,
@@ -1517,16 +1550,18 @@ class TelegramBot(
                 account_id_key,
                 "IBIT",
                 option_type,
-                symbol,
+                expiry_year,
+                expiry_month,
+                expiry_day,
+                strike_price,
                 "BUY_CLOSE",
                 quantity,
                 close_price,
                 preview_ids=preview_ids,
             )
 
-            order_id = (
-                place_response.get("orderId")
-                or place_response.get("OrderIds", [{}])[0].get("orderId")
+            order_id = place_response.get("orderId") or place_response.get("OrderIds", [{}])[0].get(
+                "orderId"
             )
 
             # DB mutations — only after successful order placement (T-05-06)
@@ -1610,6 +1645,7 @@ class TelegramBot(
             # Calculate DTE from expiry_date
             try:
                 from datetime import date as date_cls
+
                 expiry = date_cls.fromisoformat(str(expiry_date))
                 today = get_et_now().date()
                 dte = (expiry - today).days
@@ -1748,7 +1784,9 @@ class TelegramBot(
 
             keyboard = [
                 [
-                    InlineKeyboardButton("Approve Roll", callback_data=f"roll_approve_{callback_id}"),
+                    InlineKeyboardButton(
+                        "Approve Roll", callback_data=f"roll_approve_{callback_id}"
+                    ),
                     InlineKeyboardButton("Reject", callback_data=f"roll_reject_{callback_id}"),
                 ]
             ]
@@ -1772,7 +1810,7 @@ class TelegramBot(
                 )
             except asyncio.TimeoutError:
                 await self.send_message(
-                    f"*TIMEOUT*\n\nNo response received for roll suggestion. Suggestion cancelled."
+                    "*TIMEOUT*\n\nNo response received for roll suggestion. Suggestion cancelled."
                 )
                 return ApprovalResult.TIMEOUT
 
@@ -1818,7 +1856,22 @@ class TelegramBot(
         option_type = position.get("option_type", "PUT")
         quantity = int(position.get("quantity", 1))
         old_roll_count = position.get("roll_count", 0)
+        strike_price = float(position.get("strike", 0))
         btc_result = None
+
+        # Parse expiry from position's expiry_date (ISO format: YYYY-MM-DD)
+        from datetime import date as _date
+
+        expiry_str = position.get("expiry_date", "")
+        if isinstance(expiry_str, str) and expiry_str:
+            expiry_date = _date.fromisoformat(expiry_str)
+        elif hasattr(expiry_str, "year"):
+            expiry_date = expiry_str
+        else:
+            raise ValueError(f"Cannot parse expiry_date: {expiry_str}")
+        expiry_year = expiry_date.year
+        expiry_month = expiry_date.month
+        expiry_day = expiry_date.day
 
         # Step 1: BTC current position
         try:
@@ -1826,7 +1879,10 @@ class TelegramBot(
                 account_id_key,
                 "IBIT",
                 option_type,
-                symbol,
+                expiry_year,
+                expiry_month,
+                expiry_day,
+                strike_price,
                 "BUY_CLOSE",
                 quantity,
                 btc_price,
@@ -1837,7 +1893,10 @@ class TelegramBot(
                 account_id_key,
                 "IBIT",
                 option_type,
-                symbol,
+                expiry_year,
+                expiry_month,
+                expiry_day,
+                strike_price,
                 "BUY_CLOSE",
                 quantity,
                 btc_price,
@@ -1846,7 +1905,9 @@ class TelegramBot(
         except Exception as e:
             # BTC failed — do NOT modify any DB state
             logger.error("Roll BTC failed for position_id=%d: %s", position["id"], e)
-            db.log_event("ERROR", "roll_btc_failed", {"position_id": position["id"], "error": str(e)})
+            db.log_event(
+                "ERROR", "roll_btc_failed", {"position_id": position["id"], "error": str(e)}
+            )
             try:
                 await self._app.bot.send_message(
                     chat_id=self.chat_id,
@@ -1861,21 +1922,28 @@ class TelegramBot(
         db.close_wheel_position(position["id"], btc_price)
 
         btc_order_id = (
-            btc_result.get("orderId")
-            or btc_result.get("OrderIds", [{}])[0].get("orderId")
-            if btc_result else None
+            btc_result.get("orderId") or btc_result.get("OrderIds", [{}])[0].get("orderId")
+            if btc_result
+            else None
         )
 
         # Step 2: STO new position
         new_symbol = new_contract.get("symbol", symbol)
         new_bid = float(new_contract.get("bid", 0))
+        new_strike = float(new_contract.get("strike", 0))
+        new_expiry_year = int(new_contract.get("expiry_year", 0))
+        new_expiry_month = int(new_contract.get("expiry_month", 0))
+        new_expiry_day = int(new_contract.get("expiry_day", 0))
 
         try:
             sto_preview = client.preview_options_order(
                 account_id_key,
                 "IBIT",
                 option_type,
-                new_symbol,
+                new_expiry_year,
+                new_expiry_month,
+                new_expiry_day,
+                new_strike,
                 "SELL_OPEN",
                 quantity,
                 new_bid,
@@ -1886,7 +1954,10 @@ class TelegramBot(
                 account_id_key,
                 "IBIT",
                 option_type,
-                new_symbol,
+                new_expiry_year,
+                new_expiry_month,
+                new_expiry_day,
+                new_strike,
                 "SELL_OPEN",
                 quantity,
                 new_bid,
@@ -1949,9 +2020,9 @@ class TelegramBot(
         db.set_roll_count(new_position_id, old_roll_count + 1)
 
         sto_order_id = (
-            sto_result.get("orderId")
-            or sto_result.get("OrderIds", [{}])[0].get("orderId")
-            if sto_result else None
+            sto_result.get("orderId") or sto_result.get("OrderIds", [{}])[0].get("orderId")
+            if sto_result
+            else None
         )
 
         db.log_event(
