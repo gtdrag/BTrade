@@ -143,6 +143,7 @@ class Database:
                     winning_trades INTEGER DEFAULT 0,
                     total_pnl REAL DEFAULT 0,
                     trading_mode TEXT DEFAULT 'paper',
+                    wheel_mode_enabled INTEGER DEFAULT 1,
                     updated_at TEXT NOT NULL
                 )
             """
@@ -153,6 +154,11 @@ class Database:
             columns = [col[1] for col in cursor.fetchall()]
             if "trading_mode" not in columns:
                 cursor.execute("ALTER TABLE bot_state ADD COLUMN trading_mode TEXT DEFAULT 'paper'")
+
+            # Migration: Add wheel_mode_enabled column if it doesn't exist (for existing DBs)
+            # TR-01: Default 1 (enabled) so existing DBs safely disable intraday on upgrade
+            if "wheel_mode_enabled" not in columns:
+                cursor.execute("ALTER TABLE bot_state ADD COLUMN wheel_mode_enabled INTEGER DEFAULT 1")
 
             # Daily prices table - stores daily open prices
             cursor.execute(

@@ -812,6 +812,12 @@ class SmartScheduler:
             logger.info("Not a trading day, skipping")
             return
 
+        # TR-01: skip intraday when wheel mode is active
+        wheel_mode = self.db.get_bot_state().get("wheel_mode_enabled", 1)
+        if wheel_mode:
+            logger.info("Wheel mode enabled - skipping _job_morning_signal")
+            return
+
         logger.info("Executing morning signal check")
 
         try:
@@ -891,6 +897,12 @@ class SmartScheduler:
         now = get_et_now()
 
         if not is_trading_day(now.date()):
+            return
+
+        # TR-01: skip intraday when wheel mode is active
+        wheel_mode = self.db.get_bot_state().get("wheel_mode_enabled", 1)
+        if wheel_mode:
+            logger.info("Wheel mode enabled - skipping _job_crash_day_check")
             return
 
         try:
@@ -980,6 +992,12 @@ class SmartScheduler:
         if not is_trading_day(now.date()):
             return
 
+        # TR-01: skip intraday when wheel mode is active
+        wheel_mode = self.db.get_bot_state().get("wheel_mode_enabled", 1)
+        if wheel_mode:
+            logger.info("Wheel mode enabled - skipping _job_pump_day_check")
+            return
+
         try:
             # Get fresh signal with pump day check
             signal = self.bot.strategy.get_today_signal(check_crash_day=False, check_pump_day=True)
@@ -1062,6 +1080,12 @@ class SmartScheduler:
         now = get_et_now()
 
         if not is_trading_day(now.date()):
+            return
+
+        # TR-01: skip intraday when wheel mode is active
+        wheel_mode = self.db.get_bot_state().get("wheel_mode_enabled", 1)
+        if wheel_mode:
+            logger.info("Wheel mode enabled - skipping _job_ten_am_dump_exit")
             return
 
         # Check if we have a 10 AM dump position open
@@ -1401,6 +1425,12 @@ class SmartScheduler:
         now = get_et_now()
 
         if not is_trading_day(now.date()):
+            return
+
+        # TR-01: skip intraday summary when wheel mode is active
+        wheel_mode = self.db.get_bot_state().get("wheel_mode_enabled", 1)
+        if wheel_mode:
+            logger.info("Wheel mode enabled - skipping _job_daily_summary")
             return
 
         logger.info("Sending daily summary")
