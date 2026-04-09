@@ -25,6 +25,7 @@ from .analysis_commands import AnalysisCommandsMixin
 from .auth_commands import AuthCommandsMixin
 from .backtest_commands import BacktestCommandsMixin
 from .trading_commands import TradingCommandsMixin
+from .wheel_commands import WheelCommandsMixin
 from .utils import ApprovalResult, TradeApprovalRequest, escape_markdown
 
 if TYPE_CHECKING:
@@ -40,6 +41,7 @@ class TelegramBot(
     AnalysisCommandsMixin,
     AuthCommandsMixin,
     BacktestCommandsMixin,
+    WheelCommandsMixin,
 ):
     """
     Telegram bot for trade notifications and approval.
@@ -183,6 +185,10 @@ class TelegramBot(
         # Add command handlers - backtesting (from BacktestCommandsMixin)
         self._app.add_handler(CommandHandler("backtest", self._cmd_backtest))
         self._app.add_handler(CommandHandler("simulate", self._cmd_simulate))
+
+        # Add command handlers - wheel strategy (from WheelCommandsMixin)
+        self._app.add_handler(CommandHandler("wheel", self._cmd_wheel))
+        self._app.add_handler(CommandHandler("wheelmode", self._cmd_wheelmode))
 
         # Add callback handler for inline buttons
         self._app.add_handler(CallbackQueryHandler(self._handle_callback))

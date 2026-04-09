@@ -19,6 +19,7 @@ Command modules:
 from .bot import TelegramBot
 from .notifier import TelegramNotifier
 from .utils import ApprovalResult, TradeApprovalRequest, escape_markdown
+from .wheel_commands import WheelCommandsMixin
 
 __all__ = [
     "TelegramBot",
@@ -26,4 +27,5 @@ __all__ = [
     "ApprovalResult",
     "TradeApprovalRequest",
     "escape_markdown",
+    "WheelCommandsMixin",
 ]
