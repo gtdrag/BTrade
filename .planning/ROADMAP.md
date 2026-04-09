@@ -116,9 +116,9 @@ Plans:
 **Plans:** 3 plans
 
 Plans:
-- [ ] 06-01-PLAN.md — DB migration for wheel_mode_enabled and intraday job gating (TR-01)
-- [ ] 06-02-PLAN.md — Telegram /wheel, /wheelmode commands and 4:30 PM daily summary job (TR-02, TR-03, TR-05)
-- [ ] 06-03-PLAN.md — Streamlit wheel strategy dashboard section with auto-refresh (TR-04)
+- [x] 06-01-PLAN.md — DB migration for wheel_mode_enabled and intraday job gating (TR-01)
+- [x] 06-02-PLAN.md — Telegram /wheel, /wheelmode commands and 4:30 PM daily summary job (TR-02, TR-03, TR-05)
+- [x] 06-03-PLAN.md — Streamlit wheel strategy dashboard section with auto-refresh (TR-04)
 
 ## Progress
 
