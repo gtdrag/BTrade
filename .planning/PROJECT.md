@@ -64,28 +64,30 @@ Systematically generate income from IBIT options by running the wheel strategy w
 - **Expiration default**: 30-45 DTE — configurable parameter
 - **Execution style**: Semi-automated — bot suggests, user confirms
 
-## Current Milestone: v1.0 Wheel Strategy
+## Current State
 
-**Goal:** Replace intraday directional strategies with a full wheel strategy on IBIT options, executed semi-automatically via Telegram approvals.
+**v1.0 Wheel Strategy — SHIPPED 2026-04-09**
 
-**Target features:**
-- E*TRADE options API integration (chains, orders, Greeks)
-- Signal-based cash-secured put selling with Telegram approval
-- Assignment detection and automatic covered call suggestions
-- Full wheel cycle management (put → shares → call → repeat)
-- Configurable strike selection (delta, % OTM, DTE)
-- Profit management (50% profit close, rolling)
-- Deprecate/disable intraday BITU/SBIT strategies
+The bot now runs a complete IBIT options wheel strategy:
+- Signal-based cash-secured put selling (>=2% pullback from 5-day high)
+- Automatic assignment detection at 8:30 AM ET with covered call suggestions
+- Full wheel cycle: CASH → SHORT_PUT → HOLDING_SHARES → COVERED_CALL → CASH
+- Profit management: 50% profit-taking, defensive rolling (credit-only, 2-roll limit), 21 DTE alerts
+- Telegram commands: `/wheel` (status), `/wheelmode on/off` (toggle), daily 4:30 PM summary
+- Streamlit dashboard with wheel strategy section (positions, cycle state, premium tracker)
+- Wheel mode gates all intraday BITU/SBIT strategies when active
+
+**Tests:** 383 passing | **Requirements:** 31/31 complete | **Phases:** 6/6 complete
 
 ## Key Decisions
 
 | Decision | Rationale | Outcome |
 |----------|-----------|---------|
-| Replace intraday with wheel | Wheel generates consistent income vs directional bets; better risk-adjusted returns | — Pending |
-| IBIT only (not leveraged ETFs) | More liquid options, standard margin, no leverage decay | — Pending |
-| Semi-automated via Telegram | Maintain human oversight for options trades which have more nuance | — Pending |
-| 30-45 DTE default | Best theta decay curve, well-studied timeframe, manageable frequency | — Pending |
-| Signal-based put entry | Avoid selling puts at unfavorable times; wait for pullbacks/elevated IV | — Pending |
+| Replace intraday with wheel | Wheel generates consistent income vs directional bets; better risk-adjusted returns | Shipped v1.0 |
+| IBIT only (not leveraged ETFs) | More liquid options, standard margin, no leverage decay | Shipped v1.0 |
+| Semi-automated via Telegram | Maintain human oversight for options trades which have more nuance | Shipped v1.0 |
+| 30-45 DTE default | Best theta decay curve, well-studied timeframe, manageable frequency | Shipped v1.0 |
+| Signal-based put entry | Avoid selling puts at unfavorable times; wait for pullbacks/elevated IV | Shipped v1.0 |
 
 ---
-*Last updated: 2026-03-18 after milestone v1.0 initialization*
+*Last updated: 2026-04-09 after milestone v1.0 completion*
