@@ -158,3 +158,331 @@ class TestWheelModeSchedulerGating:
 
         # telegram_bot.send_daily_summary should NOT be called
         scheduler.telegram_bot.send_daily_summary.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Task 1 tests: WheelCommandsMixin (/wheel and /wheelmode)
+# ---------------------------------------------------------------------------
+
+
+def _make_update(authorized=True):
+    """Build a mock Telegram Update with reply_text as AsyncMock."""
+    update = MagicMock()
+    update.effective_chat.id = 12345
+    update.message.reply_text = AsyncMock()
+    return update
+
+
+def _make_telegram_bot(wheel_mode_enabled=0, active_cycle=None, positions=None):
+    """Build a minimal TelegramBot-like object with WheelCommandsMixin attached."""
+    from src.telegram.wheel_commands import WheelCommandsMixin
+
+    class FakeBot(WheelCommandsMixin):
+        def _is_authorized(self, update):
+            return getattr(self, "_auth_result", True)
+
+        async def _send_unauthorized_response(self, update):
+            await update.message.reply_text("Unauthorized")
+
+    bot = FakeBot()
+    bot._auth_result = True
+    return bot
+
+
+class TestWheelCommand:
+    """Tests for /wheel Telegram command (TR-02)."""
+
+    @pytest.mark.asyncio
+    @patch("src.telegram.wheel_commands.get_database")
+    async def test_wheel_cmd_no_cycle(self, mock_get_db):
+        """_cmd_wheel with no active cycle replies with 'No active wheel cycle.'"""
+        mock_db = MagicMock()
+        mock_db.get_active_cycle.return_value = None
+        mock_get_db.return_value = mock_db
+
+        bot = _make_telegram_bot()
+        update = _make_update()
+        ctx = MagicMock()
+
+        await bot._cmd_wheel(update, ctx)
+
+        update.message.reply_text.assert_called_once()
+        call_args = update.message.reply_text.call_args[0][0]
+        assert "No active wheel cycle." in call_args
+
+    @pytest.mark.asyncio
+    @patch("src.telegram.wheel_commands.get_et_now")
+    @patch("src.telegram.wheel_commands.get_database")
+    async def test_wheel_cmd_active_cycle(self, mock_get_db, mock_now):
+        """_cmd_wheel with active cycle shows state, cost basis, DTE, premium."""
+        from datetime import date, datetime
+
+        mock_db = MagicMock()
+        mock_db.get_active_cycle.return_value = {
+            "id": 1,
+            "state": "SHORT_PUT",
+            "cost_basis": 52.50,
+            "put_premium_received": 1.20,
+            "covered_call_premiums_collected": 0.0,
+        }
+        mock_db.get_cycle_positions.return_value = [
+            {
+                "status": "OPEN",
+                "option_type": "PUT",
+                "strike": 53.0,
+                "expiry_date": "2026-05-15",
+                "premium_received": 1.20,
+                "delta": -0.25,
+                "current_value": None,
+            }
+        ]
+        mock_get_db.return_value = mock_db
+        # Return a fixed "today" so DTE is deterministic
+        mock_now.return_value = MagicMock()
+        mock_now.return_value.date.return_value = date(2026, 4, 8)
+
+        bot = _make_telegram_bot()
+        update = _make_update()
+        ctx = MagicMock()
+
+        await bot._cmd_wheel(update, ctx)
+
+        update.message.reply_text.assert_called_once()
+        text = update.message.reply_text.call_args[0][0]
+        assert "SHORT_PUT" in text
+        assert "$52.50" in text
+        assert "DTE" in text
+        assert "$1.20" in text
+
+    @pytest.mark.asyncio
+    @patch("src.telegram.wheel_commands.get_database")
+    async def test_wheel_cmd_unauthorized(self, mock_get_db):
+        """Unauthorized user is rejected before any DB access."""
+        bot = _make_telegram_bot()
+        bot._auth_result = False
+        update = _make_update()
+        ctx = MagicMock()
+
+        await bot._cmd_wheel(update, ctx)
+
+        # DB should NOT be touched
+        mock_get_db.assert_not_called()
+        # Unauthorized response was sent
+        update.message.reply_text.assert_called_once()
+        assert "Unauthorized" in update.message.reply_text.call_args[0][0]
+
+
+class TestWheelModeCommand:
+    """Tests for /wheelmode Telegram command (TR-03)."""
+
+    @pytest.mark.asyncio
+    @patch("src.telegram.wheel_commands.get_database")
+    async def test_wheelmode_on(self, mock_get_db):
+        """/wheelmode on calls update_bot_state(wheel_mode_enabled=1) and replies ENABLED."""
+        mock_db = MagicMock()
+        mock_db.get_bot_state.return_value = {"wheel_mode_enabled": 0}
+        mock_get_db.return_value = mock_db
+
+        bot = _make_telegram_bot()
+        update = _make_update()
+        ctx = MagicMock()
+        ctx.args = ["on"]
+
+        await bot._cmd_wheelmode(update, ctx)
+
+        mock_db.update_bot_state.assert_called_once_with(wheel_mode_enabled=1)
+        text = update.message.reply_text.call_args[0][0]
+        assert "ENABLED" in text
+
+    @pytest.mark.asyncio
+    @patch("src.telegram.wheel_commands.get_database")
+    async def test_wheelmode_off(self, mock_get_db):
+        """/wheelmode off calls update_bot_state(wheel_mode_enabled=0) and replies DISABLED."""
+        mock_db = MagicMock()
+        mock_db.get_bot_state.return_value = {"wheel_mode_enabled": 1}
+        mock_get_db.return_value = mock_db
+
+        bot = _make_telegram_bot()
+        update = _make_update()
+        ctx = MagicMock()
+        ctx.args = ["off"]
+
+        await bot._cmd_wheelmode(update, ctx)
+
+        mock_db.update_bot_state.assert_called_once_with(wheel_mode_enabled=0)
+        text = update.message.reply_text.call_args[0][0]
+        assert "DISABLED" in text
+
+    @pytest.mark.asyncio
+    @patch("src.telegram.wheel_commands.get_database")
+    async def test_wheelmode_no_args(self, mock_get_db):
+        """/wheelmode with no args shows current status (ON or OFF)."""
+        mock_db = MagicMock()
+        mock_db.get_bot_state.return_value = {"wheel_mode_enabled": 1}
+        mock_get_db.return_value = mock_db
+
+        bot = _make_telegram_bot()
+        update = _make_update()
+        ctx = MagicMock()
+        ctx.args = []
+
+        await bot._cmd_wheelmode(update, ctx)
+
+        # Should NOT update DB
+        mock_db.update_bot_state.assert_not_called()
+        text = update.message.reply_text.call_args[0][0]
+        # Either "ON" or "OFF" should appear in status
+        assert "ON" in text or "OFF" in text
+
+    @pytest.mark.asyncio
+    @patch("src.telegram.wheel_commands.get_database")
+    async def test_wheelmode_invalid_arg(self, mock_get_db):
+        """/wheelmode with invalid arg replies with 'Usage:'."""
+        mock_db = MagicMock()
+        mock_get_db.return_value = mock_db
+
+        bot = _make_telegram_bot()
+        update = _make_update()
+        ctx = MagicMock()
+        ctx.args = ["banana"]
+
+        await bot._cmd_wheelmode(update, ctx)
+
+        mock_db.update_bot_state.assert_not_called()
+        text = update.message.reply_text.call_args[0][0]
+        assert "Usage:" in text
+
+    @pytest.mark.asyncio
+    @patch("src.telegram.wheel_commands.get_database")
+    async def test_wheelmode_unauthorized(self, mock_get_db):
+        """Unauthorized user is rejected for /wheelmode."""
+        bot = _make_telegram_bot()
+        bot._auth_result = False
+        update = _make_update()
+        ctx = MagicMock()
+        ctx.args = ["on"]
+
+        await bot._cmd_wheelmode(update, ctx)
+
+        mock_get_db.assert_not_called()
+        assert "Unauthorized" in update.message.reply_text.call_args[0][0]
+
+
+# ---------------------------------------------------------------------------
+# Task 2 tests: _job_wheel_daily_summary in SmartScheduler (TR-05)
+# ---------------------------------------------------------------------------
+
+
+def _make_scheduler_for_wheel():
+    """Build a minimal SmartScheduler mock for testing wheel daily summary."""
+    from src.smart_scheduler import SmartScheduler
+
+    scheduler = object.__new__(SmartScheduler)
+    scheduler.db = MagicMock()
+    scheduler._send_notification = MagicMock()
+    scheduler._error_count = 0
+    return scheduler
+
+
+class TestWheelDailySummary:
+    """Tests for _job_wheel_daily_summary in SmartScheduler (TR-05)."""
+
+    @patch("src.smart_scheduler.is_trading_day", return_value=False)
+    @patch("src.smart_scheduler.get_et_now")
+    def test_wheel_summary_skips_non_trading_day(self, mock_now, mock_trading_day):
+        """_job_wheel_daily_summary skips on non-trading days."""
+        mock_now.return_value = MagicMock()
+        mock_now.return_value.date.return_value = MagicMock()
+
+        scheduler = _make_scheduler_for_wheel()
+        scheduler._job_wheel_daily_summary()
+
+        scheduler._send_notification.assert_not_called()
+
+    @patch("src.smart_scheduler.is_trading_day", return_value=True)
+    @patch("src.smart_scheduler.get_et_now")
+    def test_wheel_summary_no_cycle(self, mock_now, mock_trading_day):
+        """_job_wheel_daily_summary sends 'No active wheel positions today.' when no cycle."""
+        mock_now.return_value = MagicMock()
+        mock_now.return_value.date.return_value = MagicMock()
+
+        scheduler = _make_scheduler_for_wheel()
+        scheduler.db.get_active_cycle.return_value = None
+        scheduler._job_wheel_daily_summary()
+
+        scheduler._send_notification.assert_called_once()
+        msg = scheduler._send_notification.call_args[0][0]
+        assert "No active wheel positions today." in msg
+
+    @patch("src.smart_scheduler.is_trading_day", return_value=True)
+    @patch("src.smart_scheduler.get_et_now")
+    def test_wheel_summary_with_cycle(self, mock_now, mock_trading_day):
+        """_job_wheel_daily_summary sends positions, DTE, max risk, and premium when cycle exists."""
+        from datetime import date
+
+        mock_now.return_value = MagicMock()
+        mock_now.return_value.date.return_value = date(2026, 4, 8)
+
+        scheduler = _make_scheduler_for_wheel()
+        scheduler.db.get_active_cycle.return_value = {
+            "id": 1,
+            "state": "SHORT_PUT",
+            "cost_basis": 50.0,
+            "put_premium_received": 1.50,
+            "covered_call_premiums_collected": 0.0,
+        }
+        scheduler.db.get_cycle_positions.return_value = [
+            {
+                "status": "OPEN",
+                "option_type": "PUT",
+                "strike": 50.0,
+                "expiry_date": "2026-05-08",
+                "premium_received": 1.50,
+                "delta": -0.30,
+            }
+        ]
+
+        scheduler._job_wheel_daily_summary()
+
+        scheduler._send_notification.assert_called_once()
+        msg = scheduler._send_notification.call_args[0][0]
+        # Should include position details, DTE, max risk, premium
+        assert "PUT" in msg
+        assert "DTE" in msg
+        assert "5000" in msg or "5,000" in msg  # max risk = 50 * 100
+        assert "1.50" in msg
+
+    @patch("src.smart_scheduler.is_trading_day", return_value=True)
+    @patch("src.smart_scheduler.get_et_now")
+    def test_wheel_summary_job_registered(self, mock_now, mock_trading_day):
+        """setup_jobs() registers 'wheel_daily_summary' job with CronTrigger at 16:30."""
+        from unittest.mock import MagicMock
+        from src.smart_scheduler import SmartScheduler
+
+        scheduler = object.__new__(SmartScheduler)
+
+        # Mock APScheduler
+        mock_apscheduler = MagicMock()
+        added_jobs = {}
+
+        def mock_add_job(func, trigger, id, name, misfire_grace_time=600):
+            added_jobs[id] = {"func": func, "name": name}
+
+        mock_apscheduler.add_job.side_effect = mock_add_job
+        mock_apscheduler.remove_all_jobs = MagicMock()
+        scheduler.scheduler = mock_apscheduler
+
+        # Mock bot and config
+        mock_bot = MagicMock()
+        mock_bot.config.strategy.crash_day_enabled = False
+        mock_bot.config.strategy.pump_day_enabled = False
+        mock_bot.config.strategy.ten_am_dump_enabled = False
+        mock_bot.is_paper_mode = True
+        mock_bot.client = None
+        scheduler.bot = mock_bot
+
+        scheduler.setup_jobs()
+
+        assert "wheel_daily_summary" in added_jobs, (
+            f"wheel_daily_summary job not registered. Jobs found: {list(added_jobs.keys())}"
+        )
