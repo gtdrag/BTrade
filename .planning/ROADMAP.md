@@ -113,10 +113,12 @@ Plans:
   3. User can toggle wheel mode on/off via Telegram command
   4. Streamlit dashboard displays options positions with Greeks, wheel cycle state, and total premium collected
   5. User receives Telegram summary at 4:30 PM ET daily showing positions, max risk, and days to expiration
-**Plans**: TBD
+**Plans:** 3 plans
 
 Plans:
-- [ ] TBD (defined during phase planning)
+- [ ] 06-01-PLAN.md — DB migration for wheel_mode_enabled and intraday job gating (TR-01)
+- [ ] 06-02-PLAN.md — Telegram /wheel, /wheelmode commands and 4:30 PM daily summary job (TR-02, TR-03, TR-05)
+- [ ] 06-03-PLAN.md — Streamlit wheel strategy dashboard section with auto-refresh (TR-04)
 
 ## Progress
 
@@ -130,4 +132,4 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 | 3. Cash-Secured Put Cycle | 0/3 | Planning complete | - |
 | 4. Covered Call Cycle | 0/2 | Planning complete | - |
 | 5. Profit Management | 0/2 | Planning complete | - |
-| 6. Transition & User Interface | 0/TBD | Not started | - |
+| 6. Transition & User Interface | 0/3 | Planning complete | - |
