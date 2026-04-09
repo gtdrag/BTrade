@@ -486,3 +486,187 @@ class TestWheelDailySummary:
         assert "wheel_daily_summary" in added_jobs, (
             f"wheel_daily_summary job not registered. Jobs found: {list(added_jobs.keys())}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Task 1 tests (plan 06-03): render_wheel_section dashboard helpers (TR-04)
+# ---------------------------------------------------------------------------
+
+
+class TestDashboardNoCycle:
+    """test_dashboard_no_cycle: _build_wheel_positions_df returns empty when no positions."""
+
+    def test_dashboard_no_cycle_empty_positions(self):
+        """_build_wheel_positions_df with None/empty list returns empty DataFrame."""
+        import pandas as pd
+        from app import _build_wheel_positions_df
+        from datetime import date
+
+        result = _build_wheel_positions_df([], date.today())
+        assert isinstance(result, pd.DataFrame)
+        assert result.empty
+
+    def test_dashboard_no_cycle_none_positions(self):
+        """_build_wheel_positions_df with empty positions (no OPEN status) returns empty DataFrame."""
+        import pandas as pd
+        from app import _build_wheel_positions_df
+        from datetime import date
+
+        # All positions are CLOSED — should produce empty DataFrame
+        positions = [
+            {
+                "status": "CLOSED",
+                "option_type": "PUT",
+                "strike": 50.0,
+                "expiry_date": "2026-05-15",
+                "premium_received": 1.20,
+                "delta": -0.25,
+                "theta": -0.05,
+            }
+        ]
+        result = _build_wheel_positions_df(positions, date.today())
+        assert isinstance(result, pd.DataFrame)
+        assert result.empty
+
+
+class TestDashboardWithCycle:
+    """test_dashboard_with_cycle: _build_wheel_positions_df with open positions returns correct DataFrame."""
+
+    def test_build_wheel_positions_df_columns(self):
+        """_build_wheel_positions_df returns DataFrame with expected columns."""
+        import pandas as pd
+        from app import _build_wheel_positions_df
+        from datetime import date
+
+        positions = [
+            {
+                "status": "OPEN",
+                "option_type": "PUT",
+                "strike": 53.0,
+                "expiry_date": "2026-05-15",
+                "premium_received": 1.20,
+                "delta": -0.25,
+                "theta": -0.04,
+            }
+        ]
+        result = _build_wheel_positions_df(positions, date(2026, 4, 8))
+        assert isinstance(result, pd.DataFrame)
+        assert not result.empty
+        for col in ["Type", "Strike", "Expiry", "DTE", "Delta", "Theta", "Premium"]:
+            assert col in result.columns, f"Column '{col}' missing from DataFrame"
+
+    def test_build_wheel_positions_df_dte_calculation(self):
+        """DTE is calculated correctly as (expiry - now_date).days."""
+        from app import _build_wheel_positions_df
+        from datetime import date
+
+        today = date(2026, 4, 8)
+        positions = [
+            {
+                "status": "OPEN",
+                "option_type": "PUT",
+                "strike": 50.0,
+                "expiry_date": "2026-05-15",
+                "premium_received": 2.00,
+                "delta": -0.30,
+                "theta": -0.06,
+            }
+        ]
+        df = _build_wheel_positions_df(positions, today)
+        from datetime import date as date_cls
+        expected_dte = (date_cls(2026, 5, 15) - today).days
+        assert df.iloc[0]["DTE"] == expected_dte
+
+
+class TestBuildCycleHistoryDf:
+    """test_build_cycle_history_df: DataFrame with correct columns including annualized return."""
+
+    def test_build_cycle_history_df_empty(self):
+        """_build_cycle_history_df with empty list returns empty DataFrame."""
+        import pandas as pd
+        from app import _build_cycle_history_df
+
+        result = _build_cycle_history_df([])
+        assert isinstance(result, pd.DataFrame)
+        assert result.empty
+
+    def test_build_cycle_history_df_columns(self):
+        """_build_cycle_history_df returns DataFrame with correct columns."""
+        import pandas as pd
+        from app import _build_cycle_history_df
+
+        cycles = [
+            {
+                "id": 1,
+                "state": "CALLED_AWAY",
+                "opened_at": "2026-03-01T10:00:00",
+                "closed_at": "2026-04-01T10:00:00",
+                "put_premium_received": 1.50,
+                "covered_call_premiums_collected": 0.75,
+                "realized_pnl": 225.0,
+                "cost_basis": 50.0,
+            }
+        ]
+        df = _build_cycle_history_df(cycles)
+        assert isinstance(df, pd.DataFrame)
+        assert not df.empty
+        expected_cols = ["State", "Start", "End", "Put Premium", "CC Premium", "Total P&L", "Annualized %"]
+        for col in expected_cols:
+            assert col in df.columns, f"Column '{col}' missing from DataFrame"
+
+    def test_build_cycle_history_df_annualized_return(self):
+        """_build_cycle_history_df computes Annualized % as a numeric or formatted value."""
+        from app import _build_cycle_history_df
+
+        cycles = [
+            {
+                "id": 1,
+                "state": "CALLED_AWAY",
+                "opened_at": "2026-03-01T10:00:00",
+                "closed_at": "2026-04-01T10:00:00",
+                "put_premium_received": 1.50,
+                "covered_call_premiums_collected": 0.75,
+                "realized_pnl": 225.0,
+                "cost_basis": 50.0,
+            }
+        ]
+        df = _build_cycle_history_df(cycles)
+        # Just verify it's present and non-null for a valid cycle
+        assert df.iloc[0]["Annualized %"] is not None
+
+
+class TestCalcTotalPremium:
+    """test_calc_total_premium: total premium calculation."""
+
+    def test_calc_total_premium_basic(self):
+        """_calc_total_premium computes (put_premium + cc_premiums) * 100 correctly."""
+        from app import _calc_total_premium
+
+        cycle = {
+            "put_premium_received": 1.5,
+            "covered_call_premiums_collected": 0.75,
+        }
+        result = _calc_total_premium(cycle)
+        assert result == pytest.approx(225.0)
+
+    def test_calc_total_premium_zero_cc(self):
+        """_calc_total_premium handles zero covered call premiums."""
+        from app import _calc_total_premium
+
+        cycle = {
+            "put_premium_received": 2.0,
+            "covered_call_premiums_collected": 0.0,
+        }
+        result = _calc_total_premium(cycle)
+        assert result == pytest.approx(200.0)
+
+    def test_calc_total_premium_none_values(self):
+        """_calc_total_premium handles None values gracefully."""
+        from app import _calc_total_premium
+
+        cycle = {
+            "put_premium_received": None,
+            "covered_call_premiums_collected": None,
+        }
+        result = _calc_total_premium(cycle)
+        assert result == pytest.approx(0.0)
