@@ -247,6 +247,15 @@ class SmartScheduler:
             misfire_grace_time=600,
         )
 
+        # Wheel daily summary - 4:30 PM ET (TR-05)
+        self.scheduler.add_job(
+            self._job_wheel_daily_summary,
+            CronTrigger(day_of_week="mon-fri", hour=16, minute=30, timezone=ET),
+            id="wheel_daily_summary",
+            name="Wheel Daily Position Summary",
+            misfire_grace_time=600,
+        )
+
         # Pre-market reminder - 9:15 AM ET
         self.scheduler.add_job(
             self._job_premarket_reminder,
@@ -1479,6 +1488,59 @@ class SmartScheduler:
 
         except Exception as e:
             logger.error(f"Daily summary failed: {e}")
+            self._error_count += 1
+
+    def _job_wheel_daily_summary(self) -> None:
+        """Send wheel position summary at 4:30 PM ET (TR-05)."""
+        now = get_et_now()
+        if not is_trading_day(now.date()):
+            return
+
+        try:
+            cycle = self.db.get_active_cycle()
+            if not cycle:
+                self._send_notification("No active wheel positions today.")
+                return
+
+            positions = self.db.get_cycle_positions(cycle["id"])
+            open_positions = [p for p in positions if p["status"] == "OPEN"]
+
+            state = cycle["state"]
+            cost_basis = cycle.get("cost_basis") or 0.0
+            total_premium = (
+                (cycle.get("put_premium_received") or 0.0)
+                + (cycle.get("covered_call_premiums_collected") or 0.0)
+            ) * 100  # per-share to contract total (100 shares)
+
+            lines = ["*WHEEL DAILY SUMMARY*\n"]
+            lines.append(f"Cycle State: {state}")
+            lines.append(f"Cost Basis: ${cost_basis:.2f}/share")
+            lines.append(f"Total Premium: ${total_premium:.2f}")
+
+            if open_positions:
+                lines.append("\n*Positions:*")
+                from datetime import date as _date
+                today = now.date()
+                for p in open_positions:
+                    try:
+                        expiry = _date.fromisoformat(p["expiry_date"])
+                        dte = max(0, (expiry - today).days)
+                    except (ValueError, TypeError):
+                        dte = "?"
+                    max_risk = p["strike"] * 100
+                    premium = p.get("premium_received") or 0.0
+                    lines.append(
+                        f"  {p['option_type']} ${p['strike']:.0f} "
+                        f"({dte} DTE) | max risk: ${max_risk:,.0f} | "
+                        f"premium: ${premium:.2f}"
+                    )
+            else:
+                lines.append("\nNo open positions.")
+
+            self._send_notification("\n".join(lines))
+
+        except Exception as e:
+            logger.error(f"Wheel daily summary failed: {e}")
             self._error_count += 1
 
     def _job_premarket_reminder(self) -> None:
