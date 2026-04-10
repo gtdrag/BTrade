@@ -419,7 +419,22 @@ class TestCallExpiry:
         assert result is None
 
     def test_cycle_closes_to_cash_on_callaway(self, db, mock_client):
-        """After called_away, cycle transitions to CASH and realized_pnl is recorded."""
+        """After called_away, cycle transitions to CASH and realized_pnl is recorded.
+
+        Setup values (from _setup_covered_call_cycle):
+          put_strike = 50.0, put_premium_received = 2.50 ($250)
+          call_strike = 50.0, call_premium = 1.50 ($150)
+
+        Correct full-cycle P&L:
+          put_premium  = $250 (kept)
+          call_premium = $150 (kept)
+          shares_pnl   = (call_strike - put_strike) * 100 = $0
+          total        = $400
+
+        An earlier bug used (call_strike - adjusted_cost_basis) which
+        double-counted the put premium and produced $650. This test
+        guards against that regression.
+        """
         cycle_id, call_pos_id = _setup_covered_call_cycle(db)
 
         with (
@@ -440,8 +455,8 @@ class TestCallExpiry:
         assert closed_cycle["state"] == "CASH"
         assert closed_cycle["closed_at"] is not None
 
-        # realized_pnl must be set (not None or zero)
-        assert closed_cycle["realized_pnl"] is not None
+        # Exact P&L assertion — guards against double-counting regression
+        assert closed_cycle["realized_pnl"] == pytest.approx(400.0)
 
     def test_otm_returns_to_holding(self, db, mock_client):
         """After call_expired_otm, cycle transitions back to HOLDING_SHARES."""

@@ -588,13 +588,16 @@ class WheelStrategy:
 
             if not ibit_shares:
                 # --- CALLED AWAY: call gone AND shares gone ---
+                # Full-cycle P&L = put premium + call premiums + share gain
+                # Share gain is measured against the put strike (what we paid
+                # on assignment), NOT against the adjusted cost basis — the
+                # adjusted cost basis already incorporates the put premium, so
+                # using it here would double-count the premium.
                 put_premium = (cycle["put_premium_received"] or 0.0) * 100
                 call_premiums = (cycle.get("covered_call_premiums_collected") or 0.0) * 100
                 call_strike = float(call_pos["strike"])
-                original_cost_basis_per_share = (
-                    cycle["put_strike"] - cycle["put_premium_received"]
-                )
-                shares_pnl = (call_strike - original_cost_basis_per_share) * 100
+                put_strike = float(cycle["put_strike"])
+                shares_pnl = (call_strike - put_strike) * 100
                 total_pnl = put_premium + call_premiums + shares_pnl
 
                 logger.info(
