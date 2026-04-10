@@ -680,6 +680,16 @@ class WheelStrategy:
         symbol = position["symbol"]
         premium_received = float(position["premium_received"])
 
+        # Guard against zero/negative premium — would divide by zero below.
+        # A position with no premium received has no profit target to hit.
+        if premium_received <= 0:
+            logger.warning(
+                "check_profit_target: symbol=%s has non-positive premium_received=%.2f, "
+                "skipping profit target check",
+                symbol, premium_received,
+            )
+            return False
+
         # Find our specific contract in the chain by OCC symbol
         contract = next((c for c in chain if c["symbol"] == symbol), None)
         if contract is None:

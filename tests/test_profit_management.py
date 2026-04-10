@@ -270,6 +270,26 @@ class TestProfitTarget:
         chain = [_make_contract("PUT", 48.0, -0.25, 0.50, symbol="IBIT260515P00048000")]
         assert strategy.check_profit_target(position, chain) is False
 
+    def test_returns_false_when_premium_is_zero(self):
+        """Zero premium_received -> False without dividing by zero.
+
+        Guards against crash in the 30-min monitoring loop if a position
+        somehow has zero premium recorded (e.g., data corruption or
+        migration from a system that didn't track premium).
+        """
+        strategy = self._make_strategy()
+        position = {"symbol": "IBIT260515P00050000", "premium_received": 0.0}
+        chain = [_make_contract("PUT", 50.0, -0.25, 0.50, symbol="IBIT260515P00050000")]
+        # Must not raise ZeroDivisionError
+        assert strategy.check_profit_target(position, chain) is False
+
+    def test_returns_false_when_premium_is_negative(self):
+        """Negative premium_received -> False without crashing."""
+        strategy = self._make_strategy()
+        position = {"symbol": "IBIT260515P00050000", "premium_received": -1.0}
+        chain = [_make_contract("PUT", 50.0, -0.25, 0.50, symbol="IBIT260515P00050000")]
+        assert strategy.check_profit_target(position, chain) is False
+
 
 class TestPositionTested:
     """Tests for WheelStrategy.check_position_tested."""
