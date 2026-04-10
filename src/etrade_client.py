@@ -966,10 +966,24 @@ class MockETradeClient:
         return self.cash
 
     def get_account_positions(self, account_id_key: str) -> List[Dict[str, Any]]:
+        """Return equity positions in the same shape as the real E*TRADE API.
+
+        Real E*TRADE returns positions with nested `Product` objects:
+          {"Product": {"symbol": "IBIT", "securityType": "EQ"}, "quantity": 100, ...}
+
+        The wheel strategy's assignment detection reads
+        `p["Product"]["symbol"]` and `p["Product"]["securityType"]`, so the
+        mock MUST use this same shape — otherwise paper mode assignment
+        detection fails silently (reports OTM expiry instead of assignment).
+        """
         positions = []
         for symbol, data in self.positions.items():
             positions.append(
                 {
+                    "Product": {
+                        "symbol": symbol,
+                        "securityType": "EQ",
+                    },
                     "symbolDescription": symbol,
                     "quantity": data["quantity"],
                     "costPerShare": data["cost_basis"],

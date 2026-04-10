@@ -298,3 +298,29 @@ class TestOptionsPositions:
         required_keys = {"symbol", "option_type", "strike", "quantity", "position_type"}
         for key in required_keys:
             assert key in pos, f"Missing key '{key}' in position dict"
+
+
+class TestMockEquityPositionsFormat:
+    """Regression tests for MockETradeClient.get_account_positions() shape.
+
+    The wheel strategy's assignment detection reads
+    `p["Product"]["symbol"]` and `p["Product"]["securityType"]`. If the mock
+    returns a flat dict instead of the nested Product format, assignment
+    detection silently fails in paper mode (every put reports as OTM expiry
+    instead of assigned). This test guards the mock shape.
+    """
+
+    def test_equity_positions_use_nested_product_shape(self, mock_client):
+        """Equity positions must have Product.symbol and Product.securityType."""
+        # Simulate an IBIT share position by directly populating the mock
+        mock_client.positions["IBIT"] = {"quantity": 100, "cost_basis": 48.0}
+
+        positions = mock_client.get_account_positions("test_account")
+        assert len(positions) == 1
+        pos = positions[0]
+
+        # MUST match real E*TRADE shape so wheel_strategy.detect_and_process_expiry() works
+        assert "Product" in pos, "Mock equity position missing nested 'Product' dict"
+        assert pos["Product"].get("symbol") == "IBIT"
+        assert pos["Product"].get("securityType") == "EQ"
+        assert pos.get("quantity") == 100
