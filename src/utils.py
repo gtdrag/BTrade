@@ -59,9 +59,14 @@ def is_market_day(date: Optional[datetime.date] = None) -> bool:
 
 
 def is_market_open() -> bool:
-    """Check if market is currently open (9:30 AM - 4:00 PM ET on weekdays)."""
+    """Check if market is currently open (9:30 AM - 4:00 PM ET on trading days).
+
+    Uses is_trading_day() to reject weekends AND market holidays. Previously
+    used is_market_day() which only checked weekdays, causing the function
+    to report "market open" on holidays like Good Friday or Christmas.
+    """
     now = get_et_now()
-    if not is_market_day(now.date()):
+    if not is_trading_day(now.date()):
         return False
 
     times = get_market_times(now.date())
@@ -71,7 +76,7 @@ def is_market_open() -> bool:
 def is_in_dip_window() -> bool:
     """Check if current time is within the dip buying window (10:00-10:59 AM ET)."""
     now = get_et_now()
-    if not is_market_day(now.date()):
+    if not is_trading_day(now.date()):
         return False
 
     times = get_market_times(now.date())
