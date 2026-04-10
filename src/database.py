@@ -440,10 +440,41 @@ class Database:
             row = cursor.fetchone()
             return dict(row) if row else {}
 
+    # Allowed column names for update_bot_state — whitelist prevents SQL injection
+    # via untrusted kwargs keys. Must match the bot_state schema in _init_db().
+    _BOT_STATE_COLUMNS = frozenset({
+        "is_paused",
+        "pause_until",
+        "current_position_shares",
+        "current_position_entry_price",
+        "current_position_date",
+        "last_open_price",
+        "last_open_price_date",
+        "total_trades",
+        "winning_trades",
+        "total_pnl",
+        "trading_mode",
+        "wheel_mode_enabled",
+        "updated_at",
+    })
+
     def update_bot_state(self, **kwargs):
-        """Update bot state fields."""
+        """Update bot state fields.
+
+        Raises:
+            ValueError: If any kwarg key is not in _BOT_STATE_COLUMNS.
+                Prevents SQL injection via untrusted column names.
+        """
         if not kwargs:
             return
+
+        # Whitelist check — reject any unknown column names BEFORE they reach SQL
+        unknown = set(kwargs.keys()) - self._BOT_STATE_COLUMNS
+        if unknown:
+            raise ValueError(
+                f"update_bot_state received unknown columns: {sorted(unknown)}. "
+                f"Allowed: {sorted(self._BOT_STATE_COLUMNS)}"
+            )
 
         now = get_et_now()
         kwargs["updated_at"] = now.isoformat()
