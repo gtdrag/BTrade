@@ -9,7 +9,7 @@ import asyncio
 import sys
 from datetime import date, timedelta
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, create_autospec, patch
 
 import pytest
 
@@ -17,8 +17,24 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.database import Database
+from src.etrade_client import ETradeClient
 from src.telegram.utils import ApprovalResult
 from src.wheel_state import WheelState
+
+
+def _make_etrade_mock():
+    """Create an ETradeClient mock with signature enforcement.
+
+    Uses create_autospec so any call with the wrong number or type of
+    arguments raises TypeError at test time — this is what catches bugs
+    like the Phase 5 _execute_btc_order arg-count mismatch that MagicMock
+    would silently accept.
+    """
+    mock = create_autospec(ETradeClient, instance=True)
+    # Give the mock useful return values for the options flow
+    mock.preview_options_order.return_value = {"PreviewIds": [{"previewId": 1}]}
+    mock.place_options_order.return_value = {"orderId": "ORD123"}
+    return mock
 
 # ---------------------------------------------------------------------------
 # Shared helpers / fixtures
@@ -973,13 +989,17 @@ class TestBuyToClose:
         assert result == ApprovalResult.REJECTED
 
     def test_execute_btc_order_places_buy_close_order(self):
-        """_execute_btc_order calls preview + place with BUY_CLOSE action."""
+        """_execute_btc_order calls preview + place with BUY_CLOSE action in the correct arg slot.
+
+        Uses create_autospec(ETradeClient) so arg-count and position
+        mismatches raise TypeError — this is the test that would have
+        caught the original Phase 5 bug where BTC was calling
+        preview_options_order with 7 args instead of 10.
+        """
         bot = _make_telegram_bot()
         position = _make_position(symbol="IBIT260515P00050000", premium_received=1.50)
         cycle = {"id": 1, "state": "SHORT_PUT"}
-        mock_client = MagicMock()
-        mock_client.preview_options_order.return_value = {"PreviewIds": [{"previewId": 1}]}
-        mock_client.place_options_order.return_value = {"orderId": "ORD123"}
+        mock_client = _make_etrade_mock()
         mock_db = MagicMock()
 
         async def run():
@@ -990,9 +1010,19 @@ class TestBuyToClose:
         asyncio.get_event_loop().run_until_complete(run())
         mock_client.preview_options_order.assert_called_once()
         mock_client.place_options_order.assert_called_once()
-        # Verify BUY_CLOSE action was used
+
+        # Verify BUY_CLOSE action was in the order_action slot (position 8),
+        # not just "somewhere in the args" — position-sensitive assertion.
+        # preview_options_order signature:
+        #   (self, account_id_key, symbol, option_type, expiry_year,
+        #    expiry_month, expiry_day, strike_price, order_action, quantity, limit_price)
         preview_args = mock_client.preview_options_order.call_args[0]
-        assert "BUY_CLOSE" in preview_args
+        assert preview_args[7] == "BUY_CLOSE", \
+            f"BUY_CLOSE should be in slot 7 (order_action), got {preview_args}"
+        assert preview_args[0] == "acc"       # account_id_key
+        assert preview_args[1] == "IBIT"      # symbol
+        assert preview_args[2] == "PUT"       # option_type
+        assert preview_args[9] == 0.60        # limit_price (close_price)
 
     def test_execute_btc_short_put_transitions_to_cash(self):
         """_execute_btc_order for SHORT_PUT transitions cycle to CASH."""
@@ -1512,7 +1542,9 @@ class TestRollExecution:
     """Tests for _execute_roll two-step BTC+STO execution."""
 
     def _make_clients(self, btc_raises=None, sto_raises=None):
-        mock_client = MagicMock()
+        # Use autospec so preview_options_order / place_options_order calls
+        # with wrong arg counts raise TypeError instead of silently passing.
+        mock_client = _make_etrade_mock()
         if btc_raises:
             mock_client.preview_options_order.side_effect = btc_raises
             mock_client.place_options_order.side_effect = btc_raises
@@ -1523,7 +1555,7 @@ class TestRollExecution:
 
     def _make_sto_failing_client(self):
         """Client where BTC succeeds but STO fails."""
-        mock_client = MagicMock()
+        mock_client = _make_etrade_mock()
         preview_calls = [0]
 
         def side_effect_preview(*args, **kwargs):
@@ -1546,7 +1578,13 @@ class TestRollExecution:
         return mock_client
 
     def test_execute_roll_calls_btc_then_sto(self):
-        """_execute_roll calls preview+place for BUY_CLOSE then SELL_OPEN."""
+        """_execute_roll calls preview+place for BUY_CLOSE then SELL_OPEN
+        with correct positional arguments.
+
+        Position-sensitive assertions: BUY_CLOSE and SELL_OPEN must land
+        in slot 7 (order_action), not just anywhere in the args tuple.
+        Uses create_autospec so arg-count mismatches are caught immediately.
+        """
         bot = _make_telegram_bot()
         position = _make_position(symbol="IBIT260515P00050000", roll_count=0)
         new_contract = _make_new_contract(strike=48.0, bid=1.40)
@@ -1565,11 +1603,21 @@ class TestRollExecution:
         # Both preview and place called twice: once for BTC, once for STO
         assert mock_client.preview_options_order.call_count == 2
         assert mock_client.place_options_order.call_count == 2
-        # Verify action values
+
+        # preview_options_order signature (excluding self):
+        #   account_id_key, symbol, option_type, expiry_year, expiry_month,
+        #   expiry_day, strike_price, order_action, quantity, limit_price
         btc_args = mock_client.preview_options_order.call_args_list[0][0]
         sto_args = mock_client.preview_options_order.call_args_list[1][0]
-        assert "BUY_CLOSE" in btc_args
-        assert "SELL_OPEN" in sto_args
+
+        # Position-sensitive: order_action is slot 7
+        assert btc_args[7] == "BUY_CLOSE", \
+            f"BUY_CLOSE should be in slot 7, got {btc_args}"
+        assert sto_args[7] == "SELL_OPEN", \
+            f"SELL_OPEN should be in slot 7, got {sto_args}"
+        # Full arg count check
+        assert len(btc_args) == 10, f"preview_options_order expects 10 args, got {len(btc_args)}"
+        assert len(sto_args) == 10, f"preview_options_order expects 10 args, got {len(sto_args)}"
 
     def test_execute_roll_btc_failure_no_db_changes(self):
         """If BTC step fails, no DB mutations are made."""
