@@ -17,7 +17,7 @@ Command handlers for specific domains are in separate modules:
 import asyncio
 import logging
 import os
-from datetime import datetime
+from ..utils import get_et_now
 from typing import TYPE_CHECKING, Optional
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -241,7 +241,7 @@ class TelegramBotBase:
             shares=shares,
             price=price,
             position_value=position_value,
-            timestamp=datetime.now(),
+            timestamp=get_et_now(),
         )
 
         self._approval_event = asyncio.Event()

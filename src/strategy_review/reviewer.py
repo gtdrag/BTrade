@@ -8,13 +8,13 @@ Combines market data, backtesting, and AI-powered recommendations.
 import asyncio
 import logging
 import os
-from datetime import datetime
 from typing import Any, Dict, List
 
 import anthropic
 
 from ..database import get_database
 from ..error_alerting import AlertSeverity, alert_error
+from ..utils import get_et_now
 from .backtesting import BacktestMixin
 from .config import (
     PARAMETER_CHANGE_TOOL,
@@ -90,7 +90,7 @@ class StrategyReviewer(MarketDataMixin, BacktestMixin):
                 has_recommendations=False,
                 recommendations=[],
                 risk_level="unknown",
-                timestamp=datetime.now().isoformat(),
+                timestamp=get_et_now().isoformat(),
             )
 
         # 2. Run current strategy backtest
@@ -303,7 +303,7 @@ class StrategyReviewer(MarketDataMixin, BacktestMixin):
                     ],
                     "num_watch_items": len(watch_items),
                     "response_length": len(full_report),
-                    "timestamp": datetime.now().isoformat(),
+                    "timestamp": get_et_now().isoformat(),
                 },
             )
 
@@ -367,7 +367,7 @@ class StrategyReviewer(MarketDataMixin, BacktestMixin):
                 else "medium"
                 if has_recs
                 else "low",
-                timestamp=datetime.now().isoformat(),
+                timestamp=get_et_now().isoformat(),
             )
 
         except Exception as e:
@@ -384,7 +384,7 @@ class StrategyReviewer(MarketDataMixin, BacktestMixin):
                 has_recommendations=False,
                 recommendations=[],
                 risk_level="unknown",
-                timestamp=datetime.now().isoformat(),
+                timestamp=get_et_now().isoformat(),
             )
 
     def apply_recommendation(self, recommendation: ParameterRecommendation) -> bool:
@@ -456,7 +456,7 @@ class StrategyReviewer(MarketDataMixin, BacktestMixin):
                     "param_type": param_type,
                     "reason": recommendation.reason,
                     "confidence": recommendation.confidence,
-                    "timestamp": datetime.now().isoformat(),
+                    "timestamp": get_et_now().isoformat(),
                 },
             )
 

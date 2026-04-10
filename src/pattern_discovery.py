@@ -828,8 +828,8 @@ class MarketDataCollector:
             return {}
 
         # Calculate date range
-        end_date = datetime.now().strftime("%Y-%m-%d")
-        start_date = (datetime.now() - timedelta(days=self.lookback_days)).strftime("%Y-%m-%d")
+        end_date = get_et_now().strftime("%Y-%m-%d")
+        start_date = (get_et_now() - timedelta(days=self.lookback_days)).strftime("%Y-%m-%d")
 
         # Fetch IBIT daily bars
         ibit_bars = provider.get_historical_bars("IBIT", start_date, end_date, "1Day")
@@ -875,8 +875,8 @@ class MarketDataCollector:
             return {}
 
         # Calculate date range
-        end_date = datetime.now().strftime("%Y-%m-%d")
-        start_date = (datetime.now() - timedelta(days=self.lookback_days)).strftime("%Y-%m-%d")
+        end_date = get_et_now().strftime("%Y-%m-%d")
+        start_date = (get_et_now() - timedelta(days=self.lookback_days)).strftime("%Y-%m-%d")
 
         logger.info(
             "Collecting raw bars",

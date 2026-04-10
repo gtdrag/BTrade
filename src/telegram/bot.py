@@ -387,7 +387,7 @@ class TelegramBot(
             await self._send_unauthorized_response(update)
             return
 
-        callback_id = f"test_{datetime.now().strftime('%H%M%S')}"
+        callback_id = f"test_{get_et_now().strftime('%H%M%S')}"
 
         message = (
             "🧪 TEST APPROVAL REQUEST\n\n"
@@ -2270,7 +2270,7 @@ class TelegramBot(
                 await self.initialize()
 
             # Generate unique callback ID
-            callback_id = f"{signal_type}_{datetime.now().strftime('%H%M%S')}"
+            callback_id = f"{signal_type}_{get_et_now().strftime('%H%M%S')}"
 
             # Create message - escape dynamic content
             emoji = self._get_signal_emoji(signal_type)

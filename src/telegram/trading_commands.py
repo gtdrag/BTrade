@@ -466,7 +466,8 @@ class TradingCommandsMixin:
             lines.append(f"\nTotal value: ${total_value:,.2f}")
             lines.append(f"\nThis will SELL ALL {len(positions)} position(s) at market price.")
 
-            callback_id = f"sellall_{datetime.now().strftime('%H%M%S')}"
+            from ..utils import get_et_now as _get_et_now
+            callback_id = f"sellall_{_get_et_now().strftime('%H%M%S')}"
             keyboard = [
                 [
                     InlineKeyboardButton(

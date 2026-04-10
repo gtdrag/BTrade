@@ -23,6 +23,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
+from .utils import get_et_now
+
 import anthropic
 
 logger = logging.getLogger(__name__)
@@ -762,11 +764,13 @@ class HistoricalSimulator:
         Returns:
             SimulationResult with complete simulation data
         """
-        # Cap end_date to today if it's in the future (can't simulate future data)
-        today = datetime.now()
-        if end_date > today:
+        # Cap end_date to today if it's in the future (can't simulate future data).
+        # Compare on date only to avoid naive/aware datetime mismatches — callers
+        # typically pass naive datetime objects for start_date/end_date.
+        today_date = get_et_now().date()
+        if end_date.date() > today_date:
             logger.info(f"Capping end_date from {end_date.strftime('%Y-%m-%d')} to today")
-            end_date = today
+            end_date = datetime(today_date.year, today_date.month, today_date.day)
 
         # Ensure we have at least 14 days to simulate
         if (end_date - start_date).days < 14:

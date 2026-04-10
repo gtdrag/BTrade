@@ -8,10 +8,11 @@ and detecting market regimes.
 import logging
 import os
 import statistics
-from datetime import datetime, timedelta
+from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Dict, List
 
 from ..error_alerting import AlertSeverity, alert_error
+from ..utils import get_et_now
 
 if TYPE_CHECKING:
     from .reviewer import StrategyReviewer
@@ -42,7 +43,7 @@ class MarketDataMixin:
 
         client = StockHistoricalDataClient(alpaca_key, alpaca_secret)
 
-        end_date = datetime.now()
+        end_date = get_et_now()
         start_date = end_date - timedelta(days=days + 10)
 
         data = {}
