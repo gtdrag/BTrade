@@ -1146,6 +1146,7 @@ class TestBTCCallbackRouting:
         """btc_approve_ callback sets _btc_approval_result='approved', not _call/_put result."""
         bot = _make_telegram_bot()
         bot._btc_approval_event = asyncio.Event()
+        bot._btc_approval_callback_id = "1"  # matches tail of btc_approve_1
         update = self._make_update(data="btc_approve_1")
 
         asyncio.get_event_loop().run_until_complete(bot._handle_callback(update, MagicMock()))
@@ -1158,6 +1159,7 @@ class TestBTCCallbackRouting:
         """btc_reject_ callback sets _btc_approval_result='rejected', not _call/_put result."""
         bot = _make_telegram_bot()
         bot._btc_approval_event = asyncio.Event()
+        bot._btc_approval_callback_id = "1"
         update = self._make_update(data="btc_reject_1")
 
         asyncio.get_event_loop().run_until_complete(bot._handle_callback(update, MagicMock()))
@@ -1675,6 +1677,7 @@ class TestRollCallbackRouting:
         """roll_approve_ callback sets _roll_approval_result='approved', not btc/call/put."""
         bot = _make_telegram_bot()
         bot._roll_approval_event = asyncio.Event()
+        bot._roll_approval_callback_id = "1"  # matches tail of roll_approve_roll_1
         update = self._make_update(data="roll_approve_roll_1")
 
         asyncio.get_event_loop().run_until_complete(

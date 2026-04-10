@@ -456,6 +456,7 @@ class TestCallbackRouting:
         bot = _make_telegram_bot()
         event = asyncio.Event()
         bot._call_approval_event = event
+        bot._call_approval_callback_id = "103000"
 
         update, query = self._make_callback_update("call_approve_call_103000")
 
@@ -472,6 +473,7 @@ class TestCallbackRouting:
         bot = _make_telegram_bot()
         event = asyncio.Event()
         bot._call_approval_event = event
+        bot._call_approval_callback_id = "103000"
 
         update, query = self._make_callback_update("call_reject_call_103000")
 
@@ -488,6 +490,7 @@ class TestCallbackRouting:
         bot = _make_telegram_bot()
         event = asyncio.Event()
         bot._call_approval_event = event
+        bot._call_approval_callback_id = "103000"
         bot._approval_event = asyncio.Event()  # intraday event
         bot._approval_result = None  # ensure it starts as None
 
@@ -508,6 +511,7 @@ class TestCallbackRouting:
         bot = _make_telegram_bot()
         bot._call_approval_chain = _make_call_chain()
         bot._call_approval_signal = _make_call_signal()
+        bot._call_approval_callback_id = "103000"
 
         update, query = self._make_callback_update("call_adjust_call_103000")
         query.edit_message_text = AsyncMock()
@@ -524,6 +528,7 @@ class TestCallbackRouting:
         bot = _make_telegram_bot()
         event = asyncio.Event()
         bot._call_approval_event = event
+        bot._call_approval_callback_id = "103000"
 
         update, query = self._make_callback_update("call_alt_52.0_call_103000")
 
@@ -540,6 +545,7 @@ class TestCallbackRouting:
         bot = _make_telegram_bot()
         event = asyncio.Event()
         bot._call_approval_event = event
+        bot._call_approval_callback_id = "103000"
 
         update, query = self._make_callback_update("call_alt_reject_call_103000")
 

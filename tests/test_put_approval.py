@@ -335,6 +335,9 @@ class TestPutCallbackRouting:
         bot = _make_telegram_bot()
         event = asyncio.Event()
         bot._put_approval_event = event
+        # Simulate an active approval flow — callback_id tail must match the
+        # trailing token of the callback_data for _is_stale_callback to pass.
+        bot._put_approval_callback_id = "103000"
 
         update, query = self._make_callback_update("put_approve_put_103000")
 
@@ -351,6 +354,7 @@ class TestPutCallbackRouting:
         bot = _make_telegram_bot()
         event = asyncio.Event()
         bot._put_approval_event = event
+        bot._put_approval_callback_id = "103000"
 
         update, query = self._make_callback_update("put_reject_put_103000")
 
@@ -367,6 +371,7 @@ class TestPutCallbackRouting:
         bot = _make_telegram_bot()
         bot._put_approval_chain = _make_chain()
         bot._put_approval_signal = _make_put_signal()
+        bot._put_approval_callback_id = "103000"
 
         update, query = self._make_callback_update("put_adjust_put_103000")
         query.edit_message_text = AsyncMock()
@@ -383,6 +388,7 @@ class TestPutCallbackRouting:
         bot = _make_telegram_bot()
         event = asyncio.Event()
         bot._put_approval_event = event
+        bot._put_approval_callback_id = "103000"
 
         update, query = self._make_callback_update("put_alt_reject_put_103000")
 
@@ -399,6 +405,7 @@ class TestPutCallbackRouting:
         bot = _make_telegram_bot()
         event = asyncio.Event()
         bot._put_approval_event = event
+        bot._put_approval_callback_id = "103000"
 
         update, query = self._make_callback_update("put_alt_47.0_put_103000")
 
@@ -409,6 +416,41 @@ class TestPutCallbackRouting:
 
         assert bot._put_approval_result == "47.0"
         assert event.is_set()
+
+    def test_stale_put_approve_is_ignored(self):
+        """A callback with a different callback_id tail is treated as stale."""
+        bot = _make_telegram_bot()
+        event = asyncio.Event()
+        bot._put_approval_event = event
+        # Current valid callback_id is "999999" — the callback tries "103000"
+        bot._put_approval_callback_id = "999999"
+
+        update, query = self._make_callback_update("put_approve_put_103000")
+
+        with patch.object(bot, "_is_authorized", return_value=True):
+            asyncio.get_event_loop().run_until_complete(
+                bot._handle_callback(update, MagicMock())
+            )
+
+        assert bot._put_approval_result is None
+        assert not event.is_set()
+
+    def test_put_callback_with_no_pending_approval_is_ignored(self):
+        """A callback that arrives with no pending approval is treated as stale."""
+        bot = _make_telegram_bot()
+        event = asyncio.Event()
+        bot._put_approval_event = event
+        bot._put_approval_callback_id = None  # no pending approval
+
+        update, query = self._make_callback_update("put_approve_put_103000")
+
+        with patch.object(bot, "_is_authorized", return_value=True):
+            asyncio.get_event_loop().run_until_complete(
+                bot._handle_callback(update, MagicMock())
+            )
+
+        assert bot._put_approval_result is None
+        assert not event.is_set()
 
 
 # ---------------------------------------------------------------------------
