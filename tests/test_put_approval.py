@@ -126,7 +126,8 @@ class TestPutOrderExecution:
         mock_client.place_options_order.return_value = {"orderId": "ORD123"}
 
         mock_db = MagicMock()
-        mock_db.create_wheel_cycle.return_value = 7
+        # open_short_put_cycle returns (cycle_id, position_id) atomically
+        mock_db.open_short_put_cycle.return_value = (7, 42)
 
         bot._app.bot.send_message = AsyncMock()
 
@@ -143,8 +144,8 @@ class TestPutOrderExecution:
             preview_ids=[{"previewId": 1}],
         )
 
-    def test_execute_put_order_creates_cycle_and_transitions_to_short_put(self):
-        """On success: create_wheel_cycle, transition_wheel_state(SHORT_PUT), open_wheel_position called."""
+    def test_execute_put_order_creates_cycle_atomically(self):
+        """On success: open_short_put_cycle called once atomically with all fields."""
         bot = _make_telegram_bot()
         signal = _make_put_signal(strike=48.0)
 
@@ -153,7 +154,7 @@ class TestPutOrderExecution:
         mock_client.place_options_order.return_value = {"orderId": "ORD999"}
 
         mock_db = MagicMock()
-        mock_db.create_wheel_cycle.return_value = 5
+        mock_db.open_short_put_cycle.return_value = (5, 42)
 
         bot._app.bot.send_message = AsyncMock()
 
@@ -161,33 +162,27 @@ class TestPutOrderExecution:
             bot._execute_put_order(signal, mock_client, mock_db, "acc-key")
         )
 
-        mock_db.create_wheel_cycle.assert_called_once()
-        mock_db.transition_wheel_state.assert_called_once_with(
-            5,
-            WheelState.SHORT_PUT,
-            "put_sold",
-            put_strike=48.0,
-            put_premium_received=1.50,
-            put_expiry_date="2026-05-15",
+        # Single atomic call replaces create_wheel_cycle + transition + open_wheel_position
+        mock_db.open_short_put_cycle.assert_called_once_with(
+            symbol=signal.symbol,
+            strike=48.0,
+            premium_received=1.50,
+            expiry_date="2026-05-15",
+            dte_at_entry=37,
+            delta=signal.delta,
+            gamma=signal.gamma,
+            theta=signal.theta,
+            vega=signal.vega,
+            iv=signal.iv,
+            quantity=1,
         )
-        mock_db.open_wheel_position.assert_called_once_with(
-            5,
-            signal.symbol,
-            "PUT",
-            48.0,
-            "2026-05-15",
-            37,
-            1.50,
-            1,
-            signal.delta,
-            signal.gamma,
-            signal.theta,
-            signal.vega,
-            signal.iv,
-        )
+        # Old non-atomic methods should NOT be called anymore
+        mock_db.create_wheel_cycle.assert_not_called()
+        mock_db.transition_wheel_state.assert_not_called()
+        mock_db.open_wheel_position.assert_not_called()
 
     def test_execute_put_order_does_not_create_cycle_on_failure(self):
-        """On order API failure: create_wheel_cycle must NOT be called."""
+        """On order API failure: open_short_put_cycle must NOT be called."""
         bot = _make_telegram_bot()
         signal = _make_put_signal()
 
@@ -202,6 +197,7 @@ class TestPutOrderExecution:
         )
 
         assert result is False
+        mock_db.open_short_put_cycle.assert_not_called()
         mock_db.create_wheel_cycle.assert_not_called()
 
 

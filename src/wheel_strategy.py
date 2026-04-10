@@ -464,8 +464,12 @@ class WheelStrategy:
             ]
 
             if ibit_shares:
-                # --- ASSIGNMENT PATH ---
-                cost_basis = cycle["put_strike"] - cycle["put_premium_received"]
+                # --- ASSIGNMENT PATH (atomic transition + position close) ---
+                cost_basis = self.db.process_put_assignment(
+                    cycle_id=cycle["id"],
+                    position_id=put_pos["id"],
+                    shares_held=100,
+                )
                 logger.info(
                     "detect_and_process_expiry: PUT ASSIGNED — strike=%.2f premium=%.2f "
                     "cost_basis=%.2f",
@@ -473,15 +477,6 @@ class WheelStrategy:
                     cycle["put_premium_received"],
                     cost_basis,
                 )
-
-                self.db.transition_wheel_state(
-                    cycle["id"],
-                    WheelState.HOLDING_SHARES,
-                    "put_assigned",
-                    shares_held=100,
-                    cost_basis=cost_basis,
-                )
-                self.db.close_wheel_position(put_pos["id"], close_premium=0.0)
                 self.db.log_event(
                     "INFO",
                     "put_assigned",
@@ -494,21 +489,16 @@ class WheelStrategy:
                 return "assigned"
 
             else:
-                # --- OTM EXPIRY PATH ---
-                realized_pnl = cycle["put_premium_received"] * 100  # 1 contract = 100 shares
+                # --- OTM EXPIRY PATH (atomic transition + position close) ---
+                realized_pnl = self.db.process_put_otm_expiry(
+                    cycle_id=cycle["id"],
+                    position_id=put_pos["id"],
+                )
                 logger.info(
                     "detect_and_process_expiry: PUT EXPIRED OTM — premium=%.2f realized_pnl=%.2f",
                     cycle["put_premium_received"],
                     realized_pnl,
                 )
-
-                self.db.transition_wheel_state(
-                    cycle["id"],
-                    WheelState.CASH,
-                    "put_expired_otm",
-                    realized_pnl=realized_pnl,
-                )
-                self.db.close_wheel_position(put_pos["id"], close_premium=0.0)
                 self.db.log_event(
                     "INFO",
                     "put_expired_otm",

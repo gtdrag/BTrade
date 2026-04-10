@@ -14,7 +14,7 @@ import os
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -1098,6 +1098,246 @@ class Database:
                 """,
                 (close_premium, now, now, position_id),
             )
+
+    # ==================== Atomic Wheel Operations ====================
+    # These methods group multiple wheel-related writes into a single
+    # transaction so that a crash mid-flow cannot leave an orphaned cycle,
+    # a position without a cycle, or a cycle in an inconsistent state.
+    # Each method opens ONE connection and performs all writes inside it.
+
+    def open_short_put_cycle(
+        self,
+        symbol: str,
+        strike: float,
+        premium_received: float,
+        expiry_date: str,
+        dte_at_entry: int,
+        delta: Optional[float] = None,
+        gamma: Optional[float] = None,
+        theta: Optional[float] = None,
+        vega: Optional[float] = None,
+        iv: Optional[float] = None,
+        quantity: int = 1,
+    ) -> Tuple[int, int]:
+        """Atomically create a cycle, transition to SHORT_PUT, and open the put position.
+
+        Groups create_wheel_cycle + transition_wheel_state + open_wheel_position
+        into a single transaction so any failure rolls everything back. Prevents
+        orphaned cycles that would block future operations.
+
+        Returns:
+            Tuple of (cycle_id, position_id).
+
+        Raises:
+            ValueError: If an active cycle already exists.
+        """
+        now = get_et_now().isoformat()
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+
+            # 1. Ensure no active cycle exists (T-02-08)
+            cursor.execute(
+                "SELECT id FROM wheel_cycles WHERE closed_at IS NULL LIMIT 1"
+            )
+            if cursor.fetchone():
+                raise ValueError(
+                    "Active cycle already exists. Close it before opening a new one."
+                )
+
+            # 2. Create cycle in CASH then transition to SHORT_PUT
+            cursor.execute(
+                """
+                INSERT INTO wheel_cycles
+                    (state, underlying, opened_at, created_at, updated_at)
+                VALUES ('CASH', 'IBIT', ?, ?, ?)
+                """,
+                (now, now, now),
+            )
+            cycle_id = cursor.lastrowid
+
+            # Validate the transition via the state machine
+            validate_transition(WheelState.CASH, WheelState.SHORT_PUT)
+
+            cursor.execute(
+                """
+                UPDATE wheel_cycles
+                SET state = ?, put_strike = ?, put_premium_received = ?,
+                    put_expiry_date = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (WheelState.SHORT_PUT.value, strike, premium_received,
+                 expiry_date, now, cycle_id),
+            )
+
+            # 3. Open the PUT position row
+            cursor.execute(
+                """
+                INSERT INTO options_positions (
+                    cycle_id, symbol, option_type, strike, expiry_date,
+                    dte_at_entry, quantity, premium_received,
+                    delta, gamma, theta, vega, iv,
+                    status, opened_at, created_at, updated_at
+                ) VALUES (?, ?, 'PUT', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?, ?, ?)
+                """,
+                (cycle_id, symbol, strike, expiry_date, dte_at_entry,
+                 quantity, premium_received, delta, gamma, theta, vega, iv,
+                 now, now, now),
+            )
+            position_id = cursor.lastrowid
+
+        # 4. Log event AFTER commit — non-critical, can be a separate transaction
+        self.log_event(
+            "INFO",
+            "wheel_transition",
+            details={
+                "cycle_id": cycle_id,
+                "from_state": "CASH",
+                "to_state": "SHORT_PUT",
+                "reason": "put_sold",
+            },
+        )
+
+        return cycle_id, position_id
+
+    def process_put_assignment(
+        self, cycle_id: int, position_id: int, shares_held: int = 100
+    ) -> float:
+        """Atomically transition cycle SHORT_PUT -> HOLDING_SHARES and close the put.
+
+        Groups transition_wheel_state + close_wheel_position into one transaction.
+        Cost basis is computed from the existing cycle's put_strike and
+        put_premium_received.
+
+        Returns:
+            The computed cost basis per share (for caller's notification use).
+
+        Raises:
+            ValueError: If the cycle is not in SHORT_PUT state or doesn't exist.
+        """
+        now = get_et_now().isoformat()
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+
+            # Read the cycle and validate state
+            cursor.execute(
+                "SELECT * FROM wheel_cycles WHERE id = ?", (cycle_id,)
+            )
+            row = cursor.fetchone()
+            if row is None:
+                raise ValueError(f"Cycle {cycle_id} does not exist")
+            cycle = dict(row)
+            if cycle["state"] != WheelState.SHORT_PUT.value:
+                raise ValueError(
+                    f"Cycle {cycle_id} is in state {cycle['state']}, "
+                    f"expected SHORT_PUT"
+                )
+
+            validate_transition(WheelState.SHORT_PUT, WheelState.HOLDING_SHARES)
+
+            cost_basis = cycle["put_strike"] - cycle["put_premium_received"]
+
+            # Transition cycle
+            cursor.execute(
+                """
+                UPDATE wheel_cycles
+                SET state = ?, shares_held = ?, cost_basis = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (WheelState.HOLDING_SHARES.value, shares_held, cost_basis, now, cycle_id),
+            )
+
+            # Close the put position
+            cursor.execute(
+                """
+                UPDATE options_positions
+                SET status = 'CLOSED', close_premium = 0.0, closed_at = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (now, now, position_id),
+            )
+
+        self.log_event(
+            "INFO",
+            "wheel_transition",
+            details={
+                "cycle_id": cycle_id,
+                "from_state": "SHORT_PUT",
+                "to_state": "HOLDING_SHARES",
+                "reason": "put_assigned",
+                "cost_basis": cost_basis,
+            },
+        )
+
+        return cost_basis
+
+    def process_put_otm_expiry(
+        self, cycle_id: int, position_id: int
+    ) -> float:
+        """Atomically transition cycle SHORT_PUT -> CASH and close the expired put.
+
+        Groups transition_wheel_state + close_wheel_position into one transaction.
+        Realized P&L equals the full put premium (100% of premium kept).
+
+        Returns:
+            The realized P&L (put_premium_received * 100).
+
+        Raises:
+            ValueError: If the cycle is not in SHORT_PUT state or doesn't exist.
+        """
+        now = get_et_now().isoformat()
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+
+            cursor.execute(
+                "SELECT * FROM wheel_cycles WHERE id = ?", (cycle_id,)
+            )
+            row = cursor.fetchone()
+            if row is None:
+                raise ValueError(f"Cycle {cycle_id} does not exist")
+            cycle = dict(row)
+            if cycle["state"] != WheelState.SHORT_PUT.value:
+                raise ValueError(
+                    f"Cycle {cycle_id} is in state {cycle['state']}, "
+                    f"expected SHORT_PUT"
+                )
+
+            validate_transition(WheelState.SHORT_PUT, WheelState.CASH)
+
+            realized_pnl = (cycle["put_premium_received"] or 0.0) * 100
+
+            # Transition cycle to CASH (cycle closes)
+            cursor.execute(
+                """
+                UPDATE wheel_cycles
+                SET state = ?, realized_pnl = ?, closed_at = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (WheelState.CASH.value, realized_pnl, now, now, cycle_id),
+            )
+
+            # Close the put position
+            cursor.execute(
+                """
+                UPDATE options_positions
+                SET status = 'CLOSED', close_premium = 0.0, closed_at = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (now, now, position_id),
+            )
+
+        self.log_event(
+            "INFO",
+            "wheel_transition",
+            details={
+                "cycle_id": cycle_id,
+                "from_state": "SHORT_PUT",
+                "to_state": "CASH",
+                "reason": "put_expired_otm",
+                "realized_pnl": realized_pnl,
+            },
+        )
+
+        return realized_pnl
 
     def get_cycle_positions(self, cycle_id: int) -> List[Dict[str, Any]]:
         """Get all options positions for a given wheel cycle.

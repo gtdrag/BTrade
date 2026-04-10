@@ -838,30 +838,22 @@ class TelegramBot(
                 "orderId"
             )
 
-            # Record in DB — only after successful placement (T-03-08)
-            cycle_id = db.create_wheel_cycle()
-            db.transition_wheel_state(
-                cycle_id,
-                WheelState.SHORT_PUT,
-                "put_sold",
-                put_strike=signal.strike,
-                put_premium_received=signal.premium,
-                put_expiry_date=signal.expiry_date,
-            )
-            db.open_wheel_position(
-                cycle_id,
-                signal.symbol,
-                "PUT",
-                signal.strike,
-                signal.expiry_date,
-                signal.dte,
-                signal.premium,
-                1,
-                signal.delta,
-                signal.gamma,
-                signal.theta,
-                signal.vega,
-                signal.iv,
+            # Record in DB — only after successful placement (T-03-08).
+            # open_short_put_cycle() groups create + transition + open_position
+            # into a single transaction so a crash mid-flow cannot leave an
+            # orphaned cycle record.
+            cycle_id, _position_id = db.open_short_put_cycle(
+                symbol=signal.symbol,
+                strike=signal.strike,
+                premium_received=signal.premium,
+                expiry_date=signal.expiry_date,
+                dte_at_entry=signal.dte,
+                delta=signal.delta,
+                gamma=signal.gamma,
+                theta=signal.theta,
+                vega=signal.vega,
+                iv=signal.iv,
+                quantity=1,
             )
 
             # T-03-10: Audit log
