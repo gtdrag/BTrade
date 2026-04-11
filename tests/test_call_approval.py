@@ -563,12 +563,13 @@ class TestSchedulerCallSuggestion:
     """Verify _job_assignment_detection wiring for call suggestions."""
 
     def _make_scheduler(self, expiry_result="assigned", call_signal_result=None, has_telegram=True):
-        """Build a minimal SmartScheduler mock for assignment detection."""
-        from src.smart_scheduler import SmartScheduler
+        """Build a SmartScheduler via the shared conftest factory."""
+        from tests.conftest import make_smart_scheduler
 
-        scheduler = SmartScheduler.__new__(SmartScheduler)
+        scheduler = make_smart_scheduler(
+            telegram_bot=MagicMock() if has_telegram else None,
+        )
         scheduler.db = MagicMock()
-        scheduler.telegram_bot = MagicMock() if has_telegram else None
 
         scheduler.wheel_strategy = MagicMock()
         scheduler.wheel_strategy.detect_and_process_expiry.return_value = expiry_result
@@ -588,7 +589,6 @@ class TestSchedulerCallSuggestion:
         scheduler.wheel_strategy.client = mock_client
         scheduler.wheel_strategy.account_id_key = "default"
 
-        scheduler._send_notification = MagicMock()
         return scheduler
 
     def test_suggests_call_after_assignment(self):

@@ -61,16 +61,17 @@ class TestWheelModeSchedulerGating:
     """Tests for wheel mode gate in SmartScheduler intraday jobs."""
 
     def _make_scheduler(self, wheel_mode_enabled):
-        """Build a minimal SmartScheduler mock for testing job gating."""
-        from src.smart_scheduler import SmartScheduler
+        """Build a SmartScheduler via the shared conftest factory (HI-07)."""
+        from tests.conftest import make_smart_scheduler
 
-        scheduler = object.__new__(SmartScheduler)
-
-        # Mock db
+        scheduler = make_smart_scheduler(telegram_bot=MagicMock())
         scheduler.db = MagicMock()
         scheduler.db.get_bot_state.return_value = {"wheel_mode_enabled": wheel_mode_enabled}
 
-        # Mock bot
+        # The gating tests need scheduler.bot to be a plain MagicMock the
+        # tests can poke at with assert_not_called — the factory's mock_bot
+        # is already a MagicMock but we replace it for the position-lock
+        # context manager setup.
         scheduler.bot = MagicMock()
         scheduler.bot.strategy = MagicMock()
         scheduler.bot._position_lock = MagicMock()
@@ -79,14 +80,7 @@ class TestWheelModeSchedulerGating:
         scheduler.bot.is_paper_mode = True
         scheduler.bot._paper_positions = {}
 
-        # Mock telegram_bot
-        scheduler.telegram_bot = MagicMock()
-
-        # Mock helpers
-        scheduler._last_result = None
-        scheduler._error_count = 0
         scheduler._log_signal_check = MagicMock()
-        scheduler._send_notification = MagicMock()
         scheduler._send_error_notification = MagicMock()
 
         return scheduler
@@ -390,13 +384,11 @@ class TestWheelModeCommand:
 
 
 def _make_scheduler_for_wheel():
-    """Build a minimal SmartScheduler mock for testing wheel daily summary."""
-    from src.smart_scheduler import SmartScheduler
+    """Build a SmartScheduler via the shared conftest factory (HI-07)."""
+    from tests.conftest import make_smart_scheduler
 
-    scheduler = object.__new__(SmartScheduler)
+    scheduler = make_smart_scheduler()
     scheduler.db = MagicMock()
-    scheduler._send_notification = MagicMock()
-    scheduler._error_count = 0
     return scheduler
 
 
@@ -475,31 +467,25 @@ class TestWheelDailySummary:
     @patch("src.smart_scheduler.get_et_now")
     def test_wheel_summary_job_registered(self, mock_now, mock_trading_day):
         """setup_jobs() registers 'wheel_daily_summary' job with CronTrigger at 16:30."""
-        from unittest.mock import MagicMock
+        from tests.conftest import make_smart_scheduler
 
-        from src.smart_scheduler import SmartScheduler
+        scheduler = make_smart_scheduler()
 
-        scheduler = object.__new__(SmartScheduler)
-
-        # Mock APScheduler
-        mock_apscheduler = MagicMock()
+        # Capture jobs registered via scheduler.scheduler.add_job(...)
         added_jobs = {}
 
         def mock_add_job(func, trigger, id, name, misfire_grace_time=600):
             added_jobs[id] = {"func": func, "name": name}
 
-        mock_apscheduler.add_job.side_effect = mock_add_job
-        mock_apscheduler.remove_all_jobs = MagicMock()
-        scheduler.scheduler = mock_apscheduler
+        scheduler.scheduler.add_job.side_effect = mock_add_job
 
-        # Mock bot and config
-        mock_bot = MagicMock()
-        mock_bot.config.strategy.crash_day_enabled = False
-        mock_bot.config.strategy.pump_day_enabled = False
-        mock_bot.config.strategy.ten_am_dump_enabled = False
-        mock_bot.is_paper_mode = True
-        mock_bot.client = None
-        scheduler.bot = mock_bot
+        # Disable the non-wheel branches of setup_jobs so we only see
+        # wheel-specific job registrations.
+        scheduler.bot.config.strategy.crash_day_enabled = False
+        scheduler.bot.config.strategy.pump_day_enabled = False
+        scheduler.bot.config.strategy.ten_am_dump_enabled = False
+        scheduler.bot.is_paper_mode = True
+        scheduler.bot.client = None
 
         scheduler.setup_jobs()
 

@@ -466,12 +466,16 @@ class TestSchedulerPutJob:
     """Verify _job_put_signal_check guards and execution flow."""
 
     def _make_scheduler(self, has_signal: bool = True, has_telegram: bool = True):
-        """Build a minimal SmartScheduler mock."""
-        from src.smart_scheduler import SmartScheduler
+        """Build a minimal SmartScheduler via the shared conftest factory."""
+        from tests.conftest import make_smart_scheduler
 
-        scheduler = SmartScheduler.__new__(SmartScheduler)
+        scheduler = make_smart_scheduler(
+            telegram_bot=MagicMock() if has_telegram else None,
+        )
+        # Replace the MagicMock db from the factory with a fresh one so we
+        # can set up assertions without inheriting the internal call log
+        # from the real __init__ path.
         scheduler.db = MagicMock()
-        scheduler.telegram_bot = MagicMock() if has_telegram else None
 
         mock_signal = _make_put_signal() if has_signal else None
         mock_client = MagicMock()
@@ -482,7 +486,6 @@ class TestSchedulerPutJob:
         scheduler.wheel_strategy.client = mock_client
         scheduler.wheel_strategy.account_id_key = "default"
 
-        scheduler._send_notification = MagicMock()
         return scheduler
 
     def test_skips_on_non_trading_day(self):

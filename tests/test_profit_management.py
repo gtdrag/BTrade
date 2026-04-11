@@ -627,13 +627,11 @@ class TestSchedulerMonitoring:
         cycle: dict = None,
         monitoring_approval_pending: bool = False,
     ):
-        """Build a minimal SmartScheduler mock for monitoring tests."""
-        from src.smart_scheduler import SmartScheduler
+        """Build a SmartScheduler via the shared conftest factory."""
+        from tests.conftest import make_smart_scheduler
 
-        scheduler = SmartScheduler.__new__(SmartScheduler)
+        scheduler = make_smart_scheduler(telegram_bot=MagicMock())
         scheduler.db = MagicMock()
-        scheduler.telegram_bot = MagicMock()
-        scheduler._send_notification = MagicMock()
         scheduler._monitoring_approval_pending = monitoring_approval_pending
 
         if has_wheel_strategy:
@@ -664,24 +662,19 @@ class TestSchedulerMonitoring:
 
     def test_setup_jobs_registers_wheel_monitoring(self):
         """setup_jobs must register a 'wheel_monitoring' job."""
-        from src.smart_scheduler import SmartScheduler
+        from tests.conftest import make_smart_scheduler
 
-        scheduler = SmartScheduler.__new__(SmartScheduler)
-        scheduler.db = MagicMock()
-        scheduler.telegram_bot = MagicMock()
-        scheduler._send_notification = MagicMock()
-        scheduler._monitoring_approval_pending = False
-        scheduler.wheel_strategy = None
+        scheduler = make_smart_scheduler(telegram_bot=MagicMock())
 
-        # Mock bot and scheduler objects
-        mock_bot = MagicMock()
-        mock_bot.client = None
-        mock_bot.config.strategy.crash_day_enabled = False
-        mock_bot.config.strategy.pump_day_enabled = False
-        mock_bot.config.strategy.ten_am_dump_enabled = False
-        mock_bot.is_paper_mode = True
-        scheduler.bot = mock_bot
-        scheduler.scheduler = MagicMock()
+        # setup_jobs() reads flags off scheduler.bot.config.strategy and
+        # calls scheduler.scheduler.add_job(). Override the bot so the
+        # non-wheel signal-check branches don't register jobs we don't
+        # care about here.
+        scheduler.bot.client = None
+        scheduler.bot.config.strategy.crash_day_enabled = False
+        scheduler.bot.config.strategy.pump_day_enabled = False
+        scheduler.bot.config.strategy.ten_am_dump_enabled = False
+        scheduler.bot.is_paper_mode = True
 
         scheduler.setup_jobs()
         # Check that add_job was called with id="wheel_monitoring"
@@ -1174,17 +1167,14 @@ class TestSchedulerBTCWiring:
         chain=None,
         cycle_state="SHORT_PUT",
     ):
-        from src.smart_scheduler import SmartScheduler
+        from tests.conftest import make_smart_scheduler
 
-        scheduler = SmartScheduler.__new__(SmartScheduler)
+        telegram_bot = MagicMock()
+        telegram_bot.request_profit_take_approval = AsyncMock(return_value=ApprovalResult.APPROVED)
+        telegram_bot.send_dte_alert = AsyncMock()
+
+        scheduler = make_smart_scheduler(telegram_bot=telegram_bot)
         scheduler.db = MagicMock()
-        scheduler.telegram_bot = MagicMock()
-        scheduler.telegram_bot.request_profit_take_approval = AsyncMock(
-            return_value=ApprovalResult.APPROVED
-        )
-        scheduler.telegram_bot.send_dte_alert = AsyncMock()
-        scheduler._send_notification = MagicMock()
-        scheduler._monitoring_approval_pending = False
         scheduler.wheel_strategy = MagicMock()
         scheduler.wheel_strategy.client = MagicMock()
         scheduler.wheel_strategy.account_id_key = "acc"
@@ -1711,17 +1701,14 @@ class TestSchedulerRollWiring:
         new_contract=None,
         cycle_state="SHORT_PUT",
     ):
-        from src.smart_scheduler import SmartScheduler
+        from tests.conftest import make_smart_scheduler
 
-        scheduler = SmartScheduler.__new__(SmartScheduler)
+        telegram_bot = MagicMock()
+        telegram_bot.request_roll_approval = AsyncMock(return_value=ApprovalResult.APPROVED)
+        telegram_bot.send_dte_alert = AsyncMock()
+
+        scheduler = make_smart_scheduler(telegram_bot=telegram_bot)
         scheduler.db = MagicMock()
-        scheduler.telegram_bot = MagicMock()
-        scheduler.telegram_bot.request_roll_approval = AsyncMock(
-            return_value=ApprovalResult.APPROVED
-        )
-        scheduler.telegram_bot.send_dte_alert = AsyncMock()
-        scheduler._send_notification = MagicMock()
-        scheduler._monitoring_approval_pending = False
         scheduler.wheel_strategy = MagicMock()
         scheduler.wheel_strategy.client = MagicMock()
         scheduler.wheel_strategy.account_id_key = "acc"

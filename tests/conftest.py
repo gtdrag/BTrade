@@ -45,6 +45,45 @@ def _reset_database_singleton_and_env():
             os.environ["DATABASE_PATH"] = original_db_path
 
 
+def make_smart_scheduler(telegram_bot=None):
+    """Build a SmartScheduler by running its real __init__ (HI-07).
+
+    Previously every test file called `SmartScheduler.__new__(SmartScheduler)`
+    and then manually poked whichever attributes that test's code path
+    happened to hit. When `SmartScheduler.__init__` added a new attribute
+    (status, _monitoring_approval_pending, etc.), each copy had to be
+    backported by hand. Any test that didn't get the update and then
+    exercised an error-handling branch would blow up with a confusing
+    AttributeError pointing at the symptom, not the missing attribute.
+
+    This factory patches the two external dependencies (`get_database`
+    and `BackgroundScheduler`) so __init__ can run end-to-end, then
+    returns the resulting scheduler with every attribute the real
+    __init__ sets. Tests then assign `scheduler.wheel_strategy = …` or
+    stub `scheduler.db.log_event` for their specific scenario — but
+    they no longer carry the baseline setup themselves.
+
+    `_send_notification` is pre-replaced with a plain MagicMock because
+    most tests assert against it.
+    """
+    from unittest.mock import patch
+
+    from src.smart_scheduler import SmartScheduler
+
+    # A mocked TradingBot that will NOT trigger the WheelStrategy auto-init
+    # branch (that branch reads bot.client, which we don't want here — tests
+    # that need a wheel_strategy set it up explicitly after construction).
+    mock_bot = MagicMock()
+    mock_bot.client = None
+
+    with patch("src.smart_scheduler.get_database", return_value=MagicMock()):
+        with patch("src.smart_scheduler.BackgroundScheduler"):
+            scheduler = SmartScheduler(bot=mock_bot, telegram_bot=telegram_bot)
+
+    scheduler._send_notification = MagicMock()
+    return scheduler
+
+
 def make_telegram_bot(token: str = "fake_token", chat_id: str = "12345"):
     """Build a real TelegramBot instance via its actual __init__ (HI-01/LO-02).
 
