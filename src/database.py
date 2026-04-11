@@ -19,7 +19,8 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 
 from .utils import get_et_now
-from .wheel_state import WheelState, transition as validate_transition
+from .wheel_state import WheelState
+from .wheel_state import transition as validate_transition
 
 
 class NumpyJSONEncoder(json.JSONEncoder):
@@ -158,7 +159,9 @@ class Database:
             # Migration: Add wheel_mode_enabled column if it doesn't exist (for existing DBs)
             # TR-01: Default 1 (enabled) so existing DBs safely disable intraday on upgrade
             if "wheel_mode_enabled" not in columns:
-                cursor.execute("ALTER TABLE bot_state ADD COLUMN wheel_mode_enabled INTEGER DEFAULT 1")
+                cursor.execute(
+                    "ALTER TABLE bot_state ADD COLUMN wheel_mode_enabled INTEGER DEFAULT 1"
+                )
 
             # Daily prices table - stores daily open prices
             cursor.execute(
@@ -186,12 +189,8 @@ class Database:
             )
             # Indexes for log queries — without these, get_events() scans the full
             # table, which degrades over time as monitoring jobs accumulate rows.
-            cursor.execute(
-                "CREATE INDEX IF NOT EXISTS idx_logs_timestamp ON logs(timestamp)"
-            )
-            cursor.execute(
-                "CREATE INDEX IF NOT EXISTS idx_logs_level ON logs(level)"
-            )
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_logs_timestamp ON logs(timestamp)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_logs_level ON logs(level)")
 
             # Strategy parameters table - stores approved Claude recommendations
             cursor.execute(
@@ -425,10 +424,9 @@ class Database:
         with self._get_connection() as conn:
             cursor = conn.cursor()
 
-            dry_run_filter = "" if include_dry_runs else "AND is_dry_run = 0"
-
-            cursor.execute(
-                f"""
+            # LO-01: avoid f-string SQL. Branch on the bool and execute one of
+            # two static queries so untrusted input can never influence the SQL.
+            base_query = """
                 SELECT
                     COUNT(*) as total_trades,
                     SUM(CASE WHEN percentage_pnl > 0 THEN 1 ELSE 0 END) as winning_trades,
@@ -439,9 +437,12 @@ class Database:
                     MIN(percentage_pnl) as worst_trade,
                     AVG(dip_percentage) as avg_dip
                 FROM trades
-                WHERE status = 'closed' {dry_run_filter}
+                WHERE status = 'closed'
             """
-            )
+            if include_dry_runs:
+                cursor.execute(base_query)
+            else:
+                cursor.execute(base_query + " AND is_dry_run = 0")
 
             row = cursor.fetchone()
             stats = dict(row)
@@ -465,21 +466,23 @@ class Database:
 
     # Allowed column names for update_bot_state — whitelist prevents SQL injection
     # via untrusted kwargs keys. Must match the bot_state schema in _init_db().
-    _BOT_STATE_COLUMNS = frozenset({
-        "is_paused",
-        "pause_until",
-        "current_position_shares",
-        "current_position_entry_price",
-        "current_position_date",
-        "last_open_price",
-        "last_open_price_date",
-        "total_trades",
-        "winning_trades",
-        "total_pnl",
-        "trading_mode",
-        "wheel_mode_enabled",
-        "updated_at",
-    })
+    _BOT_STATE_COLUMNS = frozenset(
+        {
+            "is_paused",
+            "pause_until",
+            "current_position_shares",
+            "current_position_entry_price",
+            "current_position_date",
+            "last_open_price",
+            "last_open_price_date",
+            "total_trades",
+            "winning_trades",
+            "total_pnl",
+            "trading_mode",
+            "wheel_mode_enabled",
+            "updated_at",
+        }
+    )
 
     def update_bot_state(self, **kwargs):
         """Update bot state fields.
@@ -924,9 +927,7 @@ class Database:
         now = get_et_now().isoformat()
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute(
-                "SELECT id FROM wheel_cycles WHERE closed_at IS NULL LIMIT 1"
-            )
+            cursor.execute("SELECT id FROM wheel_cycles WHERE closed_at IS NULL LIMIT 1")
             existing = cursor.fetchone()
             if existing:
                 raise ValueError(
@@ -1093,9 +1094,7 @@ class Database:
             ValueError: If cycle_id does not exist in wheel_cycles.
         """
         if option_type not in ("PUT", "CALL"):
-            raise ValueError(
-                f"Invalid option_type '{option_type}'. Must be 'PUT' or 'CALL'."
-            )
+            raise ValueError(f"Invalid option_type '{option_type}'. Must be 'PUT' or 'CALL'.")
 
         now = get_et_now().isoformat()
         with self._get_connection() as conn:
@@ -1106,9 +1105,7 @@ class Database:
                 (cycle_id,),
             )
             if cursor.fetchone() is None:
-                raise ValueError(
-                    f"cycle_id={cycle_id} does not exist in wheel_cycles."
-                )
+                raise ValueError(f"cycle_id={cycle_id} does not exist in wheel_cycles.")
 
             cursor.execute(
                 """
@@ -1120,10 +1117,22 @@ class Database:
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?, ?, ?)
                 """,
                 (
-                    cycle_id, symbol, option_type, strike, expiry_date,
-                    dte_at_entry, quantity, premium_received,
-                    delta, gamma, theta, vega, iv,
-                    now, now, now,
+                    cycle_id,
+                    symbol,
+                    option_type,
+                    strike,
+                    expiry_date,
+                    dte_at_entry,
+                    quantity,
+                    premium_received,
+                    delta,
+                    gamma,
+                    theta,
+                    vega,
+                    iv,
+                    now,
+                    now,
+                    now,
                 ),
             )
             return cursor.lastrowid
@@ -1190,13 +1199,9 @@ class Database:
             cursor = conn.cursor()
 
             # 1. Ensure no active cycle exists (T-02-08)
-            cursor.execute(
-                "SELECT id FROM wheel_cycles WHERE closed_at IS NULL LIMIT 1"
-            )
+            cursor.execute("SELECT id FROM wheel_cycles WHERE closed_at IS NULL LIMIT 1")
             if cursor.fetchone():
-                raise ValueError(
-                    "Active cycle already exists. Close it before opening a new one."
-                )
+                raise ValueError("Active cycle already exists. Close it before opening a new one.")
 
             # 2. Create cycle in CASH then transition to SHORT_PUT
             cursor.execute(
@@ -1219,8 +1224,7 @@ class Database:
                     put_expiry_date = ?, updated_at = ?
                 WHERE id = ?
                 """,
-                (WheelState.SHORT_PUT.value, strike, premium_received,
-                 expiry_date, now, cycle_id),
+                (WheelState.SHORT_PUT.value, strike, premium_received, expiry_date, now, cycle_id),
             )
 
             # 3. Open the PUT position row
@@ -1233,9 +1237,23 @@ class Database:
                     status, opened_at, created_at, updated_at
                 ) VALUES (?, ?, 'PUT', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?, ?, ?)
                 """,
-                (cycle_id, symbol, strike, expiry_date, dte_at_entry,
-                 quantity, premium_received, delta, gamma, theta, vega, iv,
-                 now, now, now),
+                (
+                    cycle_id,
+                    symbol,
+                    strike,
+                    expiry_date,
+                    dte_at_entry,
+                    quantity,
+                    premium_received,
+                    delta,
+                    gamma,
+                    theta,
+                    vega,
+                    iv,
+                    now,
+                    now,
+                    now,
+                ),
             )
             position_id = cursor.lastrowid
 
@@ -1273,17 +1291,14 @@ class Database:
             cursor = conn.cursor()
 
             # Read the cycle and validate state
-            cursor.execute(
-                "SELECT * FROM wheel_cycles WHERE id = ?", (cycle_id,)
-            )
+            cursor.execute("SELECT * FROM wheel_cycles WHERE id = ?", (cycle_id,))
             row = cursor.fetchone()
             if row is None:
                 raise ValueError(f"Cycle {cycle_id} does not exist")
             cycle = dict(row)
             if cycle["state"] != WheelState.SHORT_PUT.value:
                 raise ValueError(
-                    f"Cycle {cycle_id} is in state {cycle['state']}, "
-                    f"expected SHORT_PUT"
+                    f"Cycle {cycle_id} is in state {cycle['state']}, " f"expected SHORT_PUT"
                 )
 
             validate_transition(WheelState.SHORT_PUT, WheelState.HOLDING_SHARES)
@@ -1324,9 +1339,7 @@ class Database:
 
         return cost_basis
 
-    def process_put_otm_expiry(
-        self, cycle_id: int, position_id: int
-    ) -> float:
+    def process_put_otm_expiry(self, cycle_id: int, position_id: int) -> float:
         """Atomically transition cycle SHORT_PUT -> CASH and close the expired put.
 
         Groups transition_wheel_state + close_wheel_position into one transaction.
@@ -1342,17 +1355,14 @@ class Database:
         with self._get_connection() as conn:
             cursor = conn.cursor()
 
-            cursor.execute(
-                "SELECT * FROM wheel_cycles WHERE id = ?", (cycle_id,)
-            )
+            cursor.execute("SELECT * FROM wheel_cycles WHERE id = ?", (cycle_id,))
             row = cursor.fetchone()
             if row is None:
                 raise ValueError(f"Cycle {cycle_id} does not exist")
             cycle = dict(row)
             if cycle["state"] != WheelState.SHORT_PUT.value:
                 raise ValueError(
-                    f"Cycle {cycle_id} is in state {cycle['state']}, "
-                    f"expected SHORT_PUT"
+                    f"Cycle {cycle_id} is in state {cycle['state']}, " f"expected SHORT_PUT"
                 )
 
             validate_transition(WheelState.SHORT_PUT, WheelState.CASH)
