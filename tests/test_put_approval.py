@@ -15,13 +15,40 @@ Covers:
 import asyncio
 import sys
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, create_autospec, patch
 
 # Ensure project root is on path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from src.database import Database
+from src.etrade_client import ETradeClient
 from src.telegram.utils import ApprovalResult
 from src.wheel_strategy import PutSignal
+
+
+def _make_db_mock() -> MagicMock:
+    """Create a Database mock with signature enforcement (CR-02).
+
+    create_autospec inspects Database and makes every method signature-
+    checked, so a call with the wrong number or type of arguments raises
+    TypeError at test time — this is what catches the class of bugs where
+    production code drifts away from a method signature but MagicMock
+    silently accepts the mismatch.
+    """
+    return create_autospec(Database, instance=True)
+
+
+def _make_client_mock() -> MagicMock:
+    """Create an ETradeClient mock with signature enforcement (CR-03).
+
+    Gives useful default return values for the options flow so tests
+    don't have to set them up when they only care about call arguments.
+    """
+    mock = create_autospec(ETradeClient, instance=True)
+    mock.preview_options_order.return_value = {"PreviewIds": [{"previewId": 1}]}
+    mock.place_options_order.return_value = {"orderId": "ORD123"}
+    return mock
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -124,11 +151,8 @@ class TestPutOrderExecution:
         bot = _make_telegram_bot()
         signal = _make_put_signal(strike=48.0)
 
-        mock_client = MagicMock()
-        mock_client.preview_options_order.return_value = {"PreviewIds": [{"previewId": 1}]}
-        mock_client.place_options_order.return_value = {"orderId": "ORD123"}
-
-        mock_db = MagicMock()
+        mock_client = _make_client_mock()
+        mock_db = _make_db_mock()
         # open_short_put_cycle returns (cycle_id, position_id) atomically
         mock_db.open_short_put_cycle.return_value = (7, 42)
 
@@ -161,11 +185,11 @@ class TestPutOrderExecution:
         bot = _make_telegram_bot()
         signal = _make_put_signal(strike=48.0)
 
-        mock_client = MagicMock()
+        mock_client = _make_client_mock()
         mock_client.preview_options_order.return_value = {"PreviewIds": None}
         mock_client.place_options_order.return_value = {"orderId": "ORD999"}
 
-        mock_db = MagicMock()
+        mock_db = _make_db_mock()
         mock_db.open_short_put_cycle.return_value = (5, 42)
 
         bot._app.bot.send_message = AsyncMock()
@@ -200,10 +224,10 @@ class TestPutOrderExecution:
         bot = _make_telegram_bot()
         signal = _make_put_signal()
 
-        mock_client = MagicMock()
+        mock_client = _make_client_mock()
         mock_client.preview_options_order.side_effect = ETradeAPIError("API error")
 
-        mock_db = MagicMock()
+        mock_db = _make_db_mock()
         bot._app.bot.send_message = AsyncMock()
 
         result = asyncio.get_event_loop().run_until_complete(
@@ -229,8 +253,8 @@ class TestPutApprovalFlow:
         signal = _make_put_signal()
         chain = _make_chain()
 
-        mock_client = MagicMock()
-        mock_db = MagicMock()
+        mock_client = _make_client_mock()
+        mock_db = _make_db_mock()
         bot._app.bot.send_message = AsyncMock()
 
         async def run():
@@ -258,8 +282,8 @@ class TestPutApprovalFlow:
         signal = _make_put_signal()
         chain = _make_chain()
 
-        mock_client = MagicMock()
-        mock_db = MagicMock()
+        mock_client = _make_client_mock()
+        mock_db = _make_db_mock()
         bot._app.bot.send_message = AsyncMock()
 
         async def run():
@@ -285,8 +309,8 @@ class TestPutApprovalFlow:
         signal = _make_put_signal()
         chain = _make_chain()
 
-        mock_client = MagicMock()
-        mock_db = MagicMock()
+        mock_client = _make_client_mock()
+        mock_db = _make_db_mock()
         bot._app.bot.send_message = AsyncMock()
 
         async def run():
@@ -315,8 +339,8 @@ class TestPutApprovalFlow:
         intraday_event = asyncio.Event()
         bot._approval_event = intraday_event
 
-        mock_client = MagicMock()
-        mock_db = MagicMock()
+        mock_client = _make_client_mock()
+        mock_db = _make_db_mock()
         bot._app.bot.send_message = AsyncMock()
 
         async def run():

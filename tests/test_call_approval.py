@@ -13,14 +13,30 @@ Covers:
 import asyncio
 import sys
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, create_autospec, patch
 
 # Ensure project root is on path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from src.database import Database
+from src.etrade_client import ETradeClient
 from src.telegram.utils import ApprovalResult
 from src.wheel_state import WheelState
 from src.wheel_strategy import CallSignal
+
+
+def _make_db_mock() -> MagicMock:
+    """Create a Database mock with signature enforcement (CR-02)."""
+    return create_autospec(Database, instance=True)
+
+
+def _make_client_mock() -> MagicMock:
+    """Create an ETradeClient mock with signature enforcement (CR-03)."""
+    mock = create_autospec(ETradeClient, instance=True)
+    mock.preview_options_order.return_value = {"PreviewIds": [{"previewId": 1}]}
+    mock.place_options_order.return_value = {"orderId": "ORD123"}
+    return mock
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -124,8 +140,8 @@ class TestCallApprovalFlow:
         signal = _make_call_signal()
         chain = _make_call_chain()
 
-        mock_client = MagicMock()
-        mock_db = MagicMock()
+        mock_client = _make_client_mock()
+        mock_db = _make_db_mock()
         bot._app.bot.send_message = AsyncMock()
 
         async def run():
@@ -151,8 +167,8 @@ class TestCallApprovalFlow:
         signal = _make_call_signal()
         chain = _make_call_chain()
 
-        mock_client = MagicMock()
-        mock_db = MagicMock()
+        mock_client = _make_client_mock()
+        mock_db = _make_db_mock()
         bot._app.bot.send_message = AsyncMock()
 
         async def run():
@@ -178,8 +194,8 @@ class TestCallApprovalFlow:
         signal = _make_call_signal()
         chain = _make_call_chain()
 
-        mock_client = MagicMock()
-        mock_db = MagicMock()
+        mock_client = _make_client_mock()
+        mock_db = _make_db_mock()
         bot._app.bot.send_message = AsyncMock()
 
         async def run():
@@ -210,8 +226,8 @@ class TestCallApprovalFlow:
         bot._approval_event = intraday_event
         bot._put_approval.event = put_event
 
-        mock_client = MagicMock()
-        mock_db = MagicMock()
+        mock_client = _make_client_mock()
+        mock_db = _make_db_mock()
         bot._app.bot.send_message = AsyncMock()
 
         async def run():
@@ -258,11 +274,10 @@ class TestExecuteCallOrder:
         bot = _make_telegram_bot()
         signal = _make_call_signal(strike=50.0, cost_basis=47.50)
 
-        mock_client = MagicMock()
-        mock_client.preview_options_order.return_value = {"PreviewIds": [{"previewId": 1}]}
+        mock_client = _make_client_mock()
         mock_client.place_options_order.return_value = {"orderId": "ORD456"}
 
-        mock_db = MagicMock()
+        mock_db = _make_db_mock()
         mock_db.get_active_cycle.return_value = self._make_active_cycle()
         bot._app.bot.send_message = AsyncMock()
 
@@ -294,11 +309,11 @@ class TestExecuteCallOrder:
         signal = _make_call_signal(strike=50.0, cost_basis=47.50)
         # premium = 1.80, so new_cost_basis = 47.50 - 1.80 = 45.70
 
-        mock_client = MagicMock()
+        mock_client = _make_client_mock()
         mock_client.preview_options_order.return_value = {"PreviewIds": None}
         mock_client.place_options_order.return_value = {"orderId": "ORD789"}
 
-        mock_db = MagicMock()
+        mock_db = _make_db_mock()
         mock_db.get_active_cycle.return_value = self._make_active_cycle(cost_basis=47.50)
         bot._app.bot.send_message = AsyncMock()
 
@@ -319,11 +334,11 @@ class TestExecuteCallOrder:
         bot = _make_telegram_bot()
         signal = _make_call_signal(strike=50.0, cost_basis=47.50)
 
-        mock_client = MagicMock()
+        mock_client = _make_client_mock()
         mock_client.preview_options_order.return_value = {"PreviewIds": None}
         mock_client.place_options_order.return_value = {"orderId": "ORD999"}
 
-        mock_db = MagicMock()
+        mock_db = _make_db_mock()
         mock_db.get_active_cycle.return_value = self._make_active_cycle()
         bot._app.bot.send_message = AsyncMock()
 
@@ -355,8 +370,8 @@ class TestExecuteCallOrder:
         # strike=50.0 but cost_basis=52.0 — stale signal, strike is now below basis
         signal = _make_call_signal(strike=50.0, cost_basis=47.50)
 
-        mock_client = MagicMock()
-        mock_db = MagicMock()
+        mock_client = _make_client_mock()
+        mock_db = _make_db_mock()
         # Simulate DB returning a cycle where cost_basis is now 52.0 (higher than strike)
         mock_db.get_active_cycle.return_value = self._make_active_cycle(cost_basis=52.0)
         bot._app.bot.send_message = AsyncMock()
