@@ -267,13 +267,21 @@ class TestSchedulerAutoExecute:
         ), "Crash day check must use skip_approval=True"
 
     def test_pump_day_check_uses_skip_approval(self):
-        """CRITICAL: Pump day check must pass skip_approval=True."""
-        # Count occurrences of skip_approval=True in scheduler
+        """CRITICAL: Pump day check must pass skip_approval=True.
+
+        Crash and pump day flows share _job_momentum_signal_check which
+        calls execute_signal(signal, skip_approval=True). Both wrappers must
+        route through that shared helper so the skip_approval guarantee holds.
+        """
         with open("src/smart_scheduler.py") as f:
             content = f.read()
 
-        count = content.count("skip_approval=True")
-        assert count >= 2, f"Expected at least 2 skip_approval=True (crash+pump), found {count}"
+        assert (
+            "execute_signal(signal, skip_approval=True)" in content
+        ), "Momentum signal check must use skip_approval=True"
+        # Both wrappers must delegate to the shared momentum helper
+        assert "_job_momentum_signal_check" in content
+        assert "PUMP_DAY_CHECK" in content and "CRASH_DAY_CHECK" in content
 
 
 class TestCrashDayStatusDataclass:
