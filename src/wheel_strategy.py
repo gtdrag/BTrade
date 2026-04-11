@@ -116,6 +116,28 @@ class WheelStrategy:
     If all three pass, returns a PutSignal for Telegram approval flow.
     """
 
+    # --- Strategy constants (consolidated to prevent magic number drift) ---
+    # Put entry delta range — balance of premium vs assignment risk.
+    PUT_DELTA_MIN: float = 0.20
+    PUT_DELTA_MAX: float = 0.30
+    # Call entry delta range — more conservative to reduce called-away risk.
+    CALL_DELTA_MIN: float = 0.25
+    CALL_DELTA_MAX: float = 0.35
+    # Alternative strike ranges shown in the Telegram "Adjust" flow — wider
+    # than entry to give the user meaningful alternatives. Kept here so the
+    # UI layer doesn't hardcode its own magic numbers.
+    PUT_ADJUST_DELTA_MIN: float = 0.15
+    PUT_ADJUST_DELTA_MAX: float = 0.40
+    CALL_ADJUST_DELTA_MIN: float = 0.20
+    CALL_ADJUST_DELTA_MAX: float = 0.45
+    # Profit management thresholds
+    PROFIT_TARGET_PCT: float = 0.50   # Close when ask <= 50% of entry premium
+    POSITION_TESTED_PCT: float = 0.02  # Within 2% of strike = "tested"
+    DTE_WARNING_DAYS: int = 21        # Alert at or below 21 DTE
+    MAX_ROLL_COUNT: int = 2           # Max rolls per position
+    # Signal generation threshold
+    PULLBACK_THRESHOLD_PCT: float = -2.0  # IBIT must drop >=2% from 5-day high
+
     def __init__(
         self,
         client,
@@ -125,12 +147,13 @@ class WheelStrategy:
         self.client = client          # ETradeClient or MockETradeClient
         self.db = db
         self.account_id_key = account_id_key
-        self.pullback_threshold = -2.0  # IBIT must drop >= 2% from 5-day high
-        self.delta_min = 0.20
-        self.delta_max = 0.30
-        self.call_delta_min = 0.25
-        self.call_delta_max = 0.35
-        self.profit_target_pct = 0.50  # Close when 50% of premium captured
+        # Instance copies — can be overridden per-instance if needed for testing
+        self.pullback_threshold = self.PULLBACK_THRESHOLD_PCT
+        self.delta_min = self.PUT_DELTA_MIN
+        self.delta_max = self.PUT_DELTA_MAX
+        self.call_delta_min = self.CALL_DELTA_MIN
+        self.call_delta_max = self.CALL_DELTA_MAX
+        self.profit_target_pct = self.PROFIT_TARGET_PCT
 
     def get_put_signal(self) -> Optional[PutSignal]:
         """Check conditions and return a PutSignal if all gates pass.

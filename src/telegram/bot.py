@@ -990,28 +990,38 @@ class TelegramBot(
     async def _handle_put_adjust(self, query: Any, data: str) -> None:
         """Show 3-5 nearby alternative put strikes for user selection.
 
-        Filters the stored chain to puts with abs(delta) in [0.15, 0.40],
-        finds strikes around the originally suggested strike, and renders them
-        as inline buttons so the user can pick one or reject all.
+        Filters the stored chain to puts with abs(delta) in the adjust
+        delta range (wider than entry range), finds strikes around the
+        originally suggested strike, and renders them as inline buttons
+        so the user can pick one or reject all.
         """
+        from ..wheel_strategy import WheelStrategy  # local — avoid circular
+
         chain = self._put_approval_chain or []
         signal = self._put_approval_signal
 
         # Extract callback_id suffix from the put_adjust_ prefix
         callback_id = data[len("put_adjust_") :]  # e.g. "put_HHMMSS"
 
+        delta_min = WheelStrategy.PUT_ADJUST_DELTA_MIN
+        delta_max = WheelStrategy.PUT_ADJUST_DELTA_MAX
+
         # Filter to wider delta range for alternatives
         candidates = [
             c
             for c in chain
-            if c.get("option_type") == "PUT" and 0.15 <= abs(float(c.get("delta", 0))) <= 0.40
+            if c.get("option_type") == "PUT"
+            and delta_min <= abs(float(c.get("delta", 0))) <= delta_max
         ]
         # Sort by strike ascending
         candidates.sort(key=lambda c: float(c.get("strike", 0)))
 
         if not candidates:
             await query.edit_message_text(
-                text="⚠️ No alternative strikes available in the 0.15–0.40 delta range.",
+                text=(
+                    f"⚠️ No alternative strikes available in the "
+                    f"{delta_min:.2f}–{delta_max:.2f} delta range."
+                ),
                 parse_mode="Markdown",
             )
             return
@@ -1372,10 +1382,13 @@ class TelegramBot(
     async def _handle_call_adjust(self, query: Any, data: str) -> None:
         """Show 3-5 nearby alternative call strikes for user selection.
 
-        Filters the stored chain to calls with delta in [0.20, 0.45], then applies a
-        HARD COST BASIS FILTER (T-04-10): only shows strikes >= cost_basis. If no
-        qualifying strikes exist, shows a warning instead of presenting options.
+        Filters the stored chain to calls in the call-adjust delta range,
+        then applies a HARD COST BASIS FILTER (T-04-10): only shows strikes
+        >= cost_basis. If no qualifying strikes exist, shows a warning
+        instead of presenting options.
         """
+        from ..wheel_strategy import WheelStrategy  # local — avoid circular
+
         chain = self._call_approval_chain or []
         signal = self._call_approval_signal
 
@@ -1385,13 +1398,16 @@ class TelegramBot(
         # Cost basis from signal (protected by T-04-10)
         cost_basis = signal.cost_basis if signal else 0.0
 
+        delta_min = WheelStrategy.CALL_ADJUST_DELTA_MIN
+        delta_max = WheelStrategy.CALL_ADJUST_DELTA_MAX
+
         # Filter to CALL contracts with wider delta range for alternatives
         # HARD FILTER: only strikes >= cost_basis (T-04-10)
         candidates = [
             c
             for c in chain
             if c.get("option_type") == "CALL"
-            and 0.20 <= abs(float(c.get("delta", 0))) <= 0.45
+            and delta_min <= abs(float(c.get("delta", 0))) <= delta_max
             and float(c.get("strike", 0)) >= cost_basis
         ]
         # Sort by strike ascending
