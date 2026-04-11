@@ -9,9 +9,12 @@ Currently provides:
   never reset it or the _db_instance singleton, so subsequent tests
   that called get_database() could reach into a stale tmp_path or
   observe the wrong instance under test ordering changes.
+- `make_telegram_bot()` shared factory — addresses TESTS.md [HIGH]
+  HI-01 and [LOW] LO-02 (four drift-prone copies of the same helper).
 """
 
 import os
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -40,3 +43,37 @@ def _reset_database_singleton_and_env():
             os.environ.pop("DATABASE_PATH", None)
         else:
             os.environ["DATABASE_PATH"] = original_db_path
+
+
+def make_telegram_bot(token: str = "fake_token", chat_id: str = "12345"):
+    """Build a real TelegramBot instance via its actual __init__ (HI-01/LO-02).
+
+    Previously, each test file (test_put_approval, test_call_approval,
+    test_profit_management) had its own copy of a `_make_telegram_bot()`
+    helper that used `TelegramBot.__new__(TelegramBot)` to skip __init__
+    and then manually poked ~20 instance attributes. Those copies had
+    already drifted: test_profit_management set `_roll_approval` but
+    test_put_approval / test_call_approval did not, and any new attribute
+    added to `TelegramBot.__init__` had to be backported by hand to every
+    copy — otherwise tests got false-negative AttributeErrors under rare
+    code paths.
+
+    Calling the real `__init__` with explicit token/chat_id avoids the
+    "TELEGRAM_BOT_TOKEN not set" ValueError without needing to bypass the
+    constructor, so every attribute set by `__init__` exists with the
+    same type and default the production bot sees. `_app` is replaced
+    with a MagicMock after construction because tests need to capture
+    `bot._app.bot.send_message(...)` calls.
+    """
+    from src.telegram.bot import TelegramBot
+
+    bot = TelegramBot(
+        token=token,
+        chat_id=chat_id,
+        approval_timeout_minutes=10,
+    )
+    # The real __init__ leaves _app=None; tests need a mock so
+    # `bot._app.bot.send_message(...)` can be asserted against.
+    bot._app = MagicMock()
+    bot._app.bot.send_message = AsyncMock()
+    return bot

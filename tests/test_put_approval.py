@@ -24,6 +24,7 @@ from src.database import Database
 from src.etrade_client import ETradeClient
 from src.telegram.utils import ApprovalResult
 from src.wheel_strategy import PutSignal
+from tests.conftest import make_telegram_bot as _make_telegram_bot  # HI-01 / LO-02
 
 
 def _make_db_mock() -> MagicMock:
@@ -101,41 +102,6 @@ def _make_chain(strikes=(46.0, 47.0, 48.0, 49.0, 50.0)) -> list:
             }
         )
     return contracts
-
-
-def _make_telegram_bot():
-    """Create a minimal TelegramBot-like mock with required instance vars."""
-    from src.telegram.bot import TelegramBot
-
-    # Patch dependencies so __init__ doesn't fail without real tokens
-    with patch("src.telegram.bot.AnalysisCommandsMixin"), patch(
-        "src.telegram.bot.AuthCommandsMixin"
-    ), patch("src.telegram.bot.BacktestCommandsMixin"), patch(
-        "src.telegram.bot.TradingCommandsMixin"
-    ):
-        bot = TelegramBot.__new__(TelegramBot)
-
-    # Manually set required instance vars
-    bot.token = "fake_token"
-    bot.chat_id = "12345"
-    bot.approval_timeout = 600
-    bot.scheduler = None
-    bot.trading_bot = None
-    bot._is_paused = False
-    bot._pending_auth_request = None
-    bot._app = MagicMock()
-    bot._pending_approval = None
-    bot._approval_event = None
-    bot._approval_result = None
-    bot._pending_sellall = None
-    bot._is_running = False
-    from src.telegram.approval_flow import ApprovalFlow
-
-    bot._put_approval = ApprovalFlow()
-    bot._call_approval = ApprovalFlow()
-    bot._btc_approval = ApprovalFlow()
-    bot._roll_approval = ApprovalFlow()
-    return bot
 
 
 # ---------------------------------------------------------------------------
