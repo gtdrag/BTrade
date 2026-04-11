@@ -272,18 +272,11 @@ class WheelStrategy:
         Returns:
             The contract dict with the highest bid in the delta range, or None.
         """
-        chain: List[Dict] = self.client.get_ibit_options_chain()
-
-        puts = [c for c in chain if c["option_type"] == "PUT"]
-        target_puts = [
-            c for c in puts
-            if self.delta_min <= abs(c["delta"]) <= self.delta_max
-        ]
-
-        if not target_puts:
-            return None
-
-        return max(target_puts, key=lambda c: c["bid"])
+        return self._select_strike(
+            option_type="PUT",
+            delta_min=self.delta_min,
+            delta_max=self.delta_max,
+        )
 
     def select_call_strike(self, cost_basis: float) -> Optional[Dict]:
         """Fetch the options chain and select the optimal covered call strike.
@@ -301,19 +294,46 @@ class WheelStrategy:
         Returns:
             The contract dict with the highest bid that passes all filters, or None.
         """
+        return self._select_strike(
+            option_type="CALL",
+            delta_min=self.call_delta_min,
+            delta_max=self.call_delta_max,
+            min_strike=cost_basis,  # T-04-01: hard cost basis filter
+        )
+
+    def _select_strike(
+        self,
+        option_type: str,
+        delta_min: float,
+        delta_max: float,
+        min_strike: Optional[float] = None,
+    ) -> Optional[Dict]:
+        """Shared strike-selection logic for puts and calls.
+
+        Fetches the chain, filters by option type and delta range, optionally
+        enforces a minimum strike (cost basis floor for calls), and returns
+        the contract with the highest bid.
+
+        Args:
+            option_type: "PUT" or "CALL"
+            delta_min: Minimum absolute delta (inclusive)
+            delta_max: Maximum absolute delta (inclusive)
+            min_strike: Optional lower bound on strike price (exclusive filter
+                        for puts — skipped if None; hard filter for calls).
+
+        Returns:
+            The contract dict with the highest bid that passes all filters, or None.
+        """
         chain: List[Dict] = self.client.get_ibit_options_chain()
-
-        calls = [c for c in chain if c["option_type"] == "CALL"]
-        target_calls = [
-            c for c in calls
-            if self.call_delta_min <= abs(c["delta"]) <= self.call_delta_max
-            and float(c["strike"]) >= cost_basis  # T-04-01: hard cost basis filter
+        candidates = [
+            c for c in chain
+            if c["option_type"] == option_type
+            and delta_min <= abs(c["delta"]) <= delta_max
+            and (min_strike is None or float(c["strike"]) >= min_strike)
         ]
-
-        if not target_calls:
+        if not candidates:
             return None
-
-        return max(target_calls, key=lambda c: c["bid"])
+        return max(candidates, key=lambda c: c["bid"])
 
     def get_call_signal(self) -> Optional[CallSignal]:
         """Check conditions and return a CallSignal if all gates pass.
