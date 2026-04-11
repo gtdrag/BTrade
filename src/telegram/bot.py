@@ -8,7 +8,7 @@ import asyncio
 import logging
 import os
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
@@ -143,6 +143,56 @@ class TelegramBot(
         # Extract trailing id from the data — last underscore-separated token
         tail = data.rsplit("_", 1)[-1]
         return tail != expected_id
+
+    def _preview_and_place_option(
+        self,
+        client: Any,
+        account_id_key: str,
+        option_type: str,
+        expiry_year: int,
+        expiry_month: int,
+        expiry_day: int,
+        strike: float,
+        action: str,
+        quantity: int,
+        price: float,
+    ) -> Tuple[Dict[str, Any], Optional[str]]:
+        """Run the standard preview + place flow for an options order.
+
+        Returns:
+            Tuple of (place_response, order_id). The order_id may be None if
+            neither response shape contained one (caller should treat as
+            "pending" or "unknown").
+        """
+        preview_response = client.preview_options_order(
+            account_id_key,
+            "IBIT",
+            option_type,
+            expiry_year,
+            expiry_month,
+            expiry_day,
+            strike,
+            action,
+            quantity,
+            price,
+        )
+        preview_ids = preview_response.get("PreviewIds")
+
+        place_response = client.place_options_order(
+            account_id_key,
+            "IBIT",
+            option_type,
+            expiry_year,
+            expiry_month,
+            expiry_day,
+            strike,
+            action,
+            quantity,
+            price,
+            preview_ids=preview_ids,
+        )
+
+        return place_response, extract_order_id(place_response)
 
     def _is_authorized(self, update: Update) -> bool:
         """
@@ -891,10 +941,9 @@ class TelegramBot(
             # Use bid as limit price (conservative for sell-to-open)
             limit_price = signal.premium
 
-            # Preview first
-            preview_response = client.preview_options_order(
+            _place_response, order_id = self._preview_and_place_option(
+                client,
                 account_id_key,
-                "IBIT",
                 "PUT",
                 signal.expiry_year,
                 signal.expiry_month,
@@ -904,24 +953,6 @@ class TelegramBot(
                 1,
                 limit_price,
             )
-            preview_ids = preview_response.get("PreviewIds")
-
-            # Place the order
-            place_response = client.place_options_order(
-                account_id_key,
-                "IBIT",
-                "PUT",
-                signal.expiry_year,
-                signal.expiry_month,
-                signal.expiry_day,
-                signal.strike,
-                "SELL_OPEN",
-                1,
-                limit_price,
-                preview_ids=preview_ids,
-            )
-
-            order_id = extract_order_id(place_response)
 
             # Record in DB — only after successful placement (T-03-08).
             # open_short_put_cycle() groups create + transition + open_position
@@ -1306,10 +1337,9 @@ class TelegramBot(
             # Use bid as limit price (conservative for sell-to-open)
             limit_price = signal.premium
 
-            # Preview first
-            preview_response = client.preview_options_order(
+            _place_response, order_id = self._preview_and_place_option(
+                client,
                 account_id_key,
-                "IBIT",
                 "CALL",
                 signal.expiry_year,
                 signal.expiry_month,
@@ -1319,24 +1349,6 @@ class TelegramBot(
                 1,
                 limit_price,
             )
-            preview_ids = preview_response.get("PreviewIds")
-
-            # Place the order
-            place_response = client.place_options_order(
-                account_id_key,
-                "IBIT",
-                "CALL",
-                signal.expiry_year,
-                signal.expiry_month,
-                signal.expiry_day,
-                signal.strike,
-                "SELL_OPEN",
-                1,
-                limit_price,
-                preview_ids=preview_ids,
-            )
-
-            order_id = extract_order_id(place_response)
 
             # Record in DB — only after successful placement
             cycle_id = cycle["id"]
@@ -1572,10 +1584,9 @@ class TelegramBot(
                 position.get("expiry_date", "")
             )
 
-            # Preview order
-            preview_response = client.preview_options_order(
+            _place_response, order_id = self._preview_and_place_option(
+                client,
                 account_id_key,
-                "IBIT",
                 option_type,
                 expiry_year,
                 expiry_month,
@@ -1585,24 +1596,6 @@ class TelegramBot(
                 quantity,
                 close_price,
             )
-            preview_ids = preview_response.get("PreviewIds")
-
-            # Place order
-            place_response = client.place_options_order(
-                account_id_key,
-                "IBIT",
-                option_type,
-                expiry_year,
-                expiry_month,
-                expiry_day,
-                strike_price,
-                "BUY_CLOSE",
-                quantity,
-                close_price,
-                preview_ids=preview_ids,
-            )
-
-            order_id = extract_order_id(place_response)
 
             # DB mutations — only after successful order placement (T-05-06)
             db.close_wheel_position(position["id"], close_price)
@@ -1909,9 +1902,9 @@ class TelegramBot(
 
         # Step 1: BTC current position
         try:
-            preview_response = client.preview_options_order(
+            btc_result, _btc_order_id_unused = self._preview_and_place_option(
+                client,
                 account_id_key,
-                "IBIT",
                 option_type,
                 expiry_year,
                 expiry_month,
@@ -1920,21 +1913,6 @@ class TelegramBot(
                 "BUY_CLOSE",
                 quantity,
                 btc_price,
-            )
-            preview_ids = preview_response.get("PreviewIds")
-
-            btc_result = client.place_options_order(
-                account_id_key,
-                "IBIT",
-                option_type,
-                expiry_year,
-                expiry_month,
-                expiry_day,
-                strike_price,
-                "BUY_CLOSE",
-                quantity,
-                btc_price,
-                preview_ids=preview_ids,
             )
         except Exception as e:
             # BTC failed — do NOT modify any DB state
@@ -1966,9 +1944,9 @@ class TelegramBot(
         new_expiry_day = int(new_contract.get("expiry_day", 0))
 
         try:
-            sto_preview = client.preview_options_order(
+            sto_result, _sto_order_id_unused = self._preview_and_place_option(
+                client,
                 account_id_key,
-                "IBIT",
                 option_type,
                 new_expiry_year,
                 new_expiry_month,
@@ -1977,21 +1955,6 @@ class TelegramBot(
                 "SELL_OPEN",
                 quantity,
                 new_bid,
-            )
-            sto_preview_ids = sto_preview.get("PreviewIds")
-
-            sto_result = client.place_options_order(
-                account_id_key,
-                "IBIT",
-                option_type,
-                new_expiry_year,
-                new_expiry_month,
-                new_expiry_day,
-                new_strike,
-                "SELL_OPEN",
-                quantity,
-                new_bid,
-                preview_ids=sto_preview_ids,
             )
         except Exception as e:
             # STO failed after BTC succeeded — transition cycle to safe state
