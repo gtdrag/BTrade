@@ -124,6 +124,80 @@ class TelegramBot(
         tail = data.rsplit("_", 1)[-1]
         return tail != expected_id
 
+    def _build_alt_signal_from_chain(
+        self,
+        chain: List[Dict],
+        option_type: str,
+        alt_strike: float,
+        original_signal: Any,
+    ) -> Optional[Any]:
+        """Rebuild a PutSignal or CallSignal from a chain entry at alt_strike.
+
+        Used when the user selects an alternative strike from the adjust
+        flow — we need to construct a fresh signal from the matching chain
+        entry, falling back to the original signal's values for any missing
+        fields.
+
+        Returns None if no matching chain entry is found (caller should
+        keep the original signal).
+
+        The fields shared by PutSignal and CallSignal (OptionSignal base)
+        are identical. Only the subclass-specific fields differ:
+          - PutSignal: max_risk, pullback_pct
+          - CallSignal: total_premium, cost_basis
+        """
+        matching = next(
+            (
+                c
+                for c in (chain or [])
+                if c.get("option_type") == option_type
+                and abs(float(c.get("strike", 0)) - alt_strike) < 0.01
+            ),
+            None,
+        )
+        if not matching:
+            return None
+
+        expiry_date = normalize_expiry_date(
+            matching.get("expiry_date", original_signal.expiry_date)
+        )
+
+        # Shared OptionSignal fields (kwargs)
+        common = dict(
+            strike=float(matching["strike"]),
+            expiry_date=expiry_date,
+            expiry_year=int(matching.get("expiry_year", original_signal.expiry_year)),
+            expiry_month=int(matching.get("expiry_month", original_signal.expiry_month)),
+            expiry_day=int(matching.get("expiry_day", original_signal.expiry_day)),
+            delta=float(matching.get("delta", original_signal.delta)),
+            premium=float(matching.get("bid", original_signal.premium)),
+            dte=int(matching.get("dte", original_signal.dte)),
+            symbol=str(matching.get("symbol", original_signal.symbol)),
+            iv=float(matching.get("iv", original_signal.iv)),
+            gamma=float(matching.get("gamma", original_signal.gamma)),
+            theta=float(matching.get("theta", original_signal.theta)),
+            vega=float(matching.get("vega", original_signal.vega)),
+        )
+
+        if option_type == "PUT":
+            from ..wheel_strategy import PutSignal  # local import — avoid circular
+
+            return PutSignal(
+                **common,
+                max_risk=float(matching["strike"]) * 100.0,
+                pullback_pct=original_signal.pullback_pct,
+            )
+        elif option_type == "CALL":
+            from ..wheel_strategy import CallSignal  # local import — avoid circular
+
+            return CallSignal(
+                **common,
+                total_premium=float(matching.get("bid", original_signal.premium)) * 100,
+                cost_basis=original_signal.cost_basis,
+            )
+        else:
+            raise ValueError(f"Unsupported option_type: {option_type!r}")
+
     def _is_authorized(self, update: Update) -> bool:
         """
         Check if the sender is authorized to use this bot.
@@ -860,44 +934,10 @@ class TelegramBot(
 
             # result is either "approved" or a numeric string (alternative strike selected)
             if result is not None and result != "approved":
-                # User selected an alternative strike from the adjust flow
                 try:
                     alt_strike = float(result)
-                    # Find the matching contract in the stored chain
-                    matching = next(
-                        (
-                            c
-                            for c in (chain or [])
-                            if c.get("option_type") == "PUT"
-                            and abs(float(c.get("strike", 0)) - alt_strike) < 0.01
-                        ),
-                        None,
-                    )
-                    if matching:
-                        from ..wheel_strategy import (  # noqa: N817
-                            PutSignal as PS,  # local import — avoid circular
-                        )
-
-                        expiry_date = normalize_expiry_date(
-                            matching.get("expiry_date", signal.expiry_date)
-                        )
-                        alt_signal = PS(
-                            strike=float(matching["strike"]),
-                            expiry_date=expiry_date,
-                            expiry_year=int(matching.get("expiry_year", signal.expiry_year)),
-                            expiry_month=int(matching.get("expiry_month", signal.expiry_month)),
-                            expiry_day=int(matching.get("expiry_day", signal.expiry_day)),
-                            delta=float(matching.get("delta", signal.delta)),
-                            premium=float(matching.get("bid", signal.premium)),
-                            dte=int(matching.get("dte", signal.dte)),
-                            max_risk=float(matching["strike"]) * 100.0,
-                            symbol=str(matching.get("symbol", signal.symbol)),
-                            iv=float(matching.get("iv", signal.iv)),
-                            gamma=float(matching.get("gamma", signal.gamma)),
-                            theta=float(matching.get("theta", signal.theta)),
-                            vega=float(matching.get("vega", signal.vega)),
-                            pullback_pct=signal.pullback_pct,
-                        )
+                    alt_signal = self._build_alt_signal_from_chain(chain, "PUT", alt_strike, signal)
+                    if alt_signal is not None:
                         signal = alt_signal
                     else:
                         logger.warning(
@@ -1174,44 +1214,12 @@ class TelegramBot(
 
             # result is either "approved" or a numeric string (alternative strike selected)
             if result is not None and result != "approved":
-                # User selected an alternative strike from the adjust flow
                 try:
                     alt_strike = float(result)
-                    # Find the matching CALL contract in the stored chain
-                    matching = next(
-                        (
-                            c
-                            for c in (chain or [])
-                            if c.get("option_type") == "CALL"
-                            and abs(float(c.get("strike", 0)) - alt_strike) < 0.01
-                        ),
-                        None,
+                    alt_signal = self._build_alt_signal_from_chain(
+                        chain, "CALL", alt_strike, signal
                     )
-                    if matching:
-                        from ..wheel_strategy import (  # noqa: N817
-                            CallSignal as CS,  # local import — avoid circular
-                        )
-
-                        expiry_date = normalize_expiry_date(
-                            matching.get("expiry_date", signal.expiry_date)
-                        )
-                        alt_signal = CS(
-                            strike=float(matching["strike"]),
-                            expiry_date=expiry_date,
-                            expiry_year=int(matching.get("expiry_year", signal.expiry_year)),
-                            expiry_month=int(matching.get("expiry_month", signal.expiry_month)),
-                            expiry_day=int(matching.get("expiry_day", signal.expiry_day)),
-                            delta=float(matching.get("delta", signal.delta)),
-                            premium=float(matching.get("bid", signal.premium)),
-                            dte=int(matching.get("dte", signal.dte)),
-                            total_premium=float(matching.get("bid", signal.premium)) * 100,
-                            symbol=str(matching.get("symbol", signal.symbol)),
-                            iv=float(matching.get("iv", signal.iv)),
-                            gamma=float(matching.get("gamma", signal.gamma)),
-                            theta=float(matching.get("theta", signal.theta)),
-                            vega=float(matching.get("vega", signal.vega)),
-                            cost_basis=signal.cost_basis,
-                        )
+                    if alt_signal is not None:
                         signal = alt_signal
                     else:
                         logger.warning(
