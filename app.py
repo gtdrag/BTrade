@@ -11,12 +11,17 @@ Features:
 - Bold pop-art design
 """
 
+from __future__ import annotations
+
 import json
 import os
-from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from dotenv import load_dotenv
+
+if TYPE_CHECKING:
+    import pandas as pd  # noqa: F401  — used in string annotations
 
 # Settings file for persistence across refreshes
 SETTINGS_FILE = Path(__file__).parent / ".user_settings.json"
@@ -301,7 +306,9 @@ def init_session_state():
     if "scheduler" not in st.session_state:
         st.session_state.scheduler = None
     if "last_refresh" not in st.session_state:
-        st.session_state.last_refresh = datetime.now()
+        from src.utils import get_et_now
+
+        st.session_state.last_refresh = get_et_now()
     if "dialog_open" not in st.session_state:
         st.session_state.dialog_open = False
 
@@ -364,7 +371,9 @@ def get_or_create_bot():
 
 def get_cached_status(bot):
     """Get bot status from session cache or fetch if stale (>30s)."""
-    now = datetime.now()
+    from src.utils import get_et_now
+
+    now = get_et_now()
     cache_key = "cached_status"
     cache_time_key = "cached_status_time"
 
@@ -383,7 +392,9 @@ def get_cached_status(bot):
 
 def get_cached_portfolio(bot):
     """Get portfolio from session cache or fetch if stale (>30s)."""
-    now = datetime.now()
+    from src.utils import get_et_now
+
+    now = get_et_now()
     cache_key = "cached_portfolio"
     cache_time_key = "cached_portfolio_time"
 
@@ -676,7 +687,7 @@ def render_status_bar(bot, scheduler, cached_status):
 # ---------------------------------------------------------------------------
 
 
-def _build_wheel_positions_df(positions: list, now_date) -> "pd.DataFrame":
+def _build_wheel_positions_df(positions: list, now_date) -> pd.DataFrame:
     """Build DataFrame for active (OPEN) options positions table.
 
     Args:
@@ -687,8 +698,9 @@ def _build_wheel_positions_df(positions: list, now_date) -> "pd.DataFrame":
         pandas DataFrame with columns [Type, Strike, Expiry, DTE, Delta, Theta, Premium],
         or empty DataFrame if no OPEN positions.
     """
-    import pandas as pd
     from datetime import date as date_cls
+
+    import pandas as pd
 
     if not positions:
         return pd.DataFrame()
@@ -713,7 +725,7 @@ def _build_wheel_positions_df(positions: list, now_date) -> "pd.DataFrame":
     return pd.DataFrame(rows)
 
 
-def _build_cycle_history_df(cycles: list) -> "pd.DataFrame":
+def _build_cycle_history_df(cycles: list) -> pd.DataFrame:
     """Build DataFrame for completed wheel cycles table.
 
     Args:
@@ -747,7 +759,9 @@ def _build_cycle_history_df(cycles: list) -> "pd.DataFrame":
                 closed_dt = dt_cls.fromisoformat(closed_at)
                 days_held = max(1, (closed_dt - opened_dt).days)
                 total_prem_dollars = (put_prem + cc_prem) * 100
-                annualized = f"{(total_prem_dollars / (cost_basis * 100)) * (365 / days_held) * 100:.1f}%"
+                annualized = (
+                    f"{(total_prem_dollars / (cost_basis * 100)) * (365 / days_held) * 100:.1f}%"
+                )
             except Exception:
                 annualized = "N/A"
 
@@ -791,6 +805,7 @@ def render_wheel_section():
     - Fallback message when no active cycle
     """
     import pandas as pd
+
     from src.database import get_database
     from src.utils import get_et_now
 
@@ -842,8 +857,11 @@ def render_wheel_section():
                 [
                     {
                         "Cycle": f"#{c['id']}",
-                        "Premium ($)": ((c.get("put_premium_received") or 0.0)
-                                        + (c.get("covered_call_premiums_collected") or 0.0)) * 100,
+                        "Premium ($)": (
+                            (c.get("put_premium_received") or 0.0)
+                            + (c.get("covered_call_premiums_collected") or 0.0)
+                        )
+                        * 100,
                     }
                     for c in reversed(history)
                 ]
@@ -860,7 +878,9 @@ def render_wheel_section():
 @st.fragment(run_every=45)
 def render_refresh_indicator():
     """Render the refresh indicator with auto-refresh every 45 seconds."""
-    st.session_state.last_refresh = datetime.now()
+    from src.utils import get_et_now
+
+    st.session_state.last_refresh = get_et_now()
     st.markdown(
         """
     <div class="refresh-indicator">
@@ -1302,7 +1322,9 @@ def main():
         st.error(f"🚨 Portfolio Error: {portfolio['error']}")
 
     # Auto-refresh every 45 seconds
-    st.session_state.last_refresh = datetime.now()
+    from src.utils import get_et_now
+
+    st.session_state.last_refresh = get_et_now()
 
     # Main content area - compact padding for single screen
     st.markdown(

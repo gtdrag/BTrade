@@ -913,6 +913,10 @@ class TelegramBot(
         except Exception as e:
             logger.error("Failed to request put approval: %s", e, exc_info=True)
             return ApprovalResult.ERROR
+        finally:
+            # Release chain reference to avoid memory retention between cycles
+            self._put_approval.signal = None
+            self._put_approval.chain = None
 
     async def _execute_put_order(
         self,
@@ -1223,6 +1227,10 @@ class TelegramBot(
         except Exception as e:
             logger.error("Failed to request call approval: %s", e, exc_info=True)
             return ApprovalResult.ERROR
+        finally:
+            # Release chain reference to avoid memory retention between cycles
+            self._call_approval.signal = None
+            self._call_approval.chain = None
 
     async def _execute_call_order(
         self,
@@ -1408,6 +1416,10 @@ class TelegramBot(
         except Exception as e:
             logger.error("Failed to request BTC approval: %s", e, exc_info=True)
             return ApprovalResult.ERROR
+        finally:
+            # Release chain/position references to avoid memory retention
+            self._btc_approval.position = None
+            self._btc_approval.chain = None
 
     async def _execute_btc_order(
         self,
@@ -1669,6 +1681,10 @@ class TelegramBot(
         except Exception as e:
             logger.error("Failed to request roll approval: %s", e, exc_info=True)
             return ApprovalResult.ERROR
+        finally:
+            # Release position/contract references to avoid memory retention
+            self._roll_approval.position = None
+            self._roll_approval.new_contract = None
 
     async def _execute_roll(
         self,
