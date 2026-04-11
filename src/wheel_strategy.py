@@ -36,7 +36,7 @@ Threat mitigations:
 import logging
 from dataclasses import dataclass
 from datetime import date
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import yfinance as yf
 
@@ -63,7 +63,7 @@ class OptionSignal:
     expiry_month: int
     expiry_day: int
     delta: float
-    premium: float   # bid price per share
+    premium: float  # bid price per share
     dte: int
     symbol: str
     iv: float
@@ -87,7 +87,7 @@ class CallSignal(OptionSignal):
     """
 
     total_premium: float  # premium * 100 (one contract)
-    cost_basis: float     # adjusted cost basis — for display and re-validation
+    cost_basis: float  # adjusted cost basis — for display and re-validation
 
 
 @dataclass
@@ -99,7 +99,7 @@ class PutSignal(OptionSignal):
       pullback_pct < 0 indicates IBIT is below its 5-day high.
     """
 
-    max_risk: float      # strike * 100
+    max_risk: float  # strike * 100
     pullback_pct: float  # e.g. -3.2 means IBIT is 3.2% below 5-day high
 
 
@@ -129,10 +129,10 @@ class WheelStrategy:
     CALL_ADJUST_DELTA_MIN: float = 0.20
     CALL_ADJUST_DELTA_MAX: float = 0.45
     # Profit management thresholds
-    PROFIT_TARGET_PCT: float = 0.50   # Close when ask <= 50% of entry premium
+    PROFIT_TARGET_PCT: float = 0.50  # Close when ask <= 50% of entry premium
     POSITION_TESTED_PCT: float = 0.02  # Within 2% of strike = "tested"
-    DTE_WARNING_DAYS: int = 21        # Alert at or below 21 DTE
-    MAX_ROLL_COUNT: int = 2           # Max rolls per position
+    DTE_WARNING_DAYS: int = 21  # Alert at or below 21 DTE
+    MAX_ROLL_COUNT: int = 2  # Max rolls per position
     # Signal generation threshold
     PULLBACK_THRESHOLD_PCT: float = -2.0  # IBIT must drop >=2% from 5-day high
 
@@ -142,7 +142,7 @@ class WheelStrategy:
         db: Database,
         account_id_key: str = "default",
     ) -> None:
-        self.client = client          # ETradeClient or MockETradeClient
+        self.client = client  # ETradeClient or MockETradeClient
         self.db = db
         self.account_id_key = account_id_key
         # Instance copies — can be overridden per-instance if needed for testing
@@ -324,7 +324,8 @@ class WheelStrategy:
         """
         chain: List[Dict] = self.client.get_ibit_options_chain()
         candidates = [
-            c for c in chain
+            c
+            for c in chain
             if c["option_type"] == option_type
             and delta_min <= abs(c["delta"]) <= delta_max
             and (min_strike is None or float(c["strike"]) >= min_strike)
@@ -403,104 +404,139 @@ class WheelStrategy:
             cost_basis=cost_basis,
         )
 
-    def detect_and_process_expiry(self) -> Optional[str]:
-        """Check if the active put has expired or been assigned.
+    def _check_option_settled(self, cycle: dict) -> Tuple[Optional[dict], Optional[bool]]:
+        """Shared settlement check for SHORT_PUT and COVERED_CALL branches.
 
-        Reconciles the database record against live E*TRADE positions to determine
-        whether the sold put was assigned (IBIT shares delivered) or expired
-        worthless (OTM). Updates the state machine and logs every outcome.
+        Performs the steps that both branches of detect_and_process_expiry
+        previously duplicated inline:
+          1. Get the open option position for the cycle
+          2. Check if the expiry date has passed
+          3. Check if the option is still live in E*TRADE
+          4. Query IBIT equity positions
+
+        Returns:
+            (position, has_ibit_shares) if the option has settled
+                (expired and no longer live), where `position` is the
+                open option position row and `has_ibit_shares` is True
+                when IBIT shares are present in the account.
+            (None, None) if any early-exit condition applies — no open
+                position, expiry not yet passed, option still live, or
+                an E*TRADE API error occurred.
+
+        T-03-13 / T-04-04: API errors are caught and return None so the
+        caller does not mutate state on failure.
+        """
+        positions = self.db.get_cycle_positions(cycle["id"])
+        open_positions = [p for p in positions if p["status"] == "OPEN"]
+        if not open_positions:
+            logger.warning(
+                "detect_and_process_expiry: cycle %d in %s state has no open positions",
+                cycle["id"],
+                cycle["state"],
+            )
+            return None, None
+
+        pos = open_positions[-1]  # last (usually only) open position
+
+        try:
+            expiry = date.fromisoformat(pos["expiry_date"])
+        except (ValueError, TypeError) as exc:
+            logger.error(
+                "detect_and_process_expiry: bad expiry_date %r — %s",
+                pos.get("expiry_date"),
+                exc,
+            )
+            return None, None
+
+        today = get_et_now().date()
+        if today <= expiry:
+            logger.debug(
+                "detect_and_process_expiry: expiry %s not yet passed (today=%s), skipping",
+                expiry,
+                today,
+            )
+            return None, None
+
+        try:
+            live_options = self.client.get_options_positions(self.account_id_key)
+        except Exception as exc:
+            logger.error(
+                "detect_and_process_expiry: get_options_positions failed — %s; "
+                "skipping to retry next run (T-03-13/T-04-04)",
+                exc,
+            )
+            return None, None
+
+        live_symbols = {p["symbol"] for p in live_options}
+        if pos["symbol"] in live_symbols:
+            logger.debug(
+                "detect_and_process_expiry: option %s still in live positions, not settled yet",
+                pos["symbol"],
+            )
+            return None, None
+
+        try:
+            equity_positions = self.client.get_account_positions(self.account_id_key)
+        except Exception as exc:
+            logger.error(
+                "detect_and_process_expiry: get_account_positions failed — %s; "
+                "skipping to retry next run (T-03-13/T-04-04)",
+                exc,
+            )
+            return None, None
+
+        has_ibit_shares = any(
+            p.get("Product", {}).get("symbol") == "IBIT"
+            and p.get("Product", {}).get("securityType") == "EQ"
+            for p in equity_positions
+        )
+        return pos, has_ibit_shares
+
+    def detect_and_process_expiry(self) -> Optional[str]:
+        """Check if the active put or covered call has expired or settled.
+
+        Reconciles the database record against live E*TRADE positions to
+        determine the outcome of an expired option. Updates the state
+        machine and logs every outcome.
 
         Threat mitigations applied:
           T-03-11: Assignment requires BOTH put gone AND IBIT shares present.
-          T-03-12: Idempotency — returns None if cycle is already HOLDING_SHARES/CASH.
-          T-03-13: API errors are caught; state is NOT mutated on failure.
+          T-03-12: Idempotency — returns None if cycle is not in SHORT_PUT
+                   or COVERED_CALL state.
+          T-03-13 / T-04-04: API errors are caught; state is NOT mutated on
+                   failure.
           T-03-14: Every outcome logged via db.log_event() for audit trail.
 
         Returns:
-            "assigned"     if put was assigned (IBIT shares now in account),
-            "expired_otm"  if put expired worthless (no shares),
-            None           if no action needed (no cycle, wrong state, not expired,
-                           put still live, or API error).
+            "assigned"         put was assigned (IBIT shares delivered)
+            "expired_otm"      put expired worthless (no shares)
+            "called_away"      call was exercised (shares gone)
+            "call_expired_otm" covered call expired OTM (shares retained)
+            None               no action needed (see threat mitigations)
         """
-        # --- Step 1: Get active cycle ---
         cycle = self.db.get_active_cycle()
         if cycle is None:
             logger.debug("detect_and_process_expiry: no active cycle, skipping")
             return None
 
-        # --- Step 2: Branch on cycle state ---
         state = cycle["state"]
+        if state not in (WheelState.SHORT_PUT.value, WheelState.COVERED_CALL.value):
+            logger.debug(
+                "detect_and_process_expiry: cycle state is %s, skipping (no action for this state)",
+                state,
+            )
+            return None
+
+        pos, has_ibit_shares = self._check_option_settled(cycle)
+        if pos is None:
+            return None
 
         if state == WheelState.SHORT_PUT.value:
-            # ----------------------------------------------------------------
-            # SHORT_PUT branch: detect put assignment or OTM expiry
-            # ----------------------------------------------------------------
-
-            # --- Step 3: Get open positions ---
-            positions = self.db.get_cycle_positions(cycle["id"])
-            open_positions = [p for p in positions if p["status"] == "OPEN"]
-            if not open_positions:
-                logger.warning(
-                    "detect_and_process_expiry: cycle %d is SHORT_PUT but has no open positions",
-                    cycle["id"],
-                )
-                return None
-
-            put_pos = open_positions[0]  # one put per cycle in Phase 3
-
-            # --- Step 4: Check if expiry date has passed ---
-            expiry = date.fromisoformat(put_pos["expiry_date"])
-            today = get_et_now().date()
-            if today <= expiry:
-                logger.debug(
-                    "detect_and_process_expiry: expiry %s not yet passed (today=%s), skipping",
-                    expiry,
-                    today,
-                )
-                return None
-
-            # --- Step 5: Check if put is still live in E*TRADE (T-03-13: wrap API calls) ---
-            try:
-                live_options = self.client.get_options_positions(self.account_id_key)
-            except Exception as exc:
-                logger.error(
-                    "detect_and_process_expiry: get_options_positions failed — %s; "
-                    "skipping to retry next run (T-03-13)",
-                    exc,
-                )
-                return None
-
-            live_symbols = {p["symbol"] for p in live_options}
-            if put_pos["symbol"] in live_symbols:
-                # Put is still open — settlement not complete yet
-                logger.debug(
-                    "detect_and_process_expiry: put %s still in live positions, not settled yet",
-                    put_pos["symbol"],
-                )
-                return None
-
-            # --- Step 6: Determine assignment vs OTM expiry (T-03-11: require BOTH conditions) ---
-            try:
-                equity_positions = self.client.get_account_positions(self.account_id_key)
-            except Exception as exc:
-                logger.error(
-                    "detect_and_process_expiry: get_account_positions failed — %s; "
-                    "skipping to retry next run (T-03-13)",
-                    exc,
-                )
-                return None
-
-            ibit_shares = [
-                p for p in equity_positions
-                if p.get("Product", {}).get("symbol") == "IBIT"
-                and p.get("Product", {}).get("securityType") == "EQ"
-            ]
-
-            if ibit_shares:
-                # --- ASSIGNMENT PATH (atomic transition + position close) ---
+            if has_ibit_shares:
+                # --- ASSIGNMENT (T-03-11: both put gone AND shares present) ---
                 cost_basis = self.db.process_put_assignment(
                     cycle_id=cycle["id"],
-                    position_id=put_pos["id"],
+                    position_id=pos["id"],
                     shares_held=100,
                 )
                 logger.info(
@@ -521,166 +557,86 @@ class WheelStrategy:
                 )
                 return "assigned"
 
-            else:
-                # --- OTM EXPIRY PATH (atomic transition + position close) ---
-                realized_pnl = self.db.process_put_otm_expiry(
-                    cycle_id=cycle["id"],
-                    position_id=put_pos["id"],
-                )
-                logger.info(
-                    "detect_and_process_expiry: PUT EXPIRED OTM — premium=%.2f realized_pnl=%.2f",
-                    cycle["put_premium_received"],
-                    realized_pnl,
-                )
-                self.db.log_event(
-                    "INFO",
-                    "put_expired_otm",
-                    {
-                        "cycle_id": cycle["id"],
-                        "realized_pnl": realized_pnl,
-                    },
-                )
-                return "expired_otm"
-
-        elif state == WheelState.COVERED_CALL.value:
-            # ----------------------------------------------------------------
-            # COVERED_CALL branch: detect call-away or OTM call expiry
-            # (T-04-03: state gate, T-04-02: dual condition for call-away)
-            # ----------------------------------------------------------------
-
-            # --- Get open CALL position ---
-            positions = self.db.get_cycle_positions(cycle["id"])
-            open_positions = [p for p in positions if p["status"] == "OPEN"]
-            if not open_positions:
-                logger.warning(
-                    "detect_and_process_expiry: COVERED_CALL cycle %d has no open positions",
-                    cycle["id"],
-                )
-                return None
-
-            call_pos = open_positions[-1]  # most recent if multiple (shouldn't happen)
-
-            # --- Check if expiry date has passed ---
-            expiry = date.fromisoformat(call_pos["expiry_date"])
-            today = get_et_now().date()
-            if today <= expiry:
-                logger.debug(
-                    "detect_and_process_expiry: call expiry %s not yet passed (today=%s), "
-                    "skipping",
-                    expiry,
-                    today,
-                )
-                return None
-
-            # --- Check if call still live in E*TRADE (T-04-04: wrap API) ---
-            try:
-                live_options = self.client.get_options_positions(self.account_id_key)
-            except Exception as exc:
-                logger.error(
-                    "detect_and_process_expiry: get_options_positions failed — %s; "
-                    "skipping to retry next run (T-04-04)",
-                    exc,
-                )
-                return None
-
-            live_symbols = {p["symbol"] for p in live_options}
-            if call_pos["symbol"] in live_symbols:
-                # Settlement not yet complete
-                logger.debug(
-                    "detect_and_process_expiry: call %s still in live positions, not settled yet",
-                    call_pos["symbol"],
-                )
-                return None
-
-            # --- Check if IBIT shares still present (T-04-02: dual condition) ---
-            try:
-                equity_positions = self.client.get_account_positions(self.account_id_key)
-            except Exception as exc:
-                logger.error(
-                    "detect_and_process_expiry: get_account_positions failed — %s; "
-                    "skipping to retry next run (T-04-04)",
-                    exc,
-                )
-                return None
-
-            ibit_shares = [
-                p for p in equity_positions
-                if p.get("Product", {}).get("symbol") == "IBIT"
-                and p.get("Product", {}).get("securityType") == "EQ"
-            ]
-
-            if not ibit_shares:
-                # --- CALLED AWAY: call gone AND shares gone ---
-                # Full-cycle P&L = put premium + call premiums + share gain
-                # Share gain is measured against the put strike (what we paid
-                # on assignment), NOT against the adjusted cost basis — the
-                # adjusted cost basis already incorporates the put premium, so
-                # using it here would double-count the premium.
-                put_premium = (cycle["put_premium_received"] or 0.0) * 100
-                call_premiums = (cycle.get("covered_call_premiums_collected") or 0.0) * 100
-                call_strike = float(call_pos["strike"])
-                put_strike = float(cycle["put_strike"])
-                shares_pnl = (call_strike - put_strike) * 100
-                total_pnl = put_premium + call_premiums + shares_pnl
-
-                logger.info(
-                    "detect_and_process_expiry: CALLED AWAY — call_strike=%.2f "
-                    "total_pnl=%.2f (put_prem=%.2f call_prems=%.2f shares_pnl=%.2f)",
-                    call_strike,
-                    total_pnl,
-                    put_premium,
-                    call_premiums,
-                    shares_pnl,
-                )
-
-                self.db.transition_wheel_state(
-                    cycle["id"],
-                    WheelState.CASH,
-                    "called_away",
-                    realized_pnl=total_pnl,
-                )
-                self.db.close_wheel_position(call_pos["id"], close_premium=0.0)
-                self.db.log_event(
-                    "INFO",
-                    "called_away",
-                    {
-                        "cycle_id": cycle["id"],
-                        "call_strike": call_strike,
-                        "total_pnl": total_pnl,
-                    },
-                )  # T-04-05: audit trail
-                return "called_away"
-
-            else:
-                # --- OTM CALL EXPIRY: call gone, shares remain ---
-                logger.info(
-                    "detect_and_process_expiry: CALL EXPIRED OTM — cycle %d returns to "
-                    "HOLDING_SHARES",
-                    cycle["id"],
-                )
-
-                self.db.transition_wheel_state(
-                    cycle["id"],
-                    WheelState.HOLDING_SHARES,
-                    "call_expired_otm",
-                )
-                self.db.close_wheel_position(call_pos["id"], close_premium=0.0)
-                self.db.log_event(
-                    "INFO",
-                    "call_expired_otm",
-                    {
-                        "cycle_id": cycle["id"],
-                    },
-                )  # T-04-05: audit trail
-                return "call_expired_otm"
-
-        else:
-            # Not a state we handle (e.g., CASH, HOLDING_SHARES without a call) -- skip
-            logger.debug(
-                "detect_and_process_expiry: cycle state is %s, skipping (no action for this state)",
-                state,
+            # --- OTM EXPIRY (put gone, no shares) ---
+            realized_pnl = self.db.process_put_otm_expiry(
+                cycle_id=cycle["id"],
+                position_id=pos["id"],
             )
-            return None
+            logger.info(
+                "detect_and_process_expiry: PUT EXPIRED OTM — premium=%.2f realized_pnl=%.2f",
+                cycle["put_premium_received"],
+                realized_pnl,
+            )
+            self.db.log_event(
+                "INFO",
+                "put_expired_otm",
+                {
+                    "cycle_id": cycle["id"],
+                    "realized_pnl": realized_pnl,
+                },
+            )
+            return "expired_otm"
+
+        # state == WheelState.COVERED_CALL.value (guarded earlier)
+        if not has_ibit_shares:
+            # --- CALLED AWAY: call gone AND shares gone ---
+            # Full-cycle P&L = put premium + call premiums + share gain.
+            # Share gain is measured against the put strike (what we paid
+            # on assignment), NOT against the adjusted cost basis — the
+            # adjusted cost basis already incorporates the put premium, so
+            # using it here would double-count the premium.
+            put_premium = (cycle["put_premium_received"] or 0.0) * 100
+            call_premiums = (cycle.get("covered_call_premiums_collected") or 0.0) * 100
+            call_strike = float(pos["strike"])
+            put_strike = float(cycle["put_strike"])
+            shares_pnl = (call_strike - put_strike) * 100
+            total_pnl = put_premium + call_premiums + shares_pnl
+
+            logger.info(
+                "detect_and_process_expiry: CALLED AWAY — call_strike=%.2f "
+                "total_pnl=%.2f (put_prem=%.2f call_prems=%.2f shares_pnl=%.2f)",
+                call_strike,
+                total_pnl,
+                put_premium,
+                call_premiums,
+                shares_pnl,
+            )
+
+            self.db.transition_wheel_state(
+                cycle["id"],
+                WheelState.CASH,
+                "called_away",
+                realized_pnl=total_pnl,
+            )
+            self.db.close_wheel_position(pos["id"], close_premium=0.0)
+            self.db.log_event(
+                "INFO",
+                "called_away",
+                {
+                    "cycle_id": cycle["id"],
+                    "call_strike": call_strike,
+                    "total_pnl": total_pnl,
+                },
+            )  # T-04-05: audit trail
+            return "called_away"
+
+        # --- OTM CALL EXPIRY: call gone, shares remain ---
+        logger.info(
+            "detect_and_process_expiry: CALL EXPIRED OTM — cycle %d returns to HOLDING_SHARES",
+            cycle["id"],
+        )
+        self.db.transition_wheel_state(
+            cycle["id"],
+            WheelState.HOLDING_SHARES,
+            "call_expired_otm",
+        )
+        self.db.close_wheel_position(pos["id"], close_premium=0.0)
+        self.db.log_event(
+            "INFO",
+            "call_expired_otm",
+            {"cycle_id": cycle["id"]},
+        )  # T-04-05: audit trail
+        return "call_expired_otm"
 
     # =========================================================================
     # Profit management monitoring (Phase 05 — Plan 05-01)
@@ -709,7 +665,8 @@ class WheelStrategy:
             logger.warning(
                 "check_profit_target: symbol=%s has non-positive premium_received=%.2f, "
                 "skipping profit target check",
-                symbol, premium_received,
+                symbol,
+                premium_received,
             )
             return False
 
@@ -726,7 +683,12 @@ class WheelStrategy:
         result = profit_pct >= self.profit_target_pct
         logger.debug(
             "check_profit_target: symbol=%s premium=%.2f ask=%.2f profit_pct=%.2f%% target=%.0f%% hit=%s",
-            symbol, premium_received, current_ask, profit_pct * 100, self.profit_target_pct * 100, result,
+            symbol,
+            premium_received,
+            current_ask,
+            profit_pct * 100,
+            self.profit_target_pct * 100,
+            result,
         )
         return result
 
@@ -751,7 +713,10 @@ class WheelStrategy:
             result = distance_pct <= 0.02
             logger.debug(
                 "check_position_tested: ibit=%.2f strike=%.2f distance=%.2f%% tested=%s",
-                ibit_price, strike, distance_pct * 100, result,
+                ibit_price,
+                strike,
+                distance_pct * 100,
+                result,
             )
             return result
         except Exception as exc:
@@ -800,20 +765,20 @@ class WheelStrategy:
 
         # Filter by option type and DTE range
         candidates = [
-            c for c in chain
-            if c["option_type"] == option_type
-            and 30 <= int(c["dte"]) <= 45
+            c for c in chain if c["option_type"] == option_type and 30 <= int(c["dte"]) <= 45
         ]
 
         if option_type == "PUT":
             candidates = [
-                c for c in candidates
+                c
+                for c in candidates
                 if float(c["strike"]) < current_strike
                 and self.delta_min <= abs(float(c["delta"])) <= self.delta_max
             ]
         else:  # CALL
             candidates = [
-                c for c in candidates
+                c
+                for c in candidates
                 if float(c["strike"]) > current_strike
                 and self.call_delta_min <= abs(float(c["delta"])) <= self.call_delta_max
             ]
@@ -821,7 +786,8 @@ class WheelStrategy:
         if not candidates:
             logger.debug(
                 "select_roll_strike: no qualifying %s contracts further OTM than %.2f in 30-45 DTE",
-                option_type, current_strike,
+                option_type,
+                current_strike,
             )
             return None
 
@@ -862,7 +828,9 @@ class WheelStrategy:
 
         position = self.db.get_open_position_for_cycle(cycle["id"])
         if position is None:
-            logger.debug("run_monitoring_checks: no open position for cycle %d, skipping", cycle["id"])
+            logger.debug(
+                "run_monitoring_checks: no open position for cycle %d, skipping", cycle["id"]
+            )
             return _empty
 
         # T-05-05: wrap chain fetch in try/except; stale quotes must not trigger false actions
@@ -890,7 +858,10 @@ class WheelStrategy:
 
         logger.debug(
             "run_monitoring_checks: cycle=%d profit_target=%s tested=%s dte_warning=%s",
-            cycle["id"], profit_target_hit, position_tested, dte_warning,
+            cycle["id"],
+            profit_target_hit,
+            position_tested,
+            dte_warning,
         )
 
         return {
