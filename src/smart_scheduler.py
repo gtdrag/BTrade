@@ -1416,36 +1416,23 @@ class SmartScheduler:
                 return
 
             positions = self.db.get_cycle_positions(cycle["id"])
-            open_positions = [p for p in positions if p["status"] == "OPEN"]
+            from .wheel_notifications import compute_wheel_cycle_status
 
-            state = cycle["state"]
-            cost_basis = cycle.get("cost_basis") or 0.0
-            total_premium = (
-                (cycle.get("put_premium_received") or 0.0)
-                + (cycle.get("covered_call_premiums_collected") or 0.0)
-            ) * 100  # per-share to contract total (100 shares)
+            status = compute_wheel_cycle_status(cycle, positions, now.date())
 
             lines = ["*WHEEL DAILY SUMMARY*\n"]
-            lines.append(f"Cycle State: {state}")
-            lines.append(f"Cost Basis: ${cost_basis:.2f}/share")
-            lines.append(f"Total Premium: ${total_premium:.2f}")
+            lines.append(f"Cycle State: {status['state']}")
+            lines.append(f"Cost Basis: ${status['cost_basis']:.2f}/share")
+            lines.append(f"Total Premium: ${status['total_premium']:.2f}")
 
-            if open_positions:
+            if status["open_positions"]:
                 lines.append("\n*Positions:*")
-                from datetime import date as _date
-
-                today = now.date()
-                for p in open_positions:
-                    try:
-                        expiry = _date.fromisoformat(p["expiry_date"])
-                        dte = max(0, (expiry - today).days)
-                    except (ValueError, TypeError):
-                        dte = "?"
+                for p in status["open_positions"]:
                     max_risk = p["strike"] * 100
                     premium = p.get("premium_received") or 0.0
                     lines.append(
                         f"  {p['option_type']} ${p['strike']:.0f} "
-                        f"({dte} DTE) | max risk: ${max_risk:,.0f} | "
+                        f"({p['dte']} DTE) | max risk: ${max_risk:,.0f} | "
                         f"premium: ${premium:.2f}"
                     )
             else:

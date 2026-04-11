@@ -16,7 +16,57 @@ Each formatter returns a fully-formatted Telegram message string (ready to
 pass to `send_message`). None of them have side effects.
 """
 
-from typing import Any, Dict, Optional
+from datetime import date as _date
+from typing import Any, Dict, List, Optional
+
+
+def compute_wheel_cycle_status(
+    cycle: Dict[str, Any],
+    positions: List[Dict[str, Any]],
+    today: _date,
+) -> Dict[str, Any]:
+    """Compute common wheel cycle status fields used by /wheel and daily summary.
+
+    Both `_cmd_wheel` (Telegram command) and `_job_wheel_daily_summary`
+    (scheduled notification) previously computed the same fields inline
+    (state, cost_basis, total_premium, open positions with DTE) and only
+    differed in how they formatted the per-position lines. This helper
+    returns the structured data so each consumer can format it in its
+    own style without re-duplicating the gather logic.
+
+    Returns a dict with keys:
+        state: cycle state string
+        cost_basis: cost_basis per share (float)
+        total_premium: total premium collected in dollars (float, × 100)
+        open_positions: list of position dicts, each annotated with
+            `dte` (int if parseable, else "?")
+    """
+    state = cycle["state"]
+    cost_basis = cycle.get("cost_basis") or 0.0
+    total_premium = (
+        (cycle.get("put_premium_received") or 0.0)
+        + (cycle.get("covered_call_premiums_collected") or 0.0)
+    ) * 100  # per-share × 100 shares = contract total
+
+    open_positions: List[Dict[str, Any]] = []
+    for p in positions:
+        if p.get("status") != "OPEN":
+            continue
+        try:
+            expiry = _date.fromisoformat(p["expiry_date"])
+            dte: Any = max(0, (expiry - today).days)
+        except (ValueError, TypeError):
+            dte = "?"
+        p_with_dte = dict(p)
+        p_with_dte["dte"] = dte
+        open_positions.append(p_with_dte)
+
+    return {
+        "state": state,
+        "cost_basis": cost_basis,
+        "total_premium": total_premium,
+        "open_positions": open_positions,
+    }
 
 
 def format_assignment_message(

@@ -7,7 +7,6 @@ Commands in this module:
 """
 
 import logging
-from datetime import date
 from typing import TYPE_CHECKING
 
 from telegram import Update
@@ -39,29 +38,17 @@ class WheelCommandsMixin:
             return
 
         positions = db.get_cycle_positions(cycle["id"])
-        open_positions = [p for p in positions if p["status"] == "OPEN"]
+        from ..wheel_notifications import compute_wheel_cycle_status
 
-        state = cycle["state"]
-        cost_basis = cycle.get("cost_basis") or 0.0
-        total_premium = (
-            (cycle.get("put_premium_received") or 0.0)
-            + (cycle.get("covered_call_premiums_collected") or 0.0)
-        ) * 100  # per-share to contract total (100 shares)
+        status = compute_wheel_cycle_status(cycle, positions, get_et_now().date())
 
-        lines = [f"*WHEEL CYCLE -- {state}*\n"]
-        lines.append(f"Cost Basis: ${cost_basis:.2f}/share")
-        lines.append(f"Total Premium: ${total_premium:.2f}")
+        lines = [f"*WHEEL CYCLE -- {status['state']}*\n"]
+        lines.append(f"Cost Basis: ${status['cost_basis']:.2f}/share")
+        lines.append(f"Total Premium: ${status['total_premium']:.2f}")
 
-        if open_positions:
+        if status["open_positions"]:
             lines.append("\n*Open Positions:*")
-            today = get_et_now().date()
-            for p in open_positions:
-                try:
-                    expiry = date.fromisoformat(p["expiry_date"])
-                    dte = max(0, (expiry - today).days)
-                except (ValueError, TypeError):
-                    dte = "?"
-
+            for p in status["open_positions"]:
                 pnl_str = ""
                 premium_received = p.get("premium_received") or 0.0
                 current_value = p.get("current_value")
@@ -72,7 +59,7 @@ class WheelCommandsMixin:
                 delta = p.get("delta", "N/A")
                 lines.append(
                     f"  {p['option_type']} ${p['strike']:.0f} exp {p['expiry_date']} "
-                    f"({dte} DTE) | delta={delta}{pnl_str} | "
+                    f"({p['dte']} DTE) | delta={delta}{pnl_str} | "
                     f"premium=${premium_received:.2f}"
                 )
             lines.append("\n_Greeks shown are entry values._")
