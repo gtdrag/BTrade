@@ -112,18 +112,38 @@ class ETradeClient:
         self._load_tokens()
 
     def _load_tokens(self):
-        """Load saved tokens from file."""
-        if self.token_file.exists():
-            try:
-                with open(self.token_file) as f:
-                    tokens = json.load(f)
-                    self.access_token = tokens.get("access_token")
-                    self.access_token_secret = tokens.get("access_token_secret")
-                    if self.access_token and self.access_token_secret:
-                        self._create_session()
-                        logger.info("Loaded saved OAuth tokens")
-            except Exception as e:
-                logger.warning(f"Failed to load tokens: {e}")
+        """Load saved tokens from file.
+
+        Verifies file permissions are 0o600 before reading. If the permissions
+        are loose, tightens them automatically (defense-in-depth). If tightening
+        fails, refuses to load to avoid exposing tokens further.
+        """
+        if not self.token_file.exists():
+            return
+
+        try:
+            # Verify/enforce secure permissions before reading
+            current_mode = self.token_file.stat().st_mode & 0o777
+            if current_mode != 0o600:
+                logger.warning(
+                    f"Token file {self.token_file} has insecure permissions "
+                    f"{oct(current_mode)} — expected 0o600. Tightening..."
+                )
+                try:
+                    os.chmod(self.token_file, 0o600)
+                except OSError as e:
+                    logger.error(f"Failed to secure token file permissions: {e}")
+                    return  # Refuse to load rather than proceed with loose perms
+
+            with open(self.token_file) as f:
+                tokens = json.load(f)
+                self.access_token = tokens.get("access_token")
+                self.access_token_secret = tokens.get("access_token_secret")
+                if self.access_token and self.access_token_secret:
+                    self._create_session()
+                    logger.info("Loaded saved OAuth tokens")
+        except Exception as e:
+            logger.warning(f"Failed to load tokens: {e}")
 
     def _save_tokens(self):
         """Save tokens to file."""
@@ -642,9 +662,7 @@ class ETradeClient:
 
         response = self._request("GET", "/v1/market/optionchains", params=params)
 
-        option_pairs = (
-            response.get("OptionChainResponse", {}).get("OptionPair", [])
-        )
+        option_pairs = response.get("OptionChainResponse", {}).get("OptionPair", [])
         if isinstance(option_pairs, dict):
             option_pairs = [option_pairs]
 
@@ -684,26 +702,28 @@ class ETradeClient:
 
                 greeks = option.get("OptionGreeks", {})
 
-                contracts.append({
-                    "symbol": option.get("symbol", ""),
-                    "option_type": option_type,
-                    "strike": float(option.get("strikePrice", 0)),
-                    "expiry_year": expiry_year,
-                    "expiry_month": expiry_month,
-                    "expiry_day": expiry_day,
-                    "expiry_date": expiry_date.date(),
-                    "dte": dte,
-                    "bid": float(option.get("bid", 0)),
-                    "ask": float(option.get("ask", 0)),
-                    "last": float(option.get("lastPrice", 0)),
-                    "open_interest": int(option.get("openInterest", 0)),
-                    "delta": float(greeks.get("delta", 0)),
-                    "gamma": float(greeks.get("gamma", 0)),
-                    "theta": float(greeks.get("theta", 0)),
-                    "vega": float(greeks.get("vega", 0)),
-                    "iv": float(greeks.get("iv", 0)),
-                    "quote_timestamp": int(timestamp_epoch),
-                })
+                contracts.append(
+                    {
+                        "symbol": option.get("symbol", ""),
+                        "option_type": option_type,
+                        "strike": float(option.get("strikePrice", 0)),
+                        "expiry_year": expiry_year,
+                        "expiry_month": expiry_month,
+                        "expiry_day": expiry_day,
+                        "expiry_date": expiry_date.date(),
+                        "dte": dte,
+                        "bid": float(option.get("bid", 0)),
+                        "ask": float(option.get("ask", 0)),
+                        "last": float(option.get("lastPrice", 0)),
+                        "open_interest": int(option.get("openInterest", 0)),
+                        "delta": float(greeks.get("delta", 0)),
+                        "gamma": float(greeks.get("gamma", 0)),
+                        "theta": float(greeks.get("theta", 0)),
+                        "vega": float(greeks.get("vega", 0)),
+                        "iv": float(greeks.get("iv", 0)),
+                        "quote_timestamp": int(timestamp_epoch),
+                    }
+                )
 
         # Log only contract count — T-01-01: do not log raw API response
         logger.info(f"get_ibit_options_chain: fetched {len(contracts)} contracts (30-45 DTE)")
@@ -773,8 +793,16 @@ class ETradeClient:
     ) -> Dict[str, Any]:
         """Preview an options order. Returns preview with estimated cost and PreviewIds."""
         order_data = self._build_options_order_request(
-            symbol, option_type, expiry_year, expiry_month, expiry_day,
-            strike_price, order_action, quantity, limit_price, preview=True
+            symbol,
+            option_type,
+            expiry_year,
+            expiry_month,
+            expiry_day,
+            strike_price,
+            order_action,
+            quantity,
+            limit_price,
+            preview=True,
         )
         response = self._request(
             "POST", f"/v1/accounts/{account_id_key}/orders/preview", json_data=order_data
@@ -797,8 +825,16 @@ class ETradeClient:
     ) -> Dict[str, Any]:
         """Place an options order. Limit orders only. Use preview_ids from preview_options_order() when available."""
         order_data = self._build_options_order_request(
-            symbol, option_type, expiry_year, expiry_month, expiry_day,
-            strike_price, order_action, quantity, limit_price, preview=False
+            symbol,
+            option_type,
+            expiry_year,
+            expiry_month,
+            expiry_day,
+            strike_price,
+            order_action,
+            quantity,
+            limit_price,
+            preview=False,
         )
         if preview_ids:
             order_data["PlaceOrderRequest"]["PreviewIds"] = preview_ids
@@ -814,19 +850,21 @@ class ETradeClient:
         for pos in all_positions:
             product = pos.get("Product", {})
             if product.get("securityType") == "OPTN":
-                options.append({
-                    "symbol": product.get("symbol"),
-                    "option_type": product.get("callPut"),
-                    "strike": float(product.get("strikePrice", 0)),
-                    "expiry_year": int(product.get("expiryYear", 0)),
-                    "expiry_month": int(product.get("expiryMonth", 0)),
-                    "expiry_day": int(product.get("expiryDay", 0)),
-                    "quantity": float(pos.get("quantity", 0)),
-                    "position_type": pos.get("positionType"),
-                    "market_value": float(pos.get("marketValue", 0)),
-                    "total_gain": float(pos.get("totalGain", 0)),
-                    "osi_key": product.get("osiKey"),
-                })
+                options.append(
+                    {
+                        "symbol": product.get("symbol"),
+                        "option_type": product.get("callPut"),
+                        "strike": float(product.get("strikePrice", 0)),
+                        "expiry_year": int(product.get("expiryYear", 0)),
+                        "expiry_month": int(product.get("expiryMonth", 0)),
+                        "expiry_day": int(product.get("expiryDay", 0)),
+                        "quantity": float(pos.get("quantity", 0)),
+                        "position_type": pos.get("positionType"),
+                        "market_value": float(pos.get("marketValue", 0)),
+                        "total_gain": float(pos.get("totalGain", 0)),
+                        "osi_key": product.get("osiKey"),
+                    }
+                )
         return options
 
     # ==================== Order Methods ====================
@@ -1050,8 +1088,16 @@ class MockETradeClient:
         """Normal CDF approximation using Abramowitz & Stegun formula."""
         t = 1.0 / (1.0 + 0.2316419 * abs(x))
         d = 0.3989422804014327  # 1/sqrt(2*pi)
-        p = d * math.exp(-x * x / 2.0) * (
-            t * (0.319381530 + t * (-0.356563782 + t * (1.781477937 + t * (-1.821255978 + t * 1.330274429))))
+        p = (
+            d
+            * math.exp(-x * x / 2.0)
+            * (
+                t
+                * (
+                    0.319381530
+                    + t * (-0.356563782 + t * (1.781477937 + t * (-1.821255978 + t * 1.330274429)))
+                )
+            )
         )
         return 1.0 - p if x >= 0 else p
 
@@ -1067,15 +1113,11 @@ class MockETradeClient:
         else:  # PUT
             delta = self._normal_cdf(d1) - 1.0
 
-        gamma = (
-            0.3989422804014327 * math.exp(-d1**2 / 2.0) / (spot * iv * math.sqrt(t))
-        )
+        gamma = 0.3989422804014327 * math.exp(-(d1**2) / 2.0) / (spot * iv * math.sqrt(t))
 
         premium = max(spot * iv * math.sqrt(t) * 0.4, 0.10)
         theta = -(premium / max(dte, 1)) * 0.5
-        vega = (
-            spot * math.sqrt(t) * 0.3989422804014327 * math.exp(-d1**2 / 2.0) / 100.0
-        )
+        vega = spot * math.sqrt(t) * 0.3989422804014327 * math.exp(-(d1**2) / 2.0) / 100.0
 
         return {
             "delta": delta,
@@ -1125,26 +1167,28 @@ class MockETradeClient:
                     f"{option_type[0]}{int(strike * 1000):08d}"
                 )
 
-                contracts.append({
-                    "symbol": symbol,
-                    "option_type": option_type,
-                    "strike": float(strike),
-                    "expiry_year": expiry_date.year,
-                    "expiry_month": expiry_date.month,
-                    "expiry_day": expiry_date.day,
-                    "expiry_date": expiry_date,
-                    "dte": dte,
-                    "bid": float(bid),
-                    "ask": float(ask),
-                    "last": float(last),
-                    "open_interest": open_interest,
-                    "delta": float(greeks["delta"]),
-                    "gamma": float(greeks["gamma"]),
-                    "theta": float(greeks["theta"]),
-                    "vega": float(greeks["vega"]),
-                    "iv": float(greeks["iv"]),
-                    "quote_timestamp": quote_timestamp,
-                })
+                contracts.append(
+                    {
+                        "symbol": symbol,
+                        "option_type": option_type,
+                        "strike": float(strike),
+                        "expiry_year": expiry_date.year,
+                        "expiry_month": expiry_date.month,
+                        "expiry_day": expiry_date.day,
+                        "expiry_date": expiry_date,
+                        "dte": dte,
+                        "bid": float(bid),
+                        "ask": float(ask),
+                        "last": float(last),
+                        "open_interest": open_interest,
+                        "delta": float(greeks["delta"]),
+                        "gamma": float(greeks["gamma"]),
+                        "theta": float(greeks["theta"]),
+                        "vega": float(greeks["vega"]),
+                        "iv": float(greeks["iv"]),
+                        "quote_timestamp": quote_timestamp,
+                    }
+                )
 
         return contracts
 
@@ -1307,7 +1351,9 @@ class MockETradeClient:
     ) -> Dict[str, Any]:
         """Place an options order. Limit orders only. Use preview_ids from preview_options_order() when available."""
         order_id = f"MOCK_OPTN_{len(self.orders) + 1:06d}"
-        pos_key = f"{symbol}_{option_type}_{strike_price}_{expiry_year}{expiry_month:02d}{expiry_day:02d}"
+        pos_key = (
+            f"{symbol}_{option_type}_{strike_price}_{expiry_year}{expiry_month:02d}{expiry_day:02d}"
+        )
 
         if order_action == "SELL_OPEN":
             premium_received = limit_price * quantity * 100
