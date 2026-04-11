@@ -510,44 +510,41 @@ class TestRunMonitoringChecks:
             "status": "OPEN",
         }
 
-    def test_returns_dict_with_required_keys(self):
+    async def test_returns_dict_with_required_keys(self):
         """run_monitoring_checks returns a dict with profit_target_hit, position_tested, dte_warning."""
         position = self._make_position(expiry_date="2026-06-15")
         strategy = self._make_strategy(position=position)
         cycle = {"id": 1}
-        import asyncio
 
-        result = asyncio.get_event_loop().run_until_complete(strategy.run_monitoring_checks(cycle))
+        result = await strategy.run_monitoring_checks(cycle)
         assert "profit_target_hit" in result
         assert "position_tested" in result
         assert "dte_warning" in result
 
-    def test_returns_all_false_when_no_open_position(self):
+    async def test_returns_all_false_when_no_open_position(self):
         """When no open position, all flags are False."""
         strategy = self._make_strategy(position=None)
         cycle = {"id": 1}
-        import asyncio
 
-        result = asyncio.get_event_loop().run_until_complete(strategy.run_monitoring_checks(cycle))
+        result = await strategy.run_monitoring_checks(cycle)
         assert result["profit_target_hit"] is False
         assert result["position_tested"] is False
         assert result["dte_warning"] is False
 
-    def test_returns_all_false_when_chain_raises_etrade_api_error(self):
+    async def test_returns_all_false_when_chain_raises_etrade_api_error(self):
         """When get_ibit_options_chain raises ETradeAPIError, return all-False dict."""
         from src.etrade_client import ETradeAPIError
 
         position = self._make_position()
         strategy = self._make_strategy(position=position, chain_raises=ETradeAPIError("stale"))
         cycle = {"id": 1}
-        import asyncio
 
-        result = asyncio.get_event_loop().run_until_complete(strategy.run_monitoring_checks(cycle))
+        result = await strategy.run_monitoring_checks(cycle)
         assert result["profit_target_hit"] is False
         assert result["position_tested"] is False
         assert result["dte_warning"] is False
 
-    def test_position_tested_is_false_when_profit_target_hit(self):
+    async def test_position_tested_is_false_when_profit_target_hit(self):
         """When profit target is hit, position_tested is forced to False (profit priority)."""
         # Position with ask at 50% of premium
         position = self._make_position(
@@ -557,21 +554,19 @@ class TestRunMonitoringChecks:
         # IBIT price near strike (would normally set position_tested=True)
         strategy = self._make_strategy(ibit_price=50.5, position=position, chain=chain)
         cycle = {"id": 1}
-        import asyncio
 
-        result = asyncio.get_event_loop().run_until_complete(strategy.run_monitoring_checks(cycle))
+        result = await strategy.run_monitoring_checks(cycle)
         assert result["profit_target_hit"] is True
         assert result["position_tested"] is False  # profit takes priority
 
-    def test_position_and_chain_included_in_result(self):
+    async def test_position_and_chain_included_in_result(self):
         """Result dict includes 'position' and 'chain' keys for Plan 02 use."""
         position = self._make_position(expiry_date="2026-06-15")
         chain = []
         strategy = self._make_strategy(position=position, chain=chain)
         cycle = {"id": 1}
-        import asyncio
 
-        result = asyncio.get_event_loop().run_until_complete(strategy.run_monitoring_checks(cycle))
+        result = await strategy.run_monitoring_checks(cycle)
         assert "position" in result
         assert "chain" in result
 
@@ -807,7 +802,7 @@ def _make_chain_with_ask(symbol: str, ask: float) -> list:
 class TestBuyToClose:
     """Tests for request_profit_take_approval and _execute_btc_order."""
 
-    def test_btc_approval_sends_message_with_profit_info(self):
+    async def test_btc_approval_sends_message_with_profit_info(self):
         """request_profit_take_approval sends a message containing strike, profit %, and savings."""
         bot = _make_telegram_bot()
         position = _make_position(symbol="IBIT260515P00050000", premium_received=1.50)
@@ -815,38 +810,34 @@ class TestBuyToClose:
         chain = _make_chain_with_ask("IBIT260515P00050000", ask=0.60)
         cycle = {"id": 1, "state": "SHORT_PUT"}
 
-        async def run():
-            async def fake_wait_for(coro, timeout):
-                bot._btc_approval.result = "rejected"
+        async def fake_wait_for(coro, timeout):
+            bot._btc_approval.result = "rejected"
 
-            with patch("asyncio.wait_for", new=fake_wait_for):
-                await bot.request_profit_take_approval(
-                    position, chain, cycle, MagicMock(), MagicMock(), "acc"
-                )
+        with patch("asyncio.wait_for", new=fake_wait_for):
+            await bot.request_profit_take_approval(
+                position, chain, cycle, MagicMock(), MagicMock(), "acc"
+            )
 
-        asyncio.get_event_loop().run_until_complete(run())
         bot._app.bot.send_message.assert_called()
         sent_text = bot._app.bot.send_message.call_args[1]["text"]
         assert "50.0" in sent_text or "50" in sent_text  # strike
         assert "60" in sent_text or "Profit" in sent_text.replace("PROFIT", "Profit")
 
-    def test_btc_approval_shows_approve_and_reject_buttons(self):
+    async def test_btc_approval_shows_approve_and_reject_buttons(self):
         """request_profit_take_approval includes Approve and Reject inline buttons."""
         bot = _make_telegram_bot()
         position = _make_position(symbol="IBIT260515P00050000", premium_received=1.50)
         chain = _make_chain_with_ask("IBIT260515P00050000", ask=0.60)
         cycle = {"id": 1, "state": "SHORT_PUT"}
 
-        async def run():
-            async def fake_wait_for(coro, timeout):
-                bot._btc_approval.result = "rejected"
+        async def fake_wait_for(coro, timeout):
+            bot._btc_approval.result = "rejected"
 
-            with patch("asyncio.wait_for", new=fake_wait_for):
-                await bot.request_profit_take_approval(
-                    position, chain, cycle, MagicMock(), MagicMock(), "acc"
-                )
+        with patch("asyncio.wait_for", new=fake_wait_for):
+            await bot.request_profit_take_approval(
+                position, chain, cycle, MagicMock(), MagicMock(), "acc"
+            )
 
-        asyncio.get_event_loop().run_until_complete(run())
         call_kwargs = bot._app.bot.send_message.call_args[1]
         markup = call_kwargs.get("reply_markup")
         assert markup is not None
@@ -855,53 +846,45 @@ class TestBuyToClose:
         assert any("btc_approve_" in d for d in all_data)
         assert any("btc_reject_" in d for d in all_data)
 
-    def test_btc_approve_calls_execute_btc_order(self):
+    async def test_btc_approve_calls_execute_btc_order(self):
         """When btc_approve callback fires, _execute_btc_order is called."""
         bot = _make_telegram_bot()
         position = _make_position(symbol="IBIT260515P00050000", premium_received=1.50)
         chain = _make_chain_with_ask("IBIT260515P00050000", ask=0.60)
         cycle = {"id": 1, "state": "SHORT_PUT"}
 
-        async def run():
-            async def fake_wait_for(coro, timeout):
-                bot._btc_approval.result = "approved"
+        async def fake_wait_for(coro, timeout):
+            bot._btc_approval.result = "approved"
 
-            with patch.object(
-                bot, "_execute_btc_order", new=AsyncMock(return_value=True)
-            ) as mock_exec:
-                with patch("asyncio.wait_for", new=fake_wait_for):
-                    result = await bot.request_profit_take_approval(
-                        position, chain, cycle, MagicMock(), MagicMock(), "acc"
-                    )
-                mock_exec.assert_called_once()
-                return result
+        with patch.object(bot, "_execute_btc_order", new=AsyncMock(return_value=True)) as mock_exec:
+            with patch("asyncio.wait_for", new=fake_wait_for):
+                result = await bot.request_profit_take_approval(
+                    position, chain, cycle, MagicMock(), MagicMock(), "acc"
+                )
+            mock_exec.assert_called_once()
 
-        result = asyncio.get_event_loop().run_until_complete(run())
         assert result == ApprovalResult.APPROVED
 
-    def test_btc_reject_returns_rejected_no_order(self):
+    async def test_btc_reject_returns_rejected_no_order(self):
         """When btc_reject callback fires, _execute_btc_order is NOT called."""
         bot = _make_telegram_bot()
         position = _make_position(symbol="IBIT260515P00050000", premium_received=1.50)
         chain = _make_chain_with_ask("IBIT260515P00050000", ask=0.60)
         cycle = {"id": 1, "state": "SHORT_PUT"}
 
-        async def run():
-            async def fake_wait_for(coro, timeout):
-                bot._btc_approval.result = "rejected"
+        async def fake_wait_for(coro, timeout):
+            bot._btc_approval.result = "rejected"
 
-            with patch.object(bot, "_execute_btc_order", new=AsyncMock()) as mock_exec:
-                with patch("asyncio.wait_for", new=fake_wait_for):
-                    result = await bot.request_profit_take_approval(
-                        position, chain, cycle, MagicMock(), MagicMock(), "acc"
-                    )
-                mock_exec.assert_not_called()
-                return result
+        with patch.object(bot, "_execute_btc_order", new=AsyncMock()) as mock_exec:
+            with patch("asyncio.wait_for", new=fake_wait_for):
+                result = await bot.request_profit_take_approval(
+                    position, chain, cycle, MagicMock(), MagicMock(), "acc"
+                )
+            mock_exec.assert_not_called()
 
-        result = asyncio.get_event_loop().run_until_complete(run())
         assert result == ApprovalResult.REJECTED
 
-    def test_execute_btc_order_places_buy_close_order(self):
+    async def test_execute_btc_order_places_buy_close_order(self):
         """_execute_btc_order calls preview + place with BUY_CLOSE action in the correct arg slot.
 
         Uses create_autospec(ETradeClient) so arg-count and position
@@ -915,15 +898,12 @@ class TestBuyToClose:
         mock_client = _make_etrade_mock()
         mock_db = MagicMock()
 
-        async def run():
-            return await bot._execute_btc_order(
-                position, cycle, mock_client, mock_db, "acc", close_price=0.60
-            )
-
         # HI-05 fix: assert the return value. A bug returning False on success
         # (or raising silently after the API call) would previously be missed
         # because the test ignored the return.
-        result = asyncio.get_event_loop().run_until_complete(run())
+        result = await bot._execute_btc_order(
+            position, cycle, mock_client, mock_db, "acc", close_price=0.60
+        )
         assert result is True, f"_execute_btc_order should return True on success, got {result}"
         mock_client.preview_options_order.assert_called_once()
         mock_client.place_options_order.assert_called_once()
@@ -942,7 +922,7 @@ class TestBuyToClose:
         assert preview_args[2] == "PUT"  # option_type
         assert preview_args[9] == 0.60  # limit_price (close_price)
 
-    def test_execute_btc_short_put_transitions_to_cash(self):
+    async def test_execute_btc_short_put_transitions_to_cash(self):
         """_execute_btc_order for SHORT_PUT transitions cycle to CASH."""
         bot = _make_telegram_bot()
         position = _make_position(symbol="IBIT260515P00050000", premium_received=1.50)
@@ -952,17 +932,13 @@ class TestBuyToClose:
         mock_client.place_options_order.return_value = {"orderId": "ORD123"}
         mock_db = MagicMock()
 
-        async def run():
-            await bot._execute_btc_order(
-                position, cycle, mock_client, mock_db, "acc", close_price=0.60
-            )
+        await bot._execute_btc_order(position, cycle, mock_client, mock_db, "acc", close_price=0.60)
 
-        asyncio.get_event_loop().run_until_complete(run())
         mock_db.transition_wheel_state.assert_called_once()
         call_args = mock_db.transition_wheel_state.call_args[0]
         assert call_args[1] == WheelState.CASH
 
-    def test_execute_btc_covered_call_transitions_to_holding_shares(self):
+    async def test_execute_btc_covered_call_transitions_to_holding_shares(self):
         """_execute_btc_order for COVERED_CALL transitions cycle to HOLDING_SHARES."""
         bot = _make_telegram_bot()
         position = _make_position(
@@ -974,17 +950,13 @@ class TestBuyToClose:
         mock_client.place_options_order.return_value = {"orderId": "ORD456"}
         mock_db = MagicMock()
 
-        async def run():
-            await bot._execute_btc_order(
-                position, cycle, mock_client, mock_db, "acc", close_price=0.50
-            )
+        await bot._execute_btc_order(position, cycle, mock_client, mock_db, "acc", close_price=0.50)
 
-        asyncio.get_event_loop().run_until_complete(run())
         mock_db.transition_wheel_state.assert_called_once()
         call_args = mock_db.transition_wheel_state.call_args[0]
         assert call_args[1] == WheelState.HOLDING_SHARES
 
-    def test_execute_btc_records_close_premium(self):
+    async def test_execute_btc_records_close_premium(self):
         """_execute_btc_order calls close_wheel_position with the close_price."""
         bot = _make_telegram_bot()
         position = _make_position(symbol="IBIT260515P00050000", premium_received=1.50)
@@ -994,15 +966,11 @@ class TestBuyToClose:
         mock_client.place_options_order.return_value = {"orderId": "ORD123"}
         mock_db = MagicMock()
 
-        async def run():
-            await bot._execute_btc_order(
-                position, cycle, mock_client, mock_db, "acc", close_price=0.60
-            )
+        await bot._execute_btc_order(position, cycle, mock_client, mock_db, "acc", close_price=0.60)
 
-        asyncio.get_event_loop().run_until_complete(run())
         mock_db.close_wheel_position.assert_called_once_with(position["id"], 0.60)
 
-    def test_execute_btc_no_db_mutation_on_api_failure(self):
+    async def test_execute_btc_no_db_mutation_on_api_failure(self):
         """T-05-06: If API call fails, close_wheel_position and transition_wheel_state are NOT called."""
         from src.etrade_client import ETradeAPIError
 
@@ -1013,12 +981,8 @@ class TestBuyToClose:
         mock_client.preview_options_order.side_effect = ETradeAPIError("API unavailable")
         mock_db = MagicMock()
 
-        async def run():
-            await bot._execute_btc_order(
-                position, cycle, mock_client, mock_db, "acc", close_price=0.60
-            )
+        await bot._execute_btc_order(position, cycle, mock_client, mock_db, "acc", close_price=0.60)
 
-        asyncio.get_event_loop().run_until_complete(run())
         mock_db.close_wheel_position.assert_not_called()
         mock_db.transition_wheel_state.assert_not_called()
 
@@ -1026,47 +990,41 @@ class TestBuyToClose:
 class TestDTEAlert:
     """Tests for send_dte_alert."""
 
-    def test_dte_alert_sends_informational_message_no_buttons(self):
+    async def test_dte_alert_sends_informational_message_no_buttons(self):
         """send_dte_alert sends a message with NO inline keyboard buttons."""
         bot = _make_telegram_bot()
         position = _make_position(expiry_date="2026-05-15")
         cycle = {"id": 1, "state": "SHORT_PUT"}
         mock_db = MagicMock()
 
-        async def run():
-            await bot.send_dte_alert(position, cycle, mock_db)
+        await bot.send_dte_alert(position, cycle, mock_db)
 
-        asyncio.get_event_loop().run_until_complete(run())
         bot._app.bot.send_message.assert_called_once()
         call_kwargs = bot._app.bot.send_message.call_args[1]
         # No reply_markup or None = no buttons
         markup = call_kwargs.get("reply_markup")
         assert markup is None
 
-    def test_dte_alert_calls_mark_dte_alert_sent(self):
+    async def test_dte_alert_calls_mark_dte_alert_sent(self):
         """send_dte_alert calls db.mark_dte_alert_sent after sending message."""
         bot = _make_telegram_bot()
         position = _make_position(expiry_date="2026-05-15")
         cycle = {"id": 1, "state": "SHORT_PUT"}
         mock_db = MagicMock()
 
-        async def run():
-            await bot.send_dte_alert(position, cycle, mock_db)
+        await bot.send_dte_alert(position, cycle, mock_db)
 
-        asyncio.get_event_loop().run_until_complete(run())
         mock_db.mark_dte_alert_sent.assert_called_once_with(position["id"])
 
-    def test_dte_alert_message_contains_expiry_and_option_type(self):
+    async def test_dte_alert_message_contains_expiry_and_option_type(self):
         """send_dte_alert message includes option_type, strike, expiry_date."""
         bot = _make_telegram_bot()
         position = _make_position(option_type="PUT", strike=50.0, expiry_date="2026-05-15")
         cycle = {"id": 1, "state": "SHORT_PUT"}
         mock_db = MagicMock()
 
-        async def run():
-            await bot.send_dte_alert(position, cycle, mock_db)
+        await bot.send_dte_alert(position, cycle, mock_db)
 
-        asyncio.get_event_loop().run_until_complete(run())
         sent_text = bot._app.bot.send_message.call_args[1]["text"]
         assert "PUT" in sent_text or "put" in sent_text.lower()
         assert "50" in sent_text
@@ -1092,33 +1050,33 @@ class TestBTCCallbackRouting:
         update.callback_query = self._make_callback_query(data)
         return update
 
-    def test_btc_approve_sets_btc_result_not_call_or_put(self):
+    async def test_btc_approve_sets_btc_result_not_call_or_put(self):
         """btc_approve_ callback sets _btc_approval.result='approved', not _call/_put result."""
         bot = _make_telegram_bot()
         bot._btc_approval.event = asyncio.Event()
         bot._btc_approval.callback_id = "1"  # matches tail of btc_approve_1
         update = self._make_update(data="btc_approve_1")
 
-        asyncio.get_event_loop().run_until_complete(bot._handle_callback(update, MagicMock()))
+        await bot._handle_callback(update, MagicMock())
 
         assert bot._btc_approval.result == "approved"
         assert bot._call_approval.result is None
         assert bot._put_approval.result is None
 
-    def test_btc_reject_sets_btc_result_not_call_or_put(self):
+    async def test_btc_reject_sets_btc_result_not_call_or_put(self):
         """btc_reject_ callback sets _btc_approval.result='rejected', not _call/_put result."""
         bot = _make_telegram_bot()
         bot._btc_approval.event = asyncio.Event()
         bot._btc_approval.callback_id = "1"
         update = self._make_update(data="btc_reject_1")
 
-        asyncio.get_event_loop().run_until_complete(bot._handle_callback(update, MagicMock()))
+        await bot._handle_callback(update, MagicMock())
 
         assert bot._btc_approval.result == "rejected"
         assert bot._call_approval.result is None
         assert bot._put_approval.result is None
 
-    def test_btc_approve_from_unauthorized_chat_is_rejected(self):
+    async def test_btc_approve_from_unauthorized_chat_is_rejected(self):
         """ME-10: btc_approve from a non-owner chat_id must NOT set the result.
 
         _handle_callback's authorization check runs before any prefix
@@ -1135,14 +1093,14 @@ class TestBTCCallbackRouting:
 
         update = self._make_update(chat_id="99999", data="btc_approve_1")
 
-        asyncio.get_event_loop().run_until_complete(bot._handle_callback(update, MagicMock()))
+        await bot._handle_callback(update, MagicMock())
 
         # Result must NOT be set and the unauthorized alert must fire
         assert bot._btc_approval.result is None
         assert not bot._btc_approval.event.is_set()
         update.callback_query.answer.assert_awaited_with("🚫 Unauthorized", show_alert=True)
 
-    def test_btc_reject_from_unauthorized_chat_is_rejected(self):
+    async def test_btc_reject_from_unauthorized_chat_is_rejected(self):
         """ME-10: btc_reject from a non-owner chat_id must NOT set the result."""
         bot = _make_telegram_bot()
         bot.chat_id = "12345"
@@ -1151,7 +1109,7 @@ class TestBTCCallbackRouting:
 
         update = self._make_update(chat_id="99999", data="btc_reject_1")
 
-        asyncio.get_event_loop().run_until_complete(bot._handle_callback(update, MagicMock()))
+        await bot._handle_callback(update, MagicMock())
 
         assert bot._btc_approval.result is None
         assert not bot._btc_approval.event.is_set()
@@ -1335,7 +1293,7 @@ def _make_chain_for_roll(
 class TestRollApproval:
     """Tests for request_roll_approval message and approval flow."""
 
-    def test_roll_approval_sends_message_with_position_details(self):
+    async def test_roll_approval_sends_message_with_position_details(self):
         """request_roll_approval sends message with current strike, new strike, net credit."""
         bot = _make_telegram_bot()
         position = _make_position(symbol="IBIT260515P00050000", roll_count=0)
@@ -1343,22 +1301,20 @@ class TestRollApproval:
         chain = _make_chain_for_roll("IBIT260515P00050000", position_ask=0.80)
         cycle = {"id": 1, "state": "SHORT_PUT"}
 
-        async def run():
-            async def fake_wait_for(coro, timeout):
-                bot._roll_approval.result = "rejected"
+        async def fake_wait_for(coro, timeout):
+            bot._roll_approval.result = "rejected"
 
-            with patch("asyncio.wait_for", new=fake_wait_for):
-                await bot.request_roll_approval(
-                    position, new_contract, cycle, chain, MagicMock(), MagicMock(), "acc"
-                )
+        with patch("asyncio.wait_for", new=fake_wait_for):
+            await bot.request_roll_approval(
+                position, new_contract, cycle, chain, MagicMock(), MagicMock(), "acc"
+            )
 
-        asyncio.get_event_loop().run_until_complete(run())
         bot._app.bot.send_message.assert_called()
         sent_text = bot._app.bot.send_message.call_args[1]["text"]
         assert "50" in sent_text  # current strike
         assert "48" in sent_text  # new strike
 
-    def test_roll_approval_shows_approve_and_reject_buttons(self):
+    async def test_roll_approval_shows_approve_and_reject_buttons(self):
         """request_roll_approval includes Approve and Reject inline buttons."""
         bot = _make_telegram_bot()
         position = _make_position(symbol="IBIT260515P00050000", roll_count=0)
@@ -1366,16 +1322,14 @@ class TestRollApproval:
         chain = _make_chain_for_roll("IBIT260515P00050000", position_ask=0.80)
         cycle = {"id": 1, "state": "SHORT_PUT"}
 
-        async def run():
-            async def fake_wait_for(coro, timeout):
-                bot._roll_approval.result = "rejected"
+        async def fake_wait_for(coro, timeout):
+            bot._roll_approval.result = "rejected"
 
-            with patch("asyncio.wait_for", new=fake_wait_for):
-                await bot.request_roll_approval(
-                    position, new_contract, cycle, chain, MagicMock(), MagicMock(), "acc"
-                )
+        with patch("asyncio.wait_for", new=fake_wait_for):
+            await bot.request_roll_approval(
+                position, new_contract, cycle, chain, MagicMock(), MagicMock(), "acc"
+            )
 
-        asyncio.get_event_loop().run_until_complete(run())
         # Second call is the roll message (first may be guard warnings)
         call_kwargs = bot._app.bot.send_message.call_args[1]
         markup = call_kwargs.get("reply_markup")
@@ -1384,7 +1338,7 @@ class TestRollApproval:
         assert any("roll_approve_" in d for d in all_data)
         assert any("roll_reject_" in d for d in all_data)
 
-    def test_roll_approve_calls_execute_roll(self):
+    async def test_roll_approve_calls_execute_roll(self):
         """When roll_approve callback fires, _execute_roll is called."""
         bot = _make_telegram_bot()
         position = _make_position(symbol="IBIT260515P00050000", roll_count=0)
@@ -1392,22 +1346,19 @@ class TestRollApproval:
         chain = _make_chain_for_roll("IBIT260515P00050000", position_ask=0.80)
         cycle = {"id": 1, "state": "SHORT_PUT"}
 
-        async def run():
-            async def fake_wait_for(coro, timeout):
-                bot._roll_approval.result = "approved"
+        async def fake_wait_for(coro, timeout):
+            bot._roll_approval.result = "approved"
 
-            with patch.object(bot, "_execute_roll", new=AsyncMock(return_value=True)) as mock_exec:
-                with patch("asyncio.wait_for", new=fake_wait_for):
-                    result = await bot.request_roll_approval(
-                        position, new_contract, cycle, chain, MagicMock(), MagicMock(), "acc"
-                    )
-                mock_exec.assert_called_once()
-                return result
+        with patch.object(bot, "_execute_roll", new=AsyncMock(return_value=True)) as mock_exec:
+            with patch("asyncio.wait_for", new=fake_wait_for):
+                result = await bot.request_roll_approval(
+                    position, new_contract, cycle, chain, MagicMock(), MagicMock(), "acc"
+                )
+            mock_exec.assert_called_once()
 
-        result = asyncio.get_event_loop().run_until_complete(run())
         assert result == ApprovalResult.APPROVED
 
-    def test_roll_reject_returns_rejected_no_execution(self):
+    async def test_roll_reject_returns_rejected_no_execution(self):
         """When roll_reject callback fires, _execute_roll is NOT called."""
         bot = _make_telegram_bot()
         position = _make_position(symbol="IBIT260515P00050000", roll_count=0)
@@ -1415,26 +1366,23 @@ class TestRollApproval:
         chain = _make_chain_for_roll("IBIT260515P00050000", position_ask=0.80)
         cycle = {"id": 1, "state": "SHORT_PUT"}
 
-        async def run():
-            async def fake_wait_for(coro, timeout):
-                bot._roll_approval.result = "rejected"
+        async def fake_wait_for(coro, timeout):
+            bot._roll_approval.result = "rejected"
 
-            with patch.object(bot, "_execute_roll", new=AsyncMock()) as mock_exec:
-                with patch("asyncio.wait_for", new=fake_wait_for):
-                    result = await bot.request_roll_approval(
-                        position, new_contract, cycle, chain, MagicMock(), MagicMock(), "acc"
-                    )
-                mock_exec.assert_not_called()
-                return result
+        with patch.object(bot, "_execute_roll", new=AsyncMock()) as mock_exec:
+            with patch("asyncio.wait_for", new=fake_wait_for):
+                result = await bot.request_roll_approval(
+                    position, new_contract, cycle, chain, MagicMock(), MagicMock(), "acc"
+                )
+            mock_exec.assert_not_called()
 
-        result = asyncio.get_event_loop().run_until_complete(run())
         assert result == ApprovalResult.REJECTED
 
 
 class TestRollBlocking:
     """Tests for roll guards: max roll count and net debit."""
 
-    def test_roll_blocked_when_roll_count_gte_2(self):
+    async def test_roll_blocked_when_roll_count_gte_2(self):
         """roll_count >= 2 sends warning message and returns None without approval dialog."""
         bot = _make_telegram_bot()
         # roll_count=2 should be blocked
@@ -1443,19 +1391,17 @@ class TestRollBlocking:
         chain = _make_chain_for_roll("IBIT260515P00050000", position_ask=0.80)
         cycle = {"id": 1, "state": "SHORT_PUT"}
 
-        async def run():
-            return await bot.request_roll_approval(
-                position, new_contract, cycle, chain, MagicMock(), MagicMock(), "acc"
-            )
+        result = await bot.request_roll_approval(
+            position, new_contract, cycle, chain, MagicMock(), MagicMock(), "acc"
+        )
 
-        result = asyncio.get_event_loop().run_until_complete(run())
         assert result is None
         # Warning message sent, but no inline buttons
         bot._app.bot.send_message.assert_called_once()
         call_kwargs = bot._app.bot.send_message.call_args[1]
         assert call_kwargs.get("reply_markup") is None
 
-    def test_roll_blocked_when_net_debit(self):
+    async def test_roll_blocked_when_net_debit(self):
         """net credit <= 0 sends explanation message and returns None without approval dialog."""
         bot = _make_telegram_bot()
         position = _make_position(symbol="IBIT260515P00050000", roll_count=0)
@@ -1464,18 +1410,16 @@ class TestRollBlocking:
         chain = _make_chain_for_roll("IBIT260515P00050000", position_ask=0.80)
         cycle = {"id": 1, "state": "SHORT_PUT"}
 
-        async def run():
-            return await bot.request_roll_approval(
-                position, new_contract, cycle, chain, MagicMock(), MagicMock(), "acc"
-            )
+        result = await bot.request_roll_approval(
+            position, new_contract, cycle, chain, MagicMock(), MagicMock(), "acc"
+        )
 
-        result = asyncio.get_event_loop().run_until_complete(run())
         assert result is None
         bot._app.bot.send_message.assert_called_once()
         sent_text = bot._app.bot.send_message.call_args[1]["text"]
         assert "debit" in sent_text.lower()
 
-    def test_max_rolls_warning_message_contains_roll_count(self):
+    async def test_max_rolls_warning_message_contains_roll_count(self):
         """Max roll warning message mentions the current roll count."""
         bot = _make_telegram_bot()
         position = _make_position(symbol="IBIT260515P00050000", roll_count=2)
@@ -1483,12 +1427,10 @@ class TestRollBlocking:
         chain = _make_chain_for_roll("IBIT260515P00050000", position_ask=0.80)
         cycle = {"id": 1, "state": "SHORT_PUT"}
 
-        async def run():
-            return await bot.request_roll_approval(
-                position, new_contract, cycle, chain, MagicMock(), MagicMock(), "acc"
-            )
+        await bot.request_roll_approval(
+            position, new_contract, cycle, chain, MagicMock(), MagicMock(), "acc"
+        )
 
-        asyncio.get_event_loop().run_until_complete(run())
         sent_text = bot._app.bot.send_message.call_args[1]["text"]
         # Should mention 2/2 or "max" rolls
         assert "2" in sent_text and ("max" in sent_text.lower() or "2/2" in sent_text)
@@ -1533,7 +1475,7 @@ class TestRollExecution:
         mock_client.place_options_order.side_effect = side_effect_place
         return mock_client
 
-    def test_execute_roll_calls_btc_then_sto(self):
+    async def test_execute_roll_calls_btc_then_sto(self):
         """_execute_roll calls preview+place for BUY_CLOSE then SELL_OPEN
         with correct positional arguments.
 
@@ -1549,12 +1491,9 @@ class TestRollExecution:
         mock_db = MagicMock()
         mock_db.open_wheel_position.return_value = 99
 
-        async def run():
-            return await bot._execute_roll(
-                position, new_contract, cycle, mock_client, mock_db, "acc", btc_price=0.80
-            )
-
-        result = asyncio.get_event_loop().run_until_complete(run())
+        result = await bot._execute_roll(
+            position, new_contract, cycle, mock_client, mock_db, "acc", btc_price=0.80
+        )
         assert result is True
         # Both preview and place called twice: once for BTC, once for STO
         assert mock_client.preview_options_order.call_count == 2
@@ -1573,7 +1512,7 @@ class TestRollExecution:
         assert len(btc_args) == 10, f"preview_options_order expects 10 args, got {len(btc_args)}"
         assert len(sto_args) == 10, f"preview_options_order expects 10 args, got {len(sto_args)}"
 
-    def test_execute_roll_btc_failure_no_db_changes(self):
+    async def test_execute_roll_btc_failure_no_db_changes(self):
         """If BTC step fails, no DB mutations are made."""
         bot = _make_telegram_bot()
         position = _make_position(symbol="IBIT260515P00050000", roll_count=0)
@@ -1582,18 +1521,15 @@ class TestRollExecution:
         mock_client = self._make_clients(btc_raises=Exception("BTC API down"))
         mock_db = MagicMock()
 
-        async def run():
-            return await bot._execute_roll(
-                position, new_contract, cycle, mock_client, mock_db, "acc", btc_price=0.80
-            )
-
-        result = asyncio.get_event_loop().run_until_complete(run())
+        result = await bot._execute_roll(
+            position, new_contract, cycle, mock_client, mock_db, "acc", btc_price=0.80
+        )
         assert result is False
         mock_db.close_wheel_position.assert_not_called()
         mock_db.open_wheel_position.assert_not_called()
         mock_db.transition_wheel_state.assert_not_called()
 
-    def test_execute_roll_sto_failure_closes_old_transitions_to_safe_state(self):
+    async def test_execute_roll_sto_failure_closes_old_transitions_to_safe_state(self):
         """If STO fails after BTC, old position is closed and cycle transitions to CASH."""
         bot = _make_telegram_bot()
         position = _make_position(symbol="IBIT260515P00050000", roll_count=0)
@@ -1602,12 +1538,9 @@ class TestRollExecution:
         mock_client = self._make_sto_failing_client()
         mock_db = MagicMock()
 
-        async def run():
-            return await bot._execute_roll(
-                position, new_contract, cycle, mock_client, mock_db, "acc", btc_price=0.80
-            )
-
-        result = asyncio.get_event_loop().run_until_complete(run())
+        result = await bot._execute_roll(
+            position, new_contract, cycle, mock_client, mock_db, "acc", btc_price=0.80
+        )
         assert result is False
         # Old position closed
         mock_db.close_wheel_position.assert_called_once_with(position["id"], 0.80)
@@ -1618,7 +1551,7 @@ class TestRollExecution:
         # New position NOT opened
         mock_db.open_wheel_position.assert_not_called()
 
-    def test_execute_roll_new_position_has_incremented_roll_count(self):
+    async def test_execute_roll_new_position_has_incremented_roll_count(self):
         """New position gets roll_count = old_roll_count + 1 via set_roll_count."""
         bot = _make_telegram_bot()
         position = _make_position(symbol="IBIT260515P00050000", roll_count=1)
@@ -1628,16 +1561,13 @@ class TestRollExecution:
         mock_db = MagicMock()
         mock_db.open_wheel_position.return_value = 42  # new position id
 
-        async def run():
-            return await bot._execute_roll(
-                position, new_contract, cycle, mock_client, mock_db, "acc", btc_price=0.80
-            )
-
-        asyncio.get_event_loop().run_until_complete(run())
+        await bot._execute_roll(
+            position, new_contract, cycle, mock_client, mock_db, "acc", btc_price=0.80
+        )
         # set_roll_count called with new_position_id=42 and count=2 (1+1)
         mock_db.set_roll_count.assert_called_once_with(42, 2)
 
-    def test_execute_roll_opens_new_position_in_db(self):
+    async def test_execute_roll_opens_new_position_in_db(self):
         """_execute_roll calls open_wheel_position with new contract details."""
         bot = _make_telegram_bot()
         position = _make_position(symbol="IBIT260515P00050000", roll_count=0)
@@ -1647,12 +1577,9 @@ class TestRollExecution:
         mock_db = MagicMock()
         mock_db.open_wheel_position.return_value = 55
 
-        async def run():
-            return await bot._execute_roll(
-                position, new_contract, cycle, mock_client, mock_db, "acc", btc_price=0.80
-            )
-
-        asyncio.get_event_loop().run_until_complete(run())
+        await bot._execute_roll(
+            position, new_contract, cycle, mock_client, mock_db, "acc", btc_price=0.80
+        )
         mock_db.open_wheel_position.assert_called_once()
         call_kwargs = mock_db.open_wheel_position.call_args[1]
         assert call_kwargs["strike"] == 48.0
@@ -1675,21 +1602,21 @@ class TestRollCallbackRouting:
         update.callback_query = query
         return update
 
-    def test_roll_approve_sets_roll_result_not_btc_or_put_or_call(self):
+    async def test_roll_approve_sets_roll_result_not_btc_or_put_or_call(self):
         """roll_approve_ callback sets _roll_approval.result='approved', not btc/call/put."""
         bot = _make_telegram_bot()
         bot._roll_approval.event = asyncio.Event()
         bot._roll_approval.callback_id = "1"  # matches tail of roll_approve_roll_1
         update = self._make_update(data="roll_approve_roll_1")
 
-        asyncio.get_event_loop().run_until_complete(bot._handle_callback(update, MagicMock()))
+        await bot._handle_callback(update, MagicMock())
 
         assert bot._roll_approval.result == "approved"
         assert bot._btc_approval.result is None
         assert bot._call_approval.result is None
         assert bot._put_approval.result is None
 
-    def test_roll_approve_from_unauthorized_chat_is_rejected(self):
+    async def test_roll_approve_from_unauthorized_chat_is_rejected(self):
         """ME-10: roll_approve from a non-owner chat_id must NOT set the result."""
         bot = _make_telegram_bot()
         bot.chat_id = "12345"  # owner
@@ -1698,13 +1625,13 @@ class TestRollCallbackRouting:
 
         update = self._make_update(chat_id="99999", data="roll_approve_roll_1")
 
-        asyncio.get_event_loop().run_until_complete(bot._handle_callback(update, MagicMock()))
+        await bot._handle_callback(update, MagicMock())
 
         assert bot._roll_approval.result is None
         assert not bot._roll_approval.event.is_set()
         update.callback_query.answer.assert_awaited_with("🚫 Unauthorized", show_alert=True)
 
-    def test_roll_reject_from_unauthorized_chat_is_rejected(self):
+    async def test_roll_reject_from_unauthorized_chat_is_rejected(self):
         """ME-10: roll_reject from a non-owner chat_id must NOT set the result."""
         bot = _make_telegram_bot()
         bot.chat_id = "12345"
@@ -1713,7 +1640,7 @@ class TestRollCallbackRouting:
 
         update = self._make_update(chat_id="99999", data="roll_reject_roll_1")
 
-        asyncio.get_event_loop().run_until_complete(bot._handle_callback(update, MagicMock()))
+        await bot._handle_callback(update, MagicMock())
 
         assert bot._roll_approval.result is None
         assert not bot._roll_approval.event.is_set()

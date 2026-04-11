@@ -112,7 +112,7 @@ def _make_chain(strikes=(46.0, 47.0, 48.0, 49.0, 50.0)) -> list:
 class TestPutOrderExecution:
     """Verify _execute_put_order invokes all expected E*TRADE and DB methods."""
 
-    def test_execute_put_order_calls_preview_and_place(self):
+    async def test_execute_put_order_calls_preview_and_place(self):
         """On success: preview_options_order and place_options_order are both called."""
         bot = _make_telegram_bot()
         signal = _make_put_signal(strike=48.0)
@@ -124,9 +124,7 @@ class TestPutOrderExecution:
 
         bot._app.bot.send_message = AsyncMock()
 
-        result = asyncio.get_event_loop().run_until_complete(
-            bot._execute_put_order(signal, mock_client, mock_db, "acc-key")
-        )
+        result = await bot._execute_put_order(signal, mock_client, mock_db, "acc-key")
 
         assert result is True
         mock_client.preview_options_order.assert_called_once_with(
@@ -146,7 +144,7 @@ class TestPutOrderExecution:
             preview_ids=[{"previewId": 1}],
         )
 
-    def test_execute_put_order_creates_cycle_atomically(self):
+    async def test_execute_put_order_creates_cycle_atomically(self):
         """On success: open_short_put_cycle called once atomically with all fields."""
         bot = _make_telegram_bot()
         signal = _make_put_signal(strike=48.0)
@@ -160,9 +158,7 @@ class TestPutOrderExecution:
 
         bot._app.bot.send_message = AsyncMock()
 
-        asyncio.get_event_loop().run_until_complete(
-            bot._execute_put_order(signal, mock_client, mock_db, "acc-key")
-        )
+        await bot._execute_put_order(signal, mock_client, mock_db, "acc-key")
 
         # Single atomic call replaces create_wheel_cycle + transition + open_wheel_position
         mock_db.open_short_put_cycle.assert_called_once_with(
@@ -183,7 +179,7 @@ class TestPutOrderExecution:
         mock_db.transition_wheel_state.assert_not_called()
         mock_db.open_wheel_position.assert_not_called()
 
-    def test_execute_put_order_does_not_create_cycle_on_failure(self):
+    async def test_execute_put_order_does_not_create_cycle_on_failure(self):
         """On E*TRADE API failure: open_short_put_cycle must NOT be called."""
         from src.etrade_client import ETradeAPIError
 
@@ -196,9 +192,7 @@ class TestPutOrderExecution:
         mock_db = _make_db_mock()
         bot._app.bot.send_message = AsyncMock()
 
-        result = asyncio.get_event_loop().run_until_complete(
-            bot._execute_put_order(signal, mock_client, mock_db, "acc-key")
-        )
+        result = await bot._execute_put_order(signal, mock_client, mock_db, "acc-key")
 
         assert result is False
         mock_db.open_short_put_cycle.assert_not_called()
@@ -213,7 +207,7 @@ class TestPutOrderExecution:
 class TestPutApprovalFlow:
     """Verify request_put_approval orchestrates message, event, and execution correctly."""
 
-    def test_approval_approved_calls_execute_put_order(self):
+    async def test_approval_approved_calls_execute_put_order(self):
         """When user taps Approve, _execute_put_order is called and APPROVED is returned."""
         bot = _make_telegram_bot()
         signal = _make_put_signal()
@@ -223,26 +217,18 @@ class TestPutApprovalFlow:
         mock_db = _make_db_mock()
         bot._app.bot.send_message = AsyncMock()
 
-        async def run():
-            # Simulate user tapping Approve mid-wait
-            async def fake_wait_for(coro, timeout):
-                # Set result and mark event done
-                bot._put_approval.result = "approved"
+        # Simulate user tapping Approve mid-wait
+        async def fake_wait_for(coro, timeout):
+            bot._put_approval.result = "approved"
 
-            with patch.object(
-                bot, "_execute_put_order", new=AsyncMock(return_value=True)
-            ) as mock_exec:
-                with patch("asyncio.wait_for", new=fake_wait_for):
-                    result = await bot.request_put_approval(
-                        signal, chain, mock_client, mock_db, "acc"
-                    )
-                mock_exec.assert_called_once()
-                return result
+        with patch.object(bot, "_execute_put_order", new=AsyncMock(return_value=True)) as mock_exec:
+            with patch("asyncio.wait_for", new=fake_wait_for):
+                result = await bot.request_put_approval(signal, chain, mock_client, mock_db, "acc")
+            mock_exec.assert_called_once()
 
-        result = asyncio.get_event_loop().run_until_complete(run())
         assert result == ApprovalResult.APPROVED
 
-    def test_approval_rejected_does_not_call_execute(self):
+    async def test_approval_rejected_does_not_call_execute(self):
         """When user taps Reject, _execute_put_order is NOT called and REJECTED is returned."""
         bot = _make_telegram_bot()
         signal = _make_put_signal()
@@ -252,24 +238,19 @@ class TestPutApprovalFlow:
         mock_db = _make_db_mock()
         bot._app.bot.send_message = AsyncMock()
 
-        async def run():
-            async def fake_wait_for(coro, timeout):
-                bot._put_approval.result = "rejected"
+        async def fake_wait_for(coro, timeout):
+            bot._put_approval.result = "rejected"
 
-            with patch.object(
-                bot, "_execute_put_order", new=AsyncMock(return_value=False)
-            ) as mock_exec:
-                with patch("asyncio.wait_for", new=fake_wait_for):
-                    result = await bot.request_put_approval(
-                        signal, chain, mock_client, mock_db, "acc"
-                    )
-                mock_exec.assert_not_called()
-                return result
+        with patch.object(
+            bot, "_execute_put_order", new=AsyncMock(return_value=False)
+        ) as mock_exec:
+            with patch("asyncio.wait_for", new=fake_wait_for):
+                result = await bot.request_put_approval(signal, chain, mock_client, mock_db, "acc")
+            mock_exec.assert_not_called()
 
-        result = asyncio.get_event_loop().run_until_complete(run())
         assert result == ApprovalResult.REJECTED
 
-    def test_approval_timeout_returns_timeout(self):
+    async def test_approval_timeout_returns_timeout(self):
         """When asyncio.TimeoutError fires, TIMEOUT is returned and no order placed."""
         bot = _make_telegram_bot()
         signal = _make_put_signal()
@@ -279,23 +260,20 @@ class TestPutApprovalFlow:
         mock_db = _make_db_mock()
         bot._app.bot.send_message = AsyncMock()
 
-        async def run():
-            async def fake_wait_for(coro, timeout):
-                raise asyncio.TimeoutError()
+        async def fake_wait_for(coro, timeout):
+            raise asyncio.TimeoutError()
 
-            with patch.object(bot, "_execute_put_order", new=AsyncMock()) as mock_exec:
-                with patch("asyncio.wait_for", new=fake_wait_for):
-                    with patch.object(bot, "send_message", new=AsyncMock()):
-                        result = await bot.request_put_approval(
-                            signal, chain, mock_client, mock_db, "acc"
-                        )
-                mock_exec.assert_not_called()
-                return result
+        with patch.object(bot, "_execute_put_order", new=AsyncMock()) as mock_exec:
+            with patch("asyncio.wait_for", new=fake_wait_for):
+                with patch.object(bot, "send_message", new=AsyncMock()):
+                    result = await bot.request_put_approval(
+                        signal, chain, mock_client, mock_db, "acc"
+                    )
+            mock_exec.assert_not_called()
 
-        result = asyncio.get_event_loop().run_until_complete(run())
         assert result == ApprovalResult.TIMEOUT
 
-    def test_put_approval_event_is_separate_from_intraday_event(self):
+    async def test_put_approval_event_is_separate_from_intraday_event(self):
         """_put_approval.event must be a different object from _approval_event."""
         bot = _make_telegram_bot()
         signal = _make_put_signal()
@@ -309,21 +287,18 @@ class TestPutApprovalFlow:
         mock_db = _make_db_mock()
         bot._app.bot.send_message = AsyncMock()
 
-        async def run():
-            async def fake_wait_for(coro, timeout):
-                bot._put_approval.result = "rejected"
+        async def fake_wait_for(coro, timeout):
+            bot._put_approval.result = "rejected"
 
-            with patch("asyncio.wait_for", new=fake_wait_for):
-                with patch.object(bot, "send_message", new=AsyncMock()):
-                    await bot.request_put_approval(signal, chain, mock_client, mock_db, "acc")
+        with patch("asyncio.wait_for", new=fake_wait_for):
+            with patch.object(bot, "send_message", new=AsyncMock()):
+                await bot.request_put_approval(signal, chain, mock_client, mock_db, "acc")
 
-            # _put_approval.event was set (a new Event, different from intraday)
-            assert bot._put_approval.event is not None
-            assert bot._put_approval.event is not intraday_event
-            # Intraday event remains untouched
-            assert not intraday_event.is_set()
-
-        asyncio.get_event_loop().run_until_complete(run())
+        # _put_approval.event was set (a new Event, different from intraday)
+        assert bot._put_approval.event is not None
+        assert bot._put_approval.event is not intraday_event
+        # Intraday event remains untouched
+        assert not intraday_event.is_set()
 
 
 # ---------------------------------------------------------------------------
@@ -346,7 +321,7 @@ class TestPutCallbackRouting:
         update.callback_query = query
         return update, query
 
-    def test_put_approve_sets_result_approved(self):
+    async def test_put_approve_sets_result_approved(self):
         """put_approve_ callback sets _put_approval.result='approved' and fires event."""
         bot = _make_telegram_bot()
         event = asyncio.Event()
@@ -358,12 +333,12 @@ class TestPutCallbackRouting:
         update, query = self._make_callback_update("put_approve_put_103000")
 
         with patch.object(bot, "_is_authorized", return_value=True):
-            asyncio.get_event_loop().run_until_complete(bot._handle_callback(update, MagicMock()))
+            await bot._handle_callback(update, MagicMock())
 
         assert bot._put_approval.result == "approved"
         assert event.is_set()
 
-    def test_put_reject_sets_result_rejected(self):
+    async def test_put_reject_sets_result_rejected(self):
         """put_reject_ callback sets _put_approval.result='rejected' and fires event."""
         bot = _make_telegram_bot()
         event = asyncio.Event()
@@ -373,12 +348,12 @@ class TestPutCallbackRouting:
         update, query = self._make_callback_update("put_reject_put_103000")
 
         with patch.object(bot, "_is_authorized", return_value=True):
-            asyncio.get_event_loop().run_until_complete(bot._handle_callback(update, MagicMock()))
+            await bot._handle_callback(update, MagicMock())
 
         assert bot._put_approval.result == "rejected"
         assert event.is_set()
 
-    def test_put_adjust_calls_handle_put_adjust(self):
+    async def test_put_adjust_calls_handle_put_adjust(self):
         """put_adjust_ callback delegates to _handle_put_adjust()."""
         bot = _make_telegram_bot()
         bot._put_approval.chain = _make_chain()
@@ -390,12 +365,10 @@ class TestPutCallbackRouting:
 
         with patch.object(bot, "_is_authorized", return_value=True):
             with patch.object(bot, "_handle_put_adjust", new=AsyncMock()) as mock_adjust:
-                asyncio.get_event_loop().run_until_complete(
-                    bot._handle_callback(update, MagicMock())
-                )
+                await bot._handle_callback(update, MagicMock())
                 mock_adjust.assert_called_once()
 
-    def test_put_alt_reject_sets_rejected(self):
+    async def test_put_alt_reject_sets_rejected(self):
         """put_alt_reject_ callback sets _put_approval.result='rejected' and fires event."""
         bot = _make_telegram_bot()
         event = asyncio.Event()
@@ -405,12 +378,12 @@ class TestPutCallbackRouting:
         update, query = self._make_callback_update("put_alt_reject_put_103000")
 
         with patch.object(bot, "_is_authorized", return_value=True):
-            asyncio.get_event_loop().run_until_complete(bot._handle_callback(update, MagicMock()))
+            await bot._handle_callback(update, MagicMock())
 
         assert bot._put_approval.result == "rejected"
         assert event.is_set()
 
-    def test_put_alt_sets_strike_result(self):
+    async def test_put_alt_sets_strike_result(self):
         """put_alt_ callback extracts strike and sets it as _put_approval.result."""
         bot = _make_telegram_bot()
         event = asyncio.Event()
@@ -420,12 +393,12 @@ class TestPutCallbackRouting:
         update, query = self._make_callback_update("put_alt_47.0_put_103000")
 
         with patch.object(bot, "_is_authorized", return_value=True):
-            asyncio.get_event_loop().run_until_complete(bot._handle_callback(update, MagicMock()))
+            await bot._handle_callback(update, MagicMock())
 
         assert bot._put_approval.result == "47.0"
         assert event.is_set()
 
-    def test_stale_put_approve_is_ignored(self):
+    async def test_stale_put_approve_is_ignored(self):
         """A callback with a different callback_id tail is treated as stale."""
         bot = _make_telegram_bot()
         event = asyncio.Event()
@@ -436,12 +409,12 @@ class TestPutCallbackRouting:
         update, query = self._make_callback_update("put_approve_put_103000")
 
         with patch.object(bot, "_is_authorized", return_value=True):
-            asyncio.get_event_loop().run_until_complete(bot._handle_callback(update, MagicMock()))
+            await bot._handle_callback(update, MagicMock())
 
         assert bot._put_approval.result is None
         assert not event.is_set()
 
-    def test_put_callback_with_no_pending_approval_is_ignored(self):
+    async def test_put_callback_with_no_pending_approval_is_ignored(self):
         """A callback that arrives with no pending approval is treated as stale."""
         bot = _make_telegram_bot()
         event = asyncio.Event()
@@ -451,7 +424,7 @@ class TestPutCallbackRouting:
         update, query = self._make_callback_update("put_approve_put_103000")
 
         with patch.object(bot, "_is_authorized", return_value=True):
-            asyncio.get_event_loop().run_until_complete(bot._handle_callback(update, MagicMock()))
+            await bot._handle_callback(update, MagicMock())
 
         assert bot._put_approval.result is None
         assert not event.is_set()
