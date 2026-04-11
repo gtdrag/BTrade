@@ -20,6 +20,7 @@ from telegram.ext import (
 from ..async_utils import run_sync_in_executor
 from ..utils import get_et_now, normalize_expiry_date
 from .analysis_commands import AnalysisCommandsMixin
+from .approval_flow import ApprovalFlow
 from .auth_commands import AuthCommandsMixin
 from .backtest_commands import BacktestCommandsMixin
 from .trading_commands import TradingCommandsMixin
@@ -87,33 +88,15 @@ class TelegramBot(
         self._pending_sellall = None  # Stores pending sellall confirmation state
         self._is_running = False
 
-        # Put options approval — separate event/result to avoid collision with intraday approvals
-        self._put_approval_event: Optional[asyncio.Event] = None
-        self._put_approval_result: Optional[str] = None  # "approved", "rejected", or strike string
-        self._put_approval_signal: Optional[Any] = None  # stores PutSignal for execution
-        self._put_approval_chain: Optional[List[Dict]] = None  # stores full chain for adjust
-        self._put_approval_callback_id: Optional[str] = None  # current valid callback_id
-
-        # Call options approval — separate event/result to avoid collision with put and intraday approvals
-        self._call_approval_event: Optional[asyncio.Event] = None
-        self._call_approval_result: Optional[str] = None  # "approved", "rejected", or strike string
-        self._call_approval_signal: Optional[Any] = None  # stores CallSignal for execution
-        self._call_approval_chain: Optional[List[Dict]] = None  # stores full chain for adjust
-        self._call_approval_callback_id: Optional[str] = None  # current valid callback_id
-
-        # BTC (buy-to-close) approval — separate event to avoid collision with put/call/intraday
-        self._btc_approval_event: Optional[asyncio.Event] = None
-        self._btc_approval_result: Optional[str] = None  # "approved" or "rejected"
-        self._btc_approval_position: Optional[dict] = None  # position dict being closed
-        self._btc_approval_chain: Optional[list] = None  # live chain at time of approval
-        self._btc_approval_callback_id: Optional[str] = None  # current valid callback_id
-
-        # Roll approval — separate event to avoid collision with other approval flows
-        self._roll_approval_event: Optional[asyncio.Event] = None
-        self._roll_approval_result: Optional[str] = None  # "approved" or "rejected"
-        self._roll_approval_position: Optional[dict] = None  # current position being rolled
-        self._roll_approval_new_contract: Optional[dict] = None  # proposed new contract
-        self._roll_approval_callback_id: Optional[str] = None  # current valid callback_id
+        # Options approval flows — each flow (put/call/btc/roll) has its own
+        # event/result/callback_id so multiple approvals can be pending without
+        # collision. See src/telegram/approval_flow.py for the container class.
+        # Replaces 16 loose instance attributes flagged by the adversarial
+        # architecture review as "approval state explosion".
+        self._put_approval = ApprovalFlow()
+        self._call_approval = ApprovalFlow()
+        self._btc_approval = ApprovalFlow()
+        self._roll_approval = ApprovalFlow()
 
     @staticmethod
     def _extract_callback_id(data: str, prefix: str) -> Optional[str]:
@@ -472,24 +455,24 @@ class TelegramBot(
 
         # Handle put options approval callbacks (before intraday approve_/reject_ handlers)
         if data.startswith("put_approve_"):
-            if self._is_stale_callback(data, self._put_approval_callback_id):
+            if self._is_stale_callback(data, self._put_approval.callback_id):
                 logger.warning("Ignoring stale put_approve callback: %s", data)
                 await query.edit_message_text(
                     text="⏱ *EXPIRED* — This button is from an older approval request.",
                     parse_mode="Markdown",
                 )
                 return
-            self._put_approval_result = "approved"
+            self._put_approval.result = "approved"
             await query.edit_message_text(
                 text=query.message.text + "\n\n✅ *APPROVED* — Executing put order...",
                 parse_mode="Markdown",
             )
-            if self._put_approval_event:
-                self._put_approval_event.set()
+            if self._put_approval.event:
+                self._put_approval.event.set()
             return
 
         elif data.startswith("put_adjust_"):
-            if self._is_stale_callback(data, self._put_approval_callback_id):
+            if self._is_stale_callback(data, self._put_approval.callback_id):
                 logger.warning("Ignoring stale put_adjust callback: %s", data)
                 await query.edit_message_text(
                     text="⏱ *EXPIRED* — This button is from an older approval request.",
@@ -500,16 +483,16 @@ class TelegramBot(
             return
 
         elif data.startswith("put_alt_reject_"):
-            if self._is_stale_callback(data, self._put_approval_callback_id):
+            if self._is_stale_callback(data, self._put_approval.callback_id):
                 logger.warning("Ignoring stale put_alt_reject callback: %s", data)
                 return
-            self._put_approval_result = "rejected"
+            self._put_approval.result = "rejected"
             await query.edit_message_text(
                 text="❌ All alternatives rejected. Put suggestion cancelled.",
                 parse_mode="Markdown",
             )
-            if self._put_approval_event:
-                self._put_approval_event.set()
+            if self._put_approval.event:
+                self._put_approval.event.set()
             return
 
         elif data.startswith("put_alt_"):
@@ -518,73 +501,73 @@ class TelegramBot(
             # parts: ["put", "alt", strike, callback_id...]
             try:
                 selected_strike = float(parts[2])
-                self._put_approval_result = str(selected_strike)
+                self._put_approval.result = str(selected_strike)
                 await query.edit_message_text(
                     text=f"✅ *APPROVED* — Executing put at strike ${selected_strike}...",
                     parse_mode="Markdown",
                 )
-                if self._put_approval_event:
-                    self._put_approval_event.set()
+                if self._put_approval.event:
+                    self._put_approval.event.set()
             except (IndexError, ValueError) as e:
                 logger.error(f"Failed to parse put_alt callback data '{data}': {e}")
                 await query.edit_message_text(
                     text="❌ Error parsing selection. Put suggestion cancelled.",
                     parse_mode="Markdown",
                 )
-                self._put_approval_result = "rejected"
-                if self._put_approval_event:
-                    self._put_approval_event.set()
+                self._put_approval.result = "rejected"
+                if self._put_approval.event:
+                    self._put_approval.event.set()
             return
 
         elif data.startswith("put_reject_"):
-            if self._is_stale_callback(data, self._put_approval_callback_id):
+            if self._is_stale_callback(data, self._put_approval.callback_id):
                 logger.warning("Ignoring stale put_reject callback: %s", data)
                 return
-            self._put_approval_result = "rejected"
+            self._put_approval.result = "rejected"
             await query.edit_message_text(
                 text=query.message.text + "\n\n❌ *REJECTED* — Put suggestion cancelled.",
                 parse_mode="Markdown",
             )
-            if self._put_approval_event:
-                self._put_approval_event.set()
+            if self._put_approval.event:
+                self._put_approval.event.set()
             return
 
         # Handle call options approval callbacks (BEFORE generic approve_/reject_ handlers)
         elif data.startswith("call_approve_"):
-            if self._is_stale_callback(data, self._call_approval_callback_id):
+            if self._is_stale_callback(data, self._call_approval.callback_id):
                 logger.warning("Ignoring stale call_approve callback: %s", data)
                 await query.edit_message_text(
                     text="⏱ EXPIRED — This button is from an older approval request.",
                     parse_mode="Markdown",
                 )
                 return
-            self._call_approval_result = "approved"
+            self._call_approval.result = "approved"
             await query.edit_message_text(
                 text=query.message.text + "\n\n--- Approved --- Executing call order...",
                 parse_mode="Markdown",
             )
-            if self._call_approval_event:
-                self._call_approval_event.set()
+            if self._call_approval.event:
+                self._call_approval.event.set()
             return
 
         elif data.startswith("call_adjust_"):
-            if self._is_stale_callback(data, self._call_approval_callback_id):
+            if self._is_stale_callback(data, self._call_approval.callback_id):
                 logger.warning("Ignoring stale call_adjust callback: %s", data)
                 return
             await self._handle_call_adjust(query, data)
             return
 
         elif data.startswith("call_alt_reject_"):
-            if self._is_stale_callback(data, self._call_approval_callback_id):
+            if self._is_stale_callback(data, self._call_approval.callback_id):
                 logger.warning("Ignoring stale call_alt_reject callback: %s", data)
                 return
-            self._call_approval_result = "rejected"
+            self._call_approval.result = "rejected"
             await query.edit_message_text(
                 text="All alternatives rejected. Call suggestion cancelled.",
                 parse_mode="Markdown",
             )
-            if self._call_approval_event:
-                self._call_approval_event.set()
+            if self._call_approval.event:
+                self._call_approval.event.set()
             return
 
         elif data.startswith("call_alt_"):
@@ -593,80 +576,80 @@ class TelegramBot(
             # parts: ["call", "alt", strike, callback_id...]
             try:
                 selected_strike = float(parts[2])
-                self._call_approval_result = str(selected_strike)
+                self._call_approval.result = str(selected_strike)
                 await query.edit_message_text(
                     text=f"--- Approved --- Executing call at strike ${selected_strike}...",
                     parse_mode="Markdown",
                 )
-                if self._call_approval_event:
-                    self._call_approval_event.set()
+                if self._call_approval.event:
+                    self._call_approval.event.set()
             except (IndexError, ValueError) as e:
                 logger.error(f"Failed to parse call_alt callback data '{data}': {e}")
                 await query.edit_message_text(
                     text="Error parsing selection. Call suggestion cancelled.",
                     parse_mode="Markdown",
                 )
-                self._call_approval_result = "rejected"
-                if self._call_approval_event:
-                    self._call_approval_event.set()
+                self._call_approval.result = "rejected"
+                if self._call_approval.event:
+                    self._call_approval.event.set()
             return
 
         elif data.startswith("call_reject_"):
-            if self._is_stale_callback(data, self._call_approval_callback_id):
+            if self._is_stale_callback(data, self._call_approval.callback_id):
                 logger.warning("Ignoring stale call_reject callback: %s", data)
                 return
-            self._call_approval_result = "rejected"
+            self._call_approval.result = "rejected"
             await query.edit_message_text(
                 text=query.message.text + "\n\n--- Rejected --- Call suggestion cancelled.",
                 parse_mode="Markdown",
             )
-            if self._call_approval_event:
-                self._call_approval_event.set()
+            if self._call_approval.event:
+                self._call_approval.event.set()
             return
 
         # Handle BTC (buy-to-close) approval callbacks — separate from put/call/intraday
         elif data.startswith("btc_approve_"):
-            if self._is_stale_callback(data, self._btc_approval_callback_id):
+            if self._is_stale_callback(data, self._btc_approval.callback_id):
                 logger.warning("Ignoring stale btc_approve callback: %s", data)
                 await query.answer("Expired — newer BTC request is active")
                 return
-            self._btc_approval_result = "approved"
-            if self._btc_approval_event:
-                self._btc_approval_event.set()
+            self._btc_approval.result = "approved"
+            if self._btc_approval.event:
+                self._btc_approval.event.set()
             await query.answer("Buy-to-close approved")
             return
 
         elif data.startswith("btc_reject_"):
-            if self._is_stale_callback(data, self._btc_approval_callback_id):
+            if self._is_stale_callback(data, self._btc_approval.callback_id):
                 logger.warning("Ignoring stale btc_reject callback: %s", data)
                 await query.answer("Expired — newer BTC request is active")
                 return
-            self._btc_approval_result = "rejected"
-            if self._btc_approval_event:
-                self._btc_approval_event.set()
+            self._btc_approval.result = "rejected"
+            if self._btc_approval.event:
+                self._btc_approval.event.set()
             await query.answer("Buy-to-close rejected")
             return
 
         # Handle roll approval callbacks — separate from BTC/put/call/intraday
         elif data.startswith("roll_approve_"):
-            if self._is_stale_callback(data, self._roll_approval_callback_id):
+            if self._is_stale_callback(data, self._roll_approval.callback_id):
                 logger.warning("Ignoring stale roll_approve callback: %s", data)
                 await query.answer("Expired — newer roll request is active")
                 return
-            self._roll_approval_result = "approved"
-            if self._roll_approval_event:
-                self._roll_approval_event.set()
+            self._roll_approval.result = "approved"
+            if self._roll_approval.event:
+                self._roll_approval.event.set()
             await query.answer("Roll approved")
             return
 
         elif data.startswith("roll_reject_"):
-            if self._is_stale_callback(data, self._roll_approval_callback_id):
+            if self._is_stale_callback(data, self._roll_approval.callback_id):
                 logger.warning("Ignoring stale roll_reject callback: %s", data)
                 await query.answer("Expired — newer roll request is active")
                 return
-            self._roll_approval_result = "rejected"
-            if self._roll_approval_event:
-                self._roll_approval_event.set()
+            self._roll_approval.result = "rejected"
+            if self._roll_approval.event:
+                self._roll_approval.event.set()
             await query.answer("Roll rejected")
             return
 
@@ -739,7 +722,7 @@ class TelegramBot(
 
         Sends a Telegram message with strike/expiry/greeks details and 3 inline
         buttons: Approve, Adjust (show alternatives), Reject.  Uses a separate
-        _put_approval_event so it cannot collide with the intraday _approval_event.
+        _put_approval.event so it cannot collide with the intraday _approval_event.
 
         Returns ApprovalResult indicating the user's decision or timeout.
         """
@@ -754,9 +737,9 @@ class TelegramBot(
             callback_id = f"put_{get_et_now().strftime('%H%M%S')}"
 
             # Store for use in callback handlers
-            self._put_approval_signal = signal
-            self._put_approval_chain = chain
-            self._put_approval_callback_id = callback_id
+            self._put_approval.signal = signal
+            self._put_approval.chain = chain
+            self._put_approval.callback_id = callback_id
 
             # Build message
             message = (
@@ -789,27 +772,27 @@ class TelegramBot(
             )
 
             # Set up separate event for put approval (T-03-05: no collision)
-            self._put_approval_event = asyncio.Event()
-            self._put_approval_result = None
+            self._put_approval.event = asyncio.Event()
+            self._put_approval.result = None
 
             try:
                 await asyncio.wait_for(
-                    self._put_approval_event.wait(),
+                    self._put_approval.event.wait(),
                     timeout=self.approval_timeout,
                 )
             except asyncio.TimeoutError:
                 # Clear callback_id so any subsequent taps on the stale buttons
                 # are rejected by _is_stale_callback
-                self._put_approval_callback_id = None
+                self._put_approval.callback_id = None
                 await self.send_message(
                     f"⏰ *TIMEOUT*\n\nNo response received for put signal at ${signal.strike:.2f}. "
                     "Suggestion cancelled."
                 )
                 return ApprovalResult.TIMEOUT
 
-            result = self._put_approval_result
+            result = self._put_approval.result
             # Clear callback_id now that this approval has resolved
-            self._put_approval_callback_id = None
+            self._put_approval.callback_id = None
 
             if result == "rejected":
                 return ApprovalResult.REJECTED
@@ -938,8 +921,8 @@ class TelegramBot(
         from ..wheel_strategy import WheelStrategy  # local — avoid circular
 
         if option_type == "PUT":
-            chain = self._put_approval_chain or []
-            signal = self._put_approval_signal
+            chain = self._put_approval.chain or []
+            signal = self._put_approval.signal
             prefix = "put_adjust_"
             alt_prefix = "put_alt_"
             reject_prefix = "put_alt_reject_"
@@ -954,8 +937,8 @@ class TelegramBot(
             )
             empty_alt_msg = "⚠️ No alternative strikes different from the suggested strike."
         elif option_type == "CALL":
-            chain = self._call_approval_chain or []
-            signal = self._call_approval_signal
+            chain = self._call_approval.chain or []
+            signal = self._call_approval.signal
             prefix = "call_adjust_"
             alt_prefix = "call_alt_"
             reject_prefix = "call_alt_reject_"
@@ -1052,7 +1035,7 @@ class TelegramBot(
 
         Sends a Telegram message with strike/expiry/greeks/cost_basis details and 3 inline
         buttons: Approve, Adjust (show alternatives above cost basis), Reject. Uses a separate
-        _call_approval_event so it cannot collide with the intraday or put _approval_events.
+        _call_approval.event so it cannot collide with the intraday or put _approval_events.
 
         Returns ApprovalResult indicating the user's decision or timeout.
         """
@@ -1067,9 +1050,9 @@ class TelegramBot(
             callback_id = f"call_{get_et_now().strftime('%H%M%S')}"
 
             # Store for use in callback handlers
-            self._call_approval_signal = signal
-            self._call_approval_chain = chain
-            self._call_approval_callback_id = callback_id
+            self._call_approval.signal = signal
+            self._call_approval.chain = chain
+            self._call_approval.callback_id = callback_id
 
             # Build message
             message = (
@@ -1102,24 +1085,24 @@ class TelegramBot(
             )
 
             # Set up separate event for call approval (avoids collision with put/intraday)
-            self._call_approval_event = asyncio.Event()
-            self._call_approval_result = None
+            self._call_approval.event = asyncio.Event()
+            self._call_approval.result = None
 
             try:
                 await asyncio.wait_for(
-                    self._call_approval_event.wait(),
+                    self._call_approval.event.wait(),
                     timeout=self.approval_timeout,
                 )
             except asyncio.TimeoutError:
-                self._call_approval_callback_id = None
+                self._call_approval.callback_id = None
                 await self.send_message(
                     f"⏰ *TIMEOUT*\n\nNo response received for call signal at ${signal.strike:.2f}. "
                     "Suggestion cancelled."
                 )
                 return ApprovalResult.TIMEOUT
 
-            result = self._call_approval_result
-            self._call_approval_callback_id = None
+            result = self._call_approval.result
+            self._call_approval.callback_id = None
 
             if result == "rejected":
                 return ApprovalResult.REJECTED
@@ -1263,7 +1246,7 @@ class TelegramBot(
 
         Sends a Telegram message with option symbol, entry premium, current ask,
         profit %, and dollar savings from closing early. Uses Approve/Reject buttons.
-        Uses a separate _btc_approval_event to avoid collision with put/call/intraday.
+        Uses a separate _btc_approval.event to avoid collision with put/call/intraday.
 
         Returns ApprovalResult indicating the user's decision or timeout.
         """
@@ -1300,9 +1283,9 @@ class TelegramBot(
             callback_id = f"btc_{position_id}"
 
             # Store for callback use
-            self._btc_approval_position = position
-            self._btc_approval_chain = chain
-            self._btc_approval_callback_id = callback_id
+            self._btc_approval.position = position
+            self._btc_approval.chain = chain
+            self._btc_approval.callback_id = callback_id
 
             message = (
                 "*PROFIT TARGET HIT - 50% Reached*\n\n"
@@ -1332,24 +1315,24 @@ class TelegramBot(
             )
 
             # Set up fresh event for BTC approval
-            self._btc_approval_event = asyncio.Event()
-            self._btc_approval_result = None
+            self._btc_approval.event = asyncio.Event()
+            self._btc_approval.result = None
 
             try:
                 await asyncio.wait_for(
-                    self._btc_approval_event.wait(),
+                    self._btc_approval.event.wait(),
                     timeout=self.approval_timeout,
                 )
             except asyncio.TimeoutError:
-                self._btc_approval_callback_id = None
+                self._btc_approval.callback_id = None
                 await self.send_message(
                     f"*TIMEOUT*\n\nNo response received for BTC at ${current_ask:.2f}. "
                     "Suggestion cancelled."
                 )
                 return ApprovalResult.TIMEOUT
 
-            result = self._btc_approval_result
-            self._btc_approval_callback_id = None
+            result = self._btc_approval.result
+            self._btc_approval.callback_id = None
 
             if result == "rejected":
                 logger.info("BTC approval rejected for position_id=%d", position_id)
@@ -1556,9 +1539,9 @@ class TelegramBot(
             new_dte = int(new_contract.get("dte", 0))
 
             # Store for callback use
-            self._roll_approval_position = position
-            self._roll_approval_new_contract = new_contract
-            self._roll_approval_callback_id = callback_id
+            self._roll_approval.position = position
+            self._roll_approval.new_contract = new_contract
+            self._roll_approval.callback_id = callback_id
 
             message = (
                 "*DEFENSIVE ROLL SUGGESTED*\n\n"
@@ -1594,23 +1577,23 @@ class TelegramBot(
             )
 
             # Set up fresh event for roll approval
-            self._roll_approval_event = asyncio.Event()
-            self._roll_approval_result = None
+            self._roll_approval.event = asyncio.Event()
+            self._roll_approval.result = None
 
             try:
                 await asyncio.wait_for(
-                    self._roll_approval_event.wait(),
+                    self._roll_approval.event.wait(),
                     timeout=self.approval_timeout,
                 )
             except asyncio.TimeoutError:
-                self._roll_approval_callback_id = None
+                self._roll_approval.callback_id = None
                 await self.send_message(
                     "*TIMEOUT*\n\nNo response received for roll suggestion. Suggestion cancelled."
                 )
                 return ApprovalResult.TIMEOUT
 
-            result = self._roll_approval_result
-            self._roll_approval_callback_id = None
+            result = self._roll_approval.result
+            self._roll_approval.callback_id = None
 
             if result == "rejected":
                 logger.info("Roll rejected for position_id=%d", position_id)

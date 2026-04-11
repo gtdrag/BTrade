@@ -36,6 +36,7 @@ def _make_etrade_mock():
     mock.place_options_order.return_value = {"orderId": "ORD123"}
     return mock
 
+
 # ---------------------------------------------------------------------------
 # Shared helpers / fixtures
 # ---------------------------------------------------------------------------
@@ -820,24 +821,12 @@ def _make_telegram_bot():
     bot._approval_result = None
     bot._pending_sellall = None
     bot._is_running = False
-    bot._put_approval_event = None
-    bot._put_approval_result = None
-    bot._put_approval_signal = None
-    bot._put_approval_chain = None
-    bot._call_approval_event = None
-    bot._call_approval_result = None
-    bot._call_approval_signal = None
-    bot._call_approval_chain = None
-    # BTC approval state (Task 1 of 05-02)
-    bot._btc_approval_event = None
-    bot._btc_approval_result = None
-    bot._btc_approval_position = None
-    bot._btc_approval_chain = None
-    # Roll approval state (Task 2 of 05-02)
-    bot._roll_approval_event = None
-    bot._roll_approval_result = None
-    bot._roll_approval_position = None
-    bot._roll_approval_new_contract = None
+    from src.telegram.approval_flow import ApprovalFlow
+
+    bot._put_approval = ApprovalFlow()
+    bot._call_approval = ApprovalFlow()
+    bot._btc_approval = ApprovalFlow()
+    bot._roll_approval = ApprovalFlow()
     return bot
 
 
@@ -904,7 +893,7 @@ class TestBuyToClose:
 
         async def run():
             async def fake_wait_for(coro, timeout):
-                bot._btc_approval_result = "rejected"
+                bot._btc_approval.result = "rejected"
 
             with patch("asyncio.wait_for", new=fake_wait_for):
                 await bot.request_profit_take_approval(
@@ -926,7 +915,7 @@ class TestBuyToClose:
 
         async def run():
             async def fake_wait_for(coro, timeout):
-                bot._btc_approval_result = "rejected"
+                bot._btc_approval.result = "rejected"
 
             with patch("asyncio.wait_for", new=fake_wait_for):
                 await bot.request_profit_take_approval(
@@ -951,7 +940,7 @@ class TestBuyToClose:
 
         async def run():
             async def fake_wait_for(coro, timeout):
-                bot._btc_approval_result = "approved"
+                bot._btc_approval.result = "approved"
 
             with patch.object(
                 bot, "_execute_btc_order", new=AsyncMock(return_value=True)
@@ -975,7 +964,7 @@ class TestBuyToClose:
 
         async def run():
             async def fake_wait_for(coro, timeout):
-                bot._btc_approval_result = "rejected"
+                bot._btc_approval.result = "rejected"
 
             with patch.object(bot, "_execute_btc_order", new=AsyncMock()) as mock_exec:
                 with patch("asyncio.wait_for", new=fake_wait_for):
@@ -1017,12 +1006,13 @@ class TestBuyToClose:
         #   (self, account_id_key, symbol, option_type, expiry_year,
         #    expiry_month, expiry_day, strike_price, order_action, quantity, limit_price)
         preview_args = mock_client.preview_options_order.call_args[0]
-        assert preview_args[7] == "BUY_CLOSE", \
-            f"BUY_CLOSE should be in slot 7 (order_action), got {preview_args}"
-        assert preview_args[0] == "acc"       # account_id_key
-        assert preview_args[1] == "IBIT"      # symbol
-        assert preview_args[2] == "PUT"       # option_type
-        assert preview_args[9] == 0.60        # limit_price (close_price)
+        assert (
+            preview_args[7] == "BUY_CLOSE"
+        ), f"BUY_CLOSE should be in slot 7 (order_action), got {preview_args}"
+        assert preview_args[0] == "acc"  # account_id_key
+        assert preview_args[1] == "IBIT"  # symbol
+        assert preview_args[2] == "PUT"  # option_type
+        assert preview_args[9] == 0.60  # limit_price (close_price)
 
     def test_execute_btc_short_put_transitions_to_cash(self):
         """_execute_btc_order for SHORT_PUT transitions cycle to CASH."""
@@ -1175,30 +1165,30 @@ class TestBTCCallbackRouting:
         return update
 
     def test_btc_approve_sets_btc_result_not_call_or_put(self):
-        """btc_approve_ callback sets _btc_approval_result='approved', not _call/_put result."""
+        """btc_approve_ callback sets _btc_approval.result='approved', not _call/_put result."""
         bot = _make_telegram_bot()
-        bot._btc_approval_event = asyncio.Event()
-        bot._btc_approval_callback_id = "1"  # matches tail of btc_approve_1
+        bot._btc_approval.event = asyncio.Event()
+        bot._btc_approval.callback_id = "1"  # matches tail of btc_approve_1
         update = self._make_update(data="btc_approve_1")
 
         asyncio.get_event_loop().run_until_complete(bot._handle_callback(update, MagicMock()))
 
-        assert bot._btc_approval_result == "approved"
-        assert bot._call_approval_result is None
-        assert bot._put_approval_result is None
+        assert bot._btc_approval.result == "approved"
+        assert bot._call_approval.result is None
+        assert bot._put_approval.result is None
 
     def test_btc_reject_sets_btc_result_not_call_or_put(self):
-        """btc_reject_ callback sets _btc_approval_result='rejected', not _call/_put result."""
+        """btc_reject_ callback sets _btc_approval.result='rejected', not _call/_put result."""
         bot = _make_telegram_bot()
-        bot._btc_approval_event = asyncio.Event()
-        bot._btc_approval_callback_id = "1"
+        bot._btc_approval.event = asyncio.Event()
+        bot._btc_approval.callback_id = "1"
         update = self._make_update(data="btc_reject_1")
 
         asyncio.get_event_loop().run_until_complete(bot._handle_callback(update, MagicMock()))
 
-        assert bot._btc_approval_result == "rejected"
-        assert bot._call_approval_result is None
-        assert bot._put_approval_result is None
+        assert bot._btc_approval.result == "rejected"
+        assert bot._call_approval.result is None
+        assert bot._put_approval.result is None
 
 
 class TestSchedulerBTCWiring:
@@ -1329,6 +1319,7 @@ class TestSchedulerBTCWiring:
 # Task 2 (05-02): Telegram roll approval flow with credit-only validation
 # ---------------------------------------------------------------------------
 
+
 def _make_new_contract(
     strike: float = 48.0,
     bid: float = 1.40,
@@ -1391,7 +1382,7 @@ class TestRollApproval:
 
         async def run():
             async def fake_wait_for(coro, timeout):
-                bot._roll_approval_result = "rejected"
+                bot._roll_approval.result = "rejected"
 
             with patch("asyncio.wait_for", new=fake_wait_for):
                 await bot.request_roll_approval(
@@ -1414,7 +1405,7 @@ class TestRollApproval:
 
         async def run():
             async def fake_wait_for(coro, timeout):
-                bot._roll_approval_result = "rejected"
+                bot._roll_approval.result = "rejected"
 
             with patch("asyncio.wait_for", new=fake_wait_for):
                 await bot.request_roll_approval(
@@ -1440,7 +1431,7 @@ class TestRollApproval:
 
         async def run():
             async def fake_wait_for(coro, timeout):
-                bot._roll_approval_result = "approved"
+                bot._roll_approval.result = "approved"
 
             with patch.object(bot, "_execute_roll", new=AsyncMock(return_value=True)) as mock_exec:
                 with patch("asyncio.wait_for", new=fake_wait_for):
@@ -1463,7 +1454,7 @@ class TestRollApproval:
 
         async def run():
             async def fake_wait_for(coro, timeout):
-                bot._roll_approval_result = "rejected"
+                bot._roll_approval.result = "rejected"
 
             with patch.object(bot, "_execute_roll", new=AsyncMock()) as mock_exec:
                 with patch("asyncio.wait_for", new=fake_wait_for):
@@ -1613,10 +1604,8 @@ class TestRollExecution:
         sto_args = mock_client.preview_options_order.call_args_list[1][0]
 
         # Position-sensitive: order_action is slot 7
-        assert btc_args[7] == "BUY_CLOSE", \
-            f"BUY_CLOSE should be in slot 7, got {btc_args}"
-        assert sto_args[7] == "SELL_OPEN", \
-            f"SELL_OPEN should be in slot 7, got {sto_args}"
+        assert btc_args[7] == "BUY_CLOSE", f"BUY_CLOSE should be in slot 7, got {btc_args}"
+        assert sto_args[7] == "SELL_OPEN", f"SELL_OPEN should be in slot 7, got {sto_args}"
         # Full arg count check
         assert len(btc_args) == 10, f"preview_options_order expects 10 args, got {len(btc_args)}"
         assert len(sto_args) == 10, f"preview_options_order expects 10 args, got {len(sto_args)}"
@@ -1724,20 +1713,18 @@ class TestRollCallbackRouting:
         return update
 
     def test_roll_approve_sets_roll_result_not_btc_or_put_or_call(self):
-        """roll_approve_ callback sets _roll_approval_result='approved', not btc/call/put."""
+        """roll_approve_ callback sets _roll_approval.result='approved', not btc/call/put."""
         bot = _make_telegram_bot()
-        bot._roll_approval_event = asyncio.Event()
-        bot._roll_approval_callback_id = "1"  # matches tail of roll_approve_roll_1
+        bot._roll_approval.event = asyncio.Event()
+        bot._roll_approval.callback_id = "1"  # matches tail of roll_approve_roll_1
         update = self._make_update(data="roll_approve_roll_1")
 
-        asyncio.get_event_loop().run_until_complete(
-            bot._handle_callback(update, MagicMock())
-        )
+        asyncio.get_event_loop().run_until_complete(bot._handle_callback(update, MagicMock()))
 
-        assert bot._roll_approval_result == "approved"
-        assert bot._btc_approval_result is None
-        assert bot._call_approval_result is None
-        assert bot._put_approval_result is None
+        assert bot._roll_approval.result == "approved"
+        assert bot._btc_approval.result is None
+        assert bot._call_approval.result is None
+        assert bot._put_approval.result is None
 
 
 class TestSchedulerRollWiring:
@@ -1754,10 +1741,13 @@ class TestSchedulerRollWiring:
         cycle_state="SHORT_PUT",
     ):
         from src.smart_scheduler import SmartScheduler
+
         scheduler = SmartScheduler.__new__(SmartScheduler)
         scheduler.db = MagicMock()
         scheduler.telegram_bot = MagicMock()
-        scheduler.telegram_bot.request_roll_approval = AsyncMock(return_value=ApprovalResult.APPROVED)
+        scheduler.telegram_bot.request_roll_approval = AsyncMock(
+            return_value=ApprovalResult.APPROVED
+        )
         scheduler.telegram_bot.send_dte_alert = AsyncMock()
         scheduler._send_notification = MagicMock()
         scheduler._monitoring_approval_pending = False
@@ -1810,9 +1800,9 @@ class TestSchedulerRollWiring:
                 }
             return ApprovalResult.APPROVED
 
-        with patch("src.smart_scheduler.is_trading_day", return_value=True), \
-             patch("src.smart_scheduler.get_et_now"), \
-             patch("src.smart_scheduler.run_async", side_effect=capture_run_async):
+        with patch("src.smart_scheduler.is_trading_day", return_value=True), patch(
+            "src.smart_scheduler.get_et_now"
+        ), patch("src.smart_scheduler.run_async", side_effect=capture_run_async):
             scheduler._job_wheel_monitoring()
 
         # At least 2 run_async calls: monitoring checks + roll approval
@@ -1839,9 +1829,9 @@ class TestSchedulerRollWiring:
                 "chain": chain,
             }
 
-        with patch("src.smart_scheduler.is_trading_day", return_value=True), \
-             patch("src.smart_scheduler.get_et_now"), \
-             patch("src.smart_scheduler.run_async", side_effect=capture_run_async):
+        with patch("src.smart_scheduler.is_trading_day", return_value=True), patch(
+            "src.smart_scheduler.get_et_now"
+        ), patch("src.smart_scheduler.run_async", side_effect=capture_run_async):
             scheduler._job_wheel_monitoring()
 
         scheduler._send_notification.assert_called_once()

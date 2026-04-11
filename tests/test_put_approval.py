@@ -8,28 +8,25 @@ Covers:
 4. Scheduler job skips on non-trading day
 5. Scheduler job skips when no signal
 6. Scheduler job calls request_put_approval when signal fires
-7. Separate _put_approval_event (not shared with _approval_event)
+7. Separate _put_approval.event (not shared with _approval_event)
 8. _execute_put_order creates cycle and transitions to SHORT_PUT
 """
 
 import asyncio
 import sys
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch, call
-
-import pytest
+from unittest.mock import AsyncMock, MagicMock, patch
 
 # Ensure project root is on path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.wheel_strategy import PutSignal
-from src.wheel_state import WheelState
 from src.telegram.utils import ApprovalResult
-
+from src.wheel_strategy import PutSignal
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_put_signal(strike: float = 48.0) -> PutSignal:
     """Build a minimal PutSignal for testing."""
@@ -57,23 +54,25 @@ def _make_chain(strikes=(46.0, 47.0, 48.0, 49.0, 50.0)) -> list:
     contracts = []
     for s in strikes:
         delta = -(0.20 + (50.0 - s) * 0.02)  # rough approximation
-        contracts.append({
-            "symbol": f"IBIT260515P{int(s * 1000):08d}",
-            "option_type": "PUT",
-            "strike": s,
-            "delta": delta,
-            "bid": 1.20 + (50.0 - s) * 0.15,
-            "ask": 1.30 + (50.0 - s) * 0.15,
-            "iv": 0.35,
-            "gamma": 0.05,
-            "theta": -0.04,
-            "vega": 0.10,
-            "dte": 37,
-            "expiry_date": "2026-05-15",
-            "expiry_year": 2026,
-            "expiry_month": 5,
-            "expiry_day": 15,
-        })
+        contracts.append(
+            {
+                "symbol": f"IBIT260515P{int(s * 1000):08d}",
+                "option_type": "PUT",
+                "strike": s,
+                "delta": delta,
+                "bid": 1.20 + (50.0 - s) * 0.15,
+                "ask": 1.30 + (50.0 - s) * 0.15,
+                "iv": 0.35,
+                "gamma": 0.05,
+                "theta": -0.04,
+                "vega": 0.10,
+                "dte": 37,
+                "expiry_date": "2026-05-15",
+                "expiry_year": 2026,
+                "expiry_month": 5,
+                "expiry_day": 15,
+            }
+        )
     return contracts
 
 
@@ -82,10 +81,11 @@ def _make_telegram_bot():
     from src.telegram.bot import TelegramBot
 
     # Patch dependencies so __init__ doesn't fail without real tokens
-    with patch("src.telegram.bot.AnalysisCommandsMixin"), \
-         patch("src.telegram.bot.AuthCommandsMixin"), \
-         patch("src.telegram.bot.BacktestCommandsMixin"), \
-         patch("src.telegram.bot.TradingCommandsMixin"):
+    with patch("src.telegram.bot.AnalysisCommandsMixin"), patch(
+        "src.telegram.bot.AuthCommandsMixin"
+    ), patch("src.telegram.bot.BacktestCommandsMixin"), patch(
+        "src.telegram.bot.TradingCommandsMixin"
+    ):
         bot = TelegramBot.__new__(TelegramBot)
 
     # Manually set required instance vars
@@ -102,16 +102,19 @@ def _make_telegram_bot():
     bot._approval_result = None
     bot._pending_sellall = None
     bot._is_running = False
-    bot._put_approval_event = None
-    bot._put_approval_result = None
-    bot._put_approval_signal = None
-    bot._put_approval_chain = None
+    from src.telegram.approval_flow import ApprovalFlow
+
+    bot._put_approval = ApprovalFlow()
+    bot._call_approval = ApprovalFlow()
+    bot._btc_approval = ApprovalFlow()
+    bot._roll_approval = ApprovalFlow()
     return bot
 
 
 # ---------------------------------------------------------------------------
 # Test 1: _execute_put_order calls preview, place, create_wheel_cycle, transition, open
 # ---------------------------------------------------------------------------
+
 
 class TestPutOrderExecution:
     """Verify _execute_put_order invokes all expected E*TRADE and DB methods."""
@@ -140,7 +143,16 @@ class TestPutOrderExecution:
             "acc-key", "IBIT", "PUT", 2026, 5, 15, 48.0, "SELL_OPEN", 1, 1.50
         )
         mock_client.place_options_order.assert_called_once_with(
-            "acc-key", "IBIT", "PUT", 2026, 5, 15, 48.0, "SELL_OPEN", 1, 1.50,
+            "acc-key",
+            "IBIT",
+            "PUT",
+            2026,
+            5,
+            15,
+            48.0,
+            "SELL_OPEN",
+            1,
+            1.50,
             preview_ids=[{"previewId": 1}],
         )
 
@@ -207,6 +219,7 @@ class TestPutOrderExecution:
 # Test 2: request_put_approval — approve path calls _execute_put_order
 # ---------------------------------------------------------------------------
 
+
 class TestPutApprovalFlow:
     """Verify request_put_approval orchestrates message, event, and execution correctly."""
 
@@ -224,11 +237,15 @@ class TestPutApprovalFlow:
             # Simulate user tapping Approve mid-wait
             async def fake_wait_for(coro, timeout):
                 # Set result and mark event done
-                bot._put_approval_result = "approved"
+                bot._put_approval.result = "approved"
 
-            with patch.object(bot, "_execute_put_order", new=AsyncMock(return_value=True)) as mock_exec:
+            with patch.object(
+                bot, "_execute_put_order", new=AsyncMock(return_value=True)
+            ) as mock_exec:
                 with patch("asyncio.wait_for", new=fake_wait_for):
-                    result = await bot.request_put_approval(signal, chain, mock_client, mock_db, "acc")
+                    result = await bot.request_put_approval(
+                        signal, chain, mock_client, mock_db, "acc"
+                    )
                 mock_exec.assert_called_once()
                 return result
 
@@ -247,11 +264,15 @@ class TestPutApprovalFlow:
 
         async def run():
             async def fake_wait_for(coro, timeout):
-                bot._put_approval_result = "rejected"
+                bot._put_approval.result = "rejected"
 
-            with patch.object(bot, "_execute_put_order", new=AsyncMock(return_value=False)) as mock_exec:
+            with patch.object(
+                bot, "_execute_put_order", new=AsyncMock(return_value=False)
+            ) as mock_exec:
                 with patch("asyncio.wait_for", new=fake_wait_for):
-                    result = await bot.request_put_approval(signal, chain, mock_client, mock_db, "acc")
+                    result = await bot.request_put_approval(
+                        signal, chain, mock_client, mock_db, "acc"
+                    )
                 mock_exec.assert_not_called()
                 return result
 
@@ -275,7 +296,9 @@ class TestPutApprovalFlow:
             with patch.object(bot, "_execute_put_order", new=AsyncMock()) as mock_exec:
                 with patch("asyncio.wait_for", new=fake_wait_for):
                     with patch.object(bot, "send_message", new=AsyncMock()):
-                        result = await bot.request_put_approval(signal, chain, mock_client, mock_db, "acc")
+                        result = await bot.request_put_approval(
+                            signal, chain, mock_client, mock_db, "acc"
+                        )
                 mock_exec.assert_not_called()
                 return result
 
@@ -283,7 +306,7 @@ class TestPutApprovalFlow:
         assert result == ApprovalResult.TIMEOUT
 
     def test_put_approval_event_is_separate_from_intraday_event(self):
-        """_put_approval_event must be a different object from _approval_event."""
+        """_put_approval.event must be a different object from _approval_event."""
         bot = _make_telegram_bot()
         signal = _make_put_signal()
         chain = _make_chain()
@@ -298,15 +321,15 @@ class TestPutApprovalFlow:
 
         async def run():
             async def fake_wait_for(coro, timeout):
-                bot._put_approval_result = "rejected"
+                bot._put_approval.result = "rejected"
 
             with patch("asyncio.wait_for", new=fake_wait_for):
                 with patch.object(bot, "send_message", new=AsyncMock()):
                     await bot.request_put_approval(signal, chain, mock_client, mock_db, "acc")
 
-            # _put_approval_event was set (a new Event, different from intraday)
-            assert bot._put_approval_event is not None
-            assert bot._put_approval_event is not intraday_event
+            # _put_approval.event was set (a new Event, different from intraday)
+            assert bot._put_approval.event is not None
+            assert bot._put_approval.event is not intraday_event
             # Intraday event remains untouched
             assert not intraday_event.is_set()
 
@@ -316,6 +339,7 @@ class TestPutApprovalFlow:
 # ---------------------------------------------------------------------------
 # Test 3: Callback routing
 # ---------------------------------------------------------------------------
+
 
 class TestPutCallbackRouting:
     """Verify _handle_callback routes put_* prefixes correctly."""
@@ -333,47 +357,43 @@ class TestPutCallbackRouting:
         return update, query
 
     def test_put_approve_sets_result_approved(self):
-        """put_approve_ callback sets _put_approval_result='approved' and fires event."""
+        """put_approve_ callback sets _put_approval.result='approved' and fires event."""
         bot = _make_telegram_bot()
         event = asyncio.Event()
-        bot._put_approval_event = event
+        bot._put_approval.event = event
         # Simulate an active approval flow — callback_id tail must match the
         # trailing token of the callback_data for _is_stale_callback to pass.
-        bot._put_approval_callback_id = "103000"
+        bot._put_approval.callback_id = "103000"
 
         update, query = self._make_callback_update("put_approve_put_103000")
 
         with patch.object(bot, "_is_authorized", return_value=True):
-            asyncio.get_event_loop().run_until_complete(
-                bot._handle_callback(update, MagicMock())
-            )
+            asyncio.get_event_loop().run_until_complete(bot._handle_callback(update, MagicMock()))
 
-        assert bot._put_approval_result == "approved"
+        assert bot._put_approval.result == "approved"
         assert event.is_set()
 
     def test_put_reject_sets_result_rejected(self):
-        """put_reject_ callback sets _put_approval_result='rejected' and fires event."""
+        """put_reject_ callback sets _put_approval.result='rejected' and fires event."""
         bot = _make_telegram_bot()
         event = asyncio.Event()
-        bot._put_approval_event = event
-        bot._put_approval_callback_id = "103000"
+        bot._put_approval.event = event
+        bot._put_approval.callback_id = "103000"
 
         update, query = self._make_callback_update("put_reject_put_103000")
 
         with patch.object(bot, "_is_authorized", return_value=True):
-            asyncio.get_event_loop().run_until_complete(
-                bot._handle_callback(update, MagicMock())
-            )
+            asyncio.get_event_loop().run_until_complete(bot._handle_callback(update, MagicMock()))
 
-        assert bot._put_approval_result == "rejected"
+        assert bot._put_approval.result == "rejected"
         assert event.is_set()
 
     def test_put_adjust_calls_handle_put_adjust(self):
         """put_adjust_ callback delegates to _handle_put_adjust()."""
         bot = _make_telegram_bot()
-        bot._put_approval_chain = _make_chain()
-        bot._put_approval_signal = _make_put_signal()
-        bot._put_approval_callback_id = "103000"
+        bot._put_approval.chain = _make_chain()
+        bot._put_approval.signal = _make_put_signal()
+        bot._put_approval.callback_id = "103000"
 
         update, query = self._make_callback_update("put_adjust_put_103000")
         query.edit_message_text = AsyncMock()
@@ -386,78 +406,71 @@ class TestPutCallbackRouting:
                 mock_adjust.assert_called_once()
 
     def test_put_alt_reject_sets_rejected(self):
-        """put_alt_reject_ callback sets _put_approval_result='rejected' and fires event."""
+        """put_alt_reject_ callback sets _put_approval.result='rejected' and fires event."""
         bot = _make_telegram_bot()
         event = asyncio.Event()
-        bot._put_approval_event = event
-        bot._put_approval_callback_id = "103000"
+        bot._put_approval.event = event
+        bot._put_approval.callback_id = "103000"
 
         update, query = self._make_callback_update("put_alt_reject_put_103000")
 
         with patch.object(bot, "_is_authorized", return_value=True):
-            asyncio.get_event_loop().run_until_complete(
-                bot._handle_callback(update, MagicMock())
-            )
+            asyncio.get_event_loop().run_until_complete(bot._handle_callback(update, MagicMock()))
 
-        assert bot._put_approval_result == "rejected"
+        assert bot._put_approval.result == "rejected"
         assert event.is_set()
 
     def test_put_alt_sets_strike_result(self):
-        """put_alt_ callback extracts strike and sets it as _put_approval_result."""
+        """put_alt_ callback extracts strike and sets it as _put_approval.result."""
         bot = _make_telegram_bot()
         event = asyncio.Event()
-        bot._put_approval_event = event
-        bot._put_approval_callback_id = "103000"
+        bot._put_approval.event = event
+        bot._put_approval.callback_id = "103000"
 
         update, query = self._make_callback_update("put_alt_47.0_put_103000")
 
         with patch.object(bot, "_is_authorized", return_value=True):
-            asyncio.get_event_loop().run_until_complete(
-                bot._handle_callback(update, MagicMock())
-            )
+            asyncio.get_event_loop().run_until_complete(bot._handle_callback(update, MagicMock()))
 
-        assert bot._put_approval_result == "47.0"
+        assert bot._put_approval.result == "47.0"
         assert event.is_set()
 
     def test_stale_put_approve_is_ignored(self):
         """A callback with a different callback_id tail is treated as stale."""
         bot = _make_telegram_bot()
         event = asyncio.Event()
-        bot._put_approval_event = event
+        bot._put_approval.event = event
         # Current valid callback_id is "999999" — the callback tries "103000"
-        bot._put_approval_callback_id = "999999"
+        bot._put_approval.callback_id = "999999"
 
         update, query = self._make_callback_update("put_approve_put_103000")
 
         with patch.object(bot, "_is_authorized", return_value=True):
-            asyncio.get_event_loop().run_until_complete(
-                bot._handle_callback(update, MagicMock())
-            )
+            asyncio.get_event_loop().run_until_complete(bot._handle_callback(update, MagicMock()))
 
-        assert bot._put_approval_result is None
+        assert bot._put_approval.result is None
         assert not event.is_set()
 
     def test_put_callback_with_no_pending_approval_is_ignored(self):
         """A callback that arrives with no pending approval is treated as stale."""
         bot = _make_telegram_bot()
         event = asyncio.Event()
-        bot._put_approval_event = event
-        bot._put_approval_callback_id = None  # no pending approval
+        bot._put_approval.event = event
+        bot._put_approval.callback_id = None  # no pending approval
 
         update, query = self._make_callback_update("put_approve_put_103000")
 
         with patch.object(bot, "_is_authorized", return_value=True):
-            asyncio.get_event_loop().run_until_complete(
-                bot._handle_callback(update, MagicMock())
-            )
+            asyncio.get_event_loop().run_until_complete(bot._handle_callback(update, MagicMock()))
 
-        assert bot._put_approval_result is None
+        assert bot._put_approval.result is None
         assert not event.is_set()
 
 
 # ---------------------------------------------------------------------------
 # Test 4: SmartScheduler._job_put_signal_check
 # ---------------------------------------------------------------------------
+
 
 class TestSchedulerPutJob:
     """Verify _job_put_signal_check guards and execution flow."""
