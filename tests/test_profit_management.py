@@ -1086,11 +1086,13 @@ class TestBuyToClose:
 
     def test_execute_btc_no_db_mutation_on_api_failure(self):
         """T-05-06: If API call fails, close_wheel_position and transition_wheel_state are NOT called."""
+        from src.etrade_client import ETradeAPIError
+
         bot = _make_telegram_bot()
         position = _make_position(symbol="IBIT260515P00050000", premium_received=1.50)
         cycle = {"id": 1, "state": "SHORT_PUT"}
         mock_client = MagicMock()
-        mock_client.preview_options_order.side_effect = Exception("API unavailable")
+        mock_client.preview_options_order.side_effect = ETradeAPIError("API unavailable")
         mock_db = MagicMock()
 
         async def run():

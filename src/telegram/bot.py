@@ -19,7 +19,7 @@ from telegram.ext import (
 )
 
 from ..async_utils import run_sync_in_executor
-from ..etrade_client import extract_order_id
+from ..etrade_client import ETradeAPIError, ETradeAuthError, extract_order_id
 from ..utils import get_et_now, normalize_expiry_date, parse_expiry_components
 from ..wheel_state import WheelState
 from .analysis_commands import AnalysisCommandsMixin
@@ -1006,16 +1006,16 @@ class TelegramBot(
             )
             return True
 
-        except Exception as e:
-            logger.error(f"Failed to execute put order: {e}", exc_info=True)
+        except (ETradeAPIError, ETradeAuthError) as e:
+            logger.error("Failed to execute put order (E*TRADE): %s", e, exc_info=True)
             try:
                 await self._app.bot.send_message(
                     chat_id=self.chat_id,
                     text=f"⚠️ *PUT ORDER FAILED*\n\n{escape_markdown(str(e))}",
                     parse_mode="Markdown",
                 )
-            except Exception:
-                pass
+            except Exception as notify_err:
+                logger.warning("Put order failure notification failed: %s", notify_err)
             return False
 
     async def _handle_put_adjust(self, query: Any, data: str) -> None:
@@ -1417,16 +1417,16 @@ class TelegramBot(
             )
             return True
 
-        except Exception as e:
-            logger.error(f"Failed to execute call order: {e}", exc_info=True)
+        except (ETradeAPIError, ETradeAuthError) as e:
+            logger.error("Failed to execute call order (E*TRADE): %s", e, exc_info=True)
             try:
                 await self._app.bot.send_message(
                     chat_id=self.chat_id,
                     text=f"⚠️ *CALL ORDER FAILED*\n\n{escape_markdown(str(e))}",
                     parse_mode="Markdown",
                 )
-            except Exception:
-                pass
+            except Exception as notify_err:
+                logger.warning("Call order failure notification failed: %s", notify_err)
             return False
 
     async def _handle_call_adjust(self, query: Any, data: str) -> None:
@@ -1639,8 +1639,8 @@ class TelegramBot(
             )
             return True
 
-        except Exception as e:
-            logger.error(f"Failed to execute BTC order: {e}", exc_info=True)
+        except (ETradeAPIError, ETradeAuthError) as e:
+            logger.error("Failed to execute BTC order (E*TRADE): %s", e, exc_info=True)
             # T-05-06: Do NOT call close_wheel_position or transition_wheel_state on failure
             try:
                 await self._app.bot.send_message(
@@ -1648,8 +1648,8 @@ class TelegramBot(
                     text=f"*BTC ORDER FAILED*\n\n{escape_markdown(str(e))}",
                     parse_mode="Markdown",
                 )
-            except Exception:
-                pass
+            except Exception as notify_err:
+                logger.warning("BTC order failure notification failed: %s", notify_err)
             return False
 
     async def send_dte_alert(self, position: dict, cycle: dict, db: Any) -> None:

@@ -182,12 +182,14 @@ class TestPutOrderExecution:
         mock_db.open_wheel_position.assert_not_called()
 
     def test_execute_put_order_does_not_create_cycle_on_failure(self):
-        """On order API failure: open_short_put_cycle must NOT be called."""
+        """On E*TRADE API failure: open_short_put_cycle must NOT be called."""
+        from src.etrade_client import ETradeAPIError
+
         bot = _make_telegram_bot()
         signal = _make_put_signal()
 
         mock_client = MagicMock()
-        mock_client.preview_options_order.side_effect = RuntimeError("API error")
+        mock_client.preview_options_order.side_effect = ETradeAPIError("API error")
 
         mock_db = MagicMock()
         bot._app.bot.send_message = AsyncMock()
