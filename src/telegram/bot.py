@@ -7,7 +7,7 @@ This is the entry point for the modular Telegram bot.
 import asyncio
 import logging
 import os
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
@@ -431,14 +431,72 @@ class TelegramBot(
     # Callback Handlers
     # =========================================================================
 
+    # Dispatch table for callback prefixes. Order matters: longer / more
+    # specific prefixes MUST come before shorter prefixes of the same family
+    # (e.g. `put_alt_reject_` before `put_alt_`, otherwise the shorter prefix
+    # would swallow rejection callbacks). A sanity assertion in _handle_callback
+    # enforces this invariant at runtime so accidental reorderings fail loudly
+    # instead of silently routing to the wrong handler.
+    _CALLBACK_DISPATCH: Tuple[Tuple[str, str], ...] = (
+        ("sellall_confirm_", "_cb_sellall"),
+        ("sellall_cancel_", "_cb_sellall"),
+        # Put flow — put_alt_reject_ before put_alt_, put_alt_ before put_*
+        ("put_alt_reject_", "_cb_put_alt_reject"),
+        ("put_approve_", "_cb_put_approve"),
+        ("put_adjust_", "_cb_put_adjust"),
+        ("put_reject_", "_cb_put_reject"),
+        ("put_alt_", "_cb_put_alt"),
+        # Call flow — same ordering as put
+        ("call_alt_reject_", "_cb_call_alt_reject"),
+        ("call_approve_", "_cb_call_approve"),
+        ("call_adjust_", "_cb_call_adjust"),
+        ("call_reject_", "_cb_call_reject"),
+        ("call_alt_", "_cb_call_alt"),
+        # BTC / roll profit management
+        ("btc_approve_", "_cb_btc_approve"),
+        ("btc_reject_", "_cb_btc_reject"),
+        ("roll_approve_", "_cb_roll_approve"),
+        ("roll_reject_", "_cb_roll_reject"),
+        # Parameter recommendation
+        ("apply_param_", "_cb_param"),
+        ("reject_param_", "_cb_param"),
+        # Intraday (generic, must be LAST — matches by bare approve_/reject_)
+        ("approve_", "_cb_intraday_approve"),
+        ("reject_", "_cb_intraday_reject"),
+    )
+
+    @classmethod
+    def _validate_dispatch_order(cls) -> None:
+        """Enforce that overlapping callback prefixes are ordered correctly.
+
+        Specifically, if prefix A is a strict prefix of prefix B, B must come
+        first. Otherwise A would always match first and swallow B's callbacks.
+        Runs once on class load via a module-level call.
+        """
+        entries = cls._CALLBACK_DISPATCH
+        for i, (prefix_a, _) in enumerate(entries):
+            for j in range(i + 1, len(entries)):
+                prefix_b, _ = entries[j]
+                if prefix_b.startswith(prefix_a) and prefix_b != prefix_a:
+                    raise AssertionError(
+                        f"_CALLBACK_DISPATCH ordering bug: '{prefix_b}' must come "
+                        f"before '{prefix_a}' (shorter prefix matches first and "
+                        f"would swallow longer-prefix callbacks)"
+                    )
+
     async def _handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle inline button callbacks."""
+        """Handle inline button callbacks via a dispatch table.
+
+        Routes the callback data to the first matching handler in
+        _CALLBACK_DISPATCH. See the table definition for ordering rules.
+        """
         # Security: Verify the callback is from an authorized user
         if not self._is_authorized(update):
             query = update.callback_query
             await query.answer("🚫 Unauthorized", show_alert=True)
             logger.warning(
-                f"Unauthorized callback attempt from chat_id: {update.effective_chat.id}"
+                "Unauthorized callback attempt from chat_id: %s",
+                update.effective_chat.id,
             )
             return
 
@@ -446,263 +504,266 @@ class TelegramBot(
         await query.answer()
 
         data = query.data
-        logger.info(f"Received callback: {data}")
+        logger.info("Received callback: %s", data)
 
-        # Handle sellall confirmation/cancellation
-        if data.startswith("sellall_confirm_") or data.startswith("sellall_cancel_"):
-            await self._handle_sellall_callback(query, data)
-            return
-
-        # Handle put options approval callbacks (before intraday approve_/reject_ handlers)
-        if data.startswith("put_approve_"):
-            if self._is_stale_callback(data, self._put_approval.callback_id):
-                logger.warning("Ignoring stale put_approve callback: %s", data)
-                await query.edit_message_text(
-                    text="⏱ *EXPIRED* — This button is from an older approval request.",
-                    parse_mode="Markdown",
-                )
+        for prefix, handler_name in self._CALLBACK_DISPATCH:
+            if data.startswith(prefix):
+                handler = getattr(self, handler_name)
+                await handler(query, data)
                 return
-            self._put_approval.result = "approved"
+
+        logger.warning("No callback handler matched for data: %s", data)
+
+    # -------------------------------------------------------------
+    # Callback handlers — one per dispatch entry. Each receives the
+    # query object and the raw data string.
+    # -------------------------------------------------------------
+
+    async def _cb_sellall(self, query: Any, data: str) -> None:
+        """Handle sellall_confirm_ and sellall_cancel_."""
+        await self._handle_sellall_callback(query, data)
+
+    # -------------------- Put flow --------------------
+
+    async def _cb_put_approve(self, query: Any, data: str) -> None:
+        if self._is_stale_callback(data, self._put_approval.callback_id):
+            logger.warning("Ignoring stale put_approve callback: %s", data)
             await query.edit_message_text(
-                text=query.message.text + "\n\n✅ *APPROVED* — Executing put order...",
+                text="⏱ *EXPIRED* — This button is from an older approval request.",
+                parse_mode="Markdown",
+            )
+            return
+        self._put_approval.result = "approved"
+        await query.edit_message_text(
+            text=query.message.text + "\n\n✅ *APPROVED* — Executing put order...",
+            parse_mode="Markdown",
+        )
+        if self._put_approval.event:
+            self._put_approval.event.set()
+
+    async def _cb_put_adjust(self, query: Any, data: str) -> None:
+        if self._is_stale_callback(data, self._put_approval.callback_id):
+            logger.warning("Ignoring stale put_adjust callback: %s", data)
+            await query.edit_message_text(
+                text="⏱ *EXPIRED* — This button is from an older approval request.",
+                parse_mode="Markdown",
+            )
+            return
+        await self._handle_put_adjust(query, data)
+
+    async def _cb_put_alt_reject(self, query: Any, data: str) -> None:
+        if self._is_stale_callback(data, self._put_approval.callback_id):
+            logger.warning("Ignoring stale put_alt_reject callback: %s", data)
+            return
+        self._put_approval.result = "rejected"
+        await query.edit_message_text(
+            text="❌ All alternatives rejected. Put suggestion cancelled.",
+            parse_mode="Markdown",
+        )
+        if self._put_approval.event:
+            self._put_approval.event.set()
+
+    async def _cb_put_alt(self, query: Any, data: str) -> None:
+        # User selected an alternative strike: put_alt_{strike}_{callback_id}
+        parts = data.split("_")
+        try:
+            selected_strike = float(parts[2])
+            self._put_approval.result = str(selected_strike)
+            await query.edit_message_text(
+                text=f"✅ *APPROVED* — Executing put at strike ${selected_strike}...",
                 parse_mode="Markdown",
             )
             if self._put_approval.event:
                 self._put_approval.event.set()
-            return
-
-        elif data.startswith("put_adjust_"):
-            if self._is_stale_callback(data, self._put_approval.callback_id):
-                logger.warning("Ignoring stale put_adjust callback: %s", data)
-                await query.edit_message_text(
-                    text="⏱ *EXPIRED* — This button is from an older approval request.",
-                    parse_mode="Markdown",
-                )
-                return
-            await self._handle_put_adjust(query, data)
-            return
-
-        elif data.startswith("put_alt_reject_"):
-            if self._is_stale_callback(data, self._put_approval.callback_id):
-                logger.warning("Ignoring stale put_alt_reject callback: %s", data)
-                return
+        except (IndexError, ValueError) as e:
+            logger.error("Failed to parse put_alt callback data '%s': %s", data, e)
+            await query.edit_message_text(
+                text="❌ Error parsing selection. Put suggestion cancelled.",
+                parse_mode="Markdown",
+            )
             self._put_approval.result = "rejected"
-            await query.edit_message_text(
-                text="❌ All alternatives rejected. Put suggestion cancelled.",
-                parse_mode="Markdown",
-            )
             if self._put_approval.event:
                 self._put_approval.event.set()
-            return
 
-        elif data.startswith("put_alt_"):
-            # User selected an alternative strike: put_alt_{strike}_{callback_id}
-            parts = data.split("_")
-            # parts: ["put", "alt", strike, callback_id...]
-            try:
-                selected_strike = float(parts[2])
-                self._put_approval.result = str(selected_strike)
-                await query.edit_message_text(
-                    text=f"✅ *APPROVED* — Executing put at strike ${selected_strike}...",
-                    parse_mode="Markdown",
-                )
-                if self._put_approval.event:
-                    self._put_approval.event.set()
-            except (IndexError, ValueError) as e:
-                logger.error(f"Failed to parse put_alt callback data '{data}': {e}")
-                await query.edit_message_text(
-                    text="❌ Error parsing selection. Put suggestion cancelled.",
-                    parse_mode="Markdown",
-                )
-                self._put_approval.result = "rejected"
-                if self._put_approval.event:
-                    self._put_approval.event.set()
+    async def _cb_put_reject(self, query: Any, data: str) -> None:
+        if self._is_stale_callback(data, self._put_approval.callback_id):
+            logger.warning("Ignoring stale put_reject callback: %s", data)
             return
+        self._put_approval.result = "rejected"
+        await query.edit_message_text(
+            text=query.message.text + "\n\n❌ *REJECTED* — Put suggestion cancelled.",
+            parse_mode="Markdown",
+        )
+        if self._put_approval.event:
+            self._put_approval.event.set()
 
-        elif data.startswith("put_reject_"):
-            if self._is_stale_callback(data, self._put_approval.callback_id):
-                logger.warning("Ignoring stale put_reject callback: %s", data)
-                return
-            self._put_approval.result = "rejected"
+    # -------------------- Call flow --------------------
+
+    async def _cb_call_approve(self, query: Any, data: str) -> None:
+        if self._is_stale_callback(data, self._call_approval.callback_id):
+            logger.warning("Ignoring stale call_approve callback: %s", data)
             await query.edit_message_text(
-                text=query.message.text + "\n\n❌ *REJECTED* — Put suggestion cancelled.",
+                text="⏱ EXPIRED — This button is from an older approval request.",
                 parse_mode="Markdown",
             )
-            if self._put_approval.event:
-                self._put_approval.event.set()
             return
+        self._call_approval.result = "approved"
+        await query.edit_message_text(
+            text=query.message.text + "\n\n--- Approved --- Executing call order...",
+            parse_mode="Markdown",
+        )
+        if self._call_approval.event:
+            self._call_approval.event.set()
 
-        # Handle call options approval callbacks (BEFORE generic approve_/reject_ handlers)
-        elif data.startswith("call_approve_"):
-            if self._is_stale_callback(data, self._call_approval.callback_id):
-                logger.warning("Ignoring stale call_approve callback: %s", data)
-                await query.edit_message_text(
-                    text="⏱ EXPIRED — This button is from an older approval request.",
-                    parse_mode="Markdown",
-                )
-                return
-            self._call_approval.result = "approved"
+    async def _cb_call_adjust(self, query: Any, data: str) -> None:
+        if self._is_stale_callback(data, self._call_approval.callback_id):
+            logger.warning("Ignoring stale call_adjust callback: %s", data)
+            return
+        await self._handle_call_adjust(query, data)
+
+    async def _cb_call_alt_reject(self, query: Any, data: str) -> None:
+        if self._is_stale_callback(data, self._call_approval.callback_id):
+            logger.warning("Ignoring stale call_alt_reject callback: %s", data)
+            return
+        self._call_approval.result = "rejected"
+        await query.edit_message_text(
+            text="All alternatives rejected. Call suggestion cancelled.",
+            parse_mode="Markdown",
+        )
+        if self._call_approval.event:
+            self._call_approval.event.set()
+
+    async def _cb_call_alt(self, query: Any, data: str) -> None:
+        # User selected an alternative strike: call_alt_{strike}_{callback_id}
+        parts = data.split("_")
+        try:
+            selected_strike = float(parts[2])
+            self._call_approval.result = str(selected_strike)
             await query.edit_message_text(
-                text=query.message.text + "\n\n--- Approved --- Executing call order...",
+                text=f"--- Approved --- Executing call at strike ${selected_strike}...",
                 parse_mode="Markdown",
             )
             if self._call_approval.event:
                 self._call_approval.event.set()
-            return
-
-        elif data.startswith("call_adjust_"):
-            if self._is_stale_callback(data, self._call_approval.callback_id):
-                logger.warning("Ignoring stale call_adjust callback: %s", data)
-                return
-            await self._handle_call_adjust(query, data)
-            return
-
-        elif data.startswith("call_alt_reject_"):
-            if self._is_stale_callback(data, self._call_approval.callback_id):
-                logger.warning("Ignoring stale call_alt_reject callback: %s", data)
-                return
+        except (IndexError, ValueError) as e:
+            logger.error("Failed to parse call_alt callback data '%s': %s", data, e)
+            await query.edit_message_text(
+                text="Error parsing selection. Call suggestion cancelled.",
+                parse_mode="Markdown",
+            )
             self._call_approval.result = "rejected"
-            await query.edit_message_text(
-                text="All alternatives rejected. Call suggestion cancelled.",
-                parse_mode="Markdown",
-            )
             if self._call_approval.event:
                 self._call_approval.event.set()
-            return
 
-        elif data.startswith("call_alt_"):
-            # User selected an alternative strike: call_alt_{strike}_{callback_id}
-            parts = data.split("_")
-            # parts: ["call", "alt", strike, callback_id...]
-            try:
-                selected_strike = float(parts[2])
-                self._call_approval.result = str(selected_strike)
-                await query.edit_message_text(
-                    text=f"--- Approved --- Executing call at strike ${selected_strike}...",
-                    parse_mode="Markdown",
-                )
-                if self._call_approval.event:
-                    self._call_approval.event.set()
-            except (IndexError, ValueError) as e:
-                logger.error(f"Failed to parse call_alt callback data '{data}': {e}")
-                await query.edit_message_text(
-                    text="Error parsing selection. Call suggestion cancelled.",
-                    parse_mode="Markdown",
-                )
-                self._call_approval.result = "rejected"
-                if self._call_approval.event:
-                    self._call_approval.event.set()
+    async def _cb_call_reject(self, query: Any, data: str) -> None:
+        if self._is_stale_callback(data, self._call_approval.callback_id):
+            logger.warning("Ignoring stale call_reject callback: %s", data)
             return
+        self._call_approval.result = "rejected"
+        await query.edit_message_text(
+            text=query.message.text + "\n\n--- Rejected --- Call suggestion cancelled.",
+            parse_mode="Markdown",
+        )
+        if self._call_approval.event:
+            self._call_approval.event.set()
 
-        elif data.startswith("call_reject_"):
-            if self._is_stale_callback(data, self._call_approval.callback_id):
-                logger.warning("Ignoring stale call_reject callback: %s", data)
-                return
-            self._call_approval.result = "rejected"
-            await query.edit_message_text(
-                text=query.message.text + "\n\n--- Rejected --- Call suggestion cancelled.",
-                parse_mode="Markdown",
-            )
-            if self._call_approval.event:
-                self._call_approval.event.set()
+    # -------------------- BTC flow --------------------
+
+    async def _cb_btc_approve(self, query: Any, data: str) -> None:
+        if self._is_stale_callback(data, self._btc_approval.callback_id):
+            logger.warning("Ignoring stale btc_approve callback: %s", data)
+            await query.answer("Expired — newer BTC request is active")
             return
+        self._btc_approval.result = "approved"
+        if self._btc_approval.event:
+            self._btc_approval.event.set()
+        await query.answer("Buy-to-close approved")
 
-        # Handle BTC (buy-to-close) approval callbacks — separate from put/call/intraday
-        elif data.startswith("btc_approve_"):
-            if self._is_stale_callback(data, self._btc_approval.callback_id):
-                logger.warning("Ignoring stale btc_approve callback: %s", data)
-                await query.answer("Expired — newer BTC request is active")
-                return
-            self._btc_approval.result = "approved"
-            if self._btc_approval.event:
-                self._btc_approval.event.set()
-            await query.answer("Buy-to-close approved")
+    async def _cb_btc_reject(self, query: Any, data: str) -> None:
+        if self._is_stale_callback(data, self._btc_approval.callback_id):
+            logger.warning("Ignoring stale btc_reject callback: %s", data)
+            await query.answer("Expired — newer BTC request is active")
             return
+        self._btc_approval.result = "rejected"
+        if self._btc_approval.event:
+            self._btc_approval.event.set()
+        await query.answer("Buy-to-close rejected")
 
-        elif data.startswith("btc_reject_"):
-            if self._is_stale_callback(data, self._btc_approval.callback_id):
-                logger.warning("Ignoring stale btc_reject callback: %s", data)
-                await query.answer("Expired — newer BTC request is active")
-                return
-            self._btc_approval.result = "rejected"
-            if self._btc_approval.event:
-                self._btc_approval.event.set()
-            await query.answer("Buy-to-close rejected")
+    # -------------------- Roll flow --------------------
+
+    async def _cb_roll_approve(self, query: Any, data: str) -> None:
+        if self._is_stale_callback(data, self._roll_approval.callback_id):
+            logger.warning("Ignoring stale roll_approve callback: %s", data)
+            await query.answer("Expired — newer roll request is active")
             return
+        self._roll_approval.result = "approved"
+        if self._roll_approval.event:
+            self._roll_approval.event.set()
+        await query.answer("Roll approved")
 
-        # Handle roll approval callbacks — separate from BTC/put/call/intraday
-        elif data.startswith("roll_approve_"):
-            if self._is_stale_callback(data, self._roll_approval.callback_id):
-                logger.warning("Ignoring stale roll_approve callback: %s", data)
-                await query.answer("Expired — newer roll request is active")
-                return
-            self._roll_approval.result = "approved"
-            if self._roll_approval.event:
-                self._roll_approval.event.set()
-            await query.answer("Roll approved")
+    async def _cb_roll_reject(self, query: Any, data: str) -> None:
+        if self._is_stale_callback(data, self._roll_approval.callback_id):
+            logger.warning("Ignoring stale roll_reject callback: %s", data)
+            await query.answer("Expired — newer roll request is active")
             return
+        self._roll_approval.result = "rejected"
+        if self._roll_approval.event:
+            self._roll_approval.event.set()
+        await query.answer("Roll rejected")
 
-        elif data.startswith("roll_reject_"):
-            if self._is_stale_callback(data, self._roll_approval.callback_id):
-                logger.warning("Ignoring stale roll_reject callback: %s", data)
-                await query.answer("Expired — newer roll request is active")
-                return
-            self._roll_approval.result = "rejected"
-            if self._roll_approval.event:
-                self._roll_approval.event.set()
-            await query.answer("Roll rejected")
-            return
+    # -------------------- Parameter recommendation --------------------
 
-        # Check if this is a test callback
+    async def _cb_param(self, query: Any, data: str) -> None:
+        """Handle apply_param_ and reject_param_ callbacks."""
+        await self._handle_param_recommendation(query, data)
+
+    # -------------------- Intraday (generic) --------------------
+
+    async def _cb_intraday_approve(self, query: Any, data: str) -> None:
         is_test = "_test_" in data
+        self._approval_result = ApprovalResult.APPROVED
+        if is_test:
+            await query.edit_message_text(
+                text=(
+                    "✅ *TEST APPROVED*\n\n"
+                    "🎉 *Full loop confirmed!*\n\n"
+                    "The approval workflow is working:\n"
+                    "1. ✓ Railway sent the message\n"
+                    "2. ✓ You tapped APPROVE\n"
+                    "3. ✓ Railway received your response\n\n"
+                    "_In production, the trade would execute now._"
+                ),
+                parse_mode="Markdown",
+            )
+        else:
+            await query.edit_message_text(
+                text=query.message.text + "\n\n✅ *APPROVED* - Executing trade...",
+                parse_mode="Markdown",
+            )
+        if self._approval_event:
+            self._approval_event.set()
 
-        # Handle parameter recommendation approval/rejection
-        if data.startswith("apply_param_") or data.startswith("reject_param_"):
-            await self._handle_param_recommendation(query, data)
-            return
-
-        if data.startswith("approve_"):
-            self._approval_result = ApprovalResult.APPROVED
-            if is_test:
-                await query.edit_message_text(
-                    text=(
-                        "✅ *TEST APPROVED*\n\n"
-                        "🎉 *Full loop confirmed!*\n\n"
-                        "The approval workflow is working:\n"
-                        "1. ✓ Railway sent the message\n"
-                        "2. ✓ You tapped APPROVE\n"
-                        "3. ✓ Railway received your response\n\n"
-                        "_In production, the trade would execute now._"
-                    ),
-                    parse_mode="Markdown",
-                )
-            else:
-                await query.edit_message_text(
-                    text=query.message.text + "\n\n✅ *APPROVED* - Executing trade...",
-                    parse_mode="Markdown",
-                )
-        elif data.startswith("reject_"):
-            self._approval_result = ApprovalResult.REJECTED
-            if is_test:
-                await query.edit_message_text(
-                    text=(
-                        "❌ *TEST REJECTED*\n\n"
-                        "🎉 *Full loop confirmed!*\n\n"
-                        "The rejection workflow is working:\n"
-                        "1. ✓ Railway sent the message\n"
-                        "2. ✓ You tapped REJECT\n"
-                        "3. ✓ Railway received your response\n\n"
-                        "_In production, the trade would be cancelled._"
-                    ),
-                    parse_mode="Markdown",
-                )
-            else:
-                await query.edit_message_text(
-                    text=query.message.text + "\n\n❌ *REJECTED* - Trade cancelled.",
-                    parse_mode="Markdown",
-                )
-
-        # Signal that we got a response
+    async def _cb_intraday_reject(self, query: Any, data: str) -> None:
+        is_test = "_test_" in data
+        self._approval_result = ApprovalResult.REJECTED
+        if is_test:
+            await query.edit_message_text(
+                text=(
+                    "❌ *TEST REJECTED*\n\n"
+                    "🎉 *Full loop confirmed!*\n\n"
+                    "The rejection workflow is working:\n"
+                    "1. ✓ Railway sent the message\n"
+                    "2. ✓ You tapped REJECT\n"
+                    "3. ✓ Railway received your response\n\n"
+                    "_In production, the trade would be cancelled._"
+                ),
+                parse_mode="Markdown",
+            )
+        else:
+            await query.edit_message_text(
+                text=query.message.text + "\n\n❌ *REJECTED* - Trade cancelled.",
+                parse_mode="Markdown",
+            )
         if self._approval_event:
             self._approval_event.set()
 
@@ -2049,3 +2110,10 @@ class TelegramBot(
             "pump_day": "🚀",
         }
         return emojis.get(signal_type.lower(), "📊")
+
+
+# Runtime invariant: _CALLBACK_DISPATCH must be ordered so that longer,
+# more-specific prefixes come before any prefix they contain. E.g.
+# `put_alt_reject_` must come before `put_alt_`. The check runs at import
+# time so accidental reorderings fail loudly.
+TelegramBot._validate_dispatch_order()
