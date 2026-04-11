@@ -68,7 +68,7 @@ class ExecutionMixin:
 
         # No trade if CASH signal
         if signal.signal == Signal.CASH:
-            logger.info(f"No trade today: {signal.reason}")
+            logger.info("No trade today: %s", signal.reason)
             return TradeResult(
                 success=True,
                 signal=signal.signal,
@@ -79,7 +79,7 @@ class ExecutionMixin:
 
         # Check for duplicate trade (already traded this signal type today)
         if self._check_duplicate_trade(signal.signal.value):
-            logger.warning(f"Duplicate trade blocked: Already traded {signal.signal.value} today")
+            logger.warning("Duplicate trade blocked: Already traded %s today", signal.signal.value)
             self.db.log_event(
                 "DUPLICATE_BLOCKED",
                 f"Blocked duplicate {signal.signal.value} trade",
@@ -115,7 +115,7 @@ class ExecutionMixin:
                     )
                 else:
                     # We already hold the ETF we want to buy - skip
-                    logger.info(f"Already holding {etf} - no action needed")
+                    logger.info("Already holding %s - no action needed", etf)
                     return TradeResult(
                         success=True,
                         signal=signal.signal,
@@ -191,7 +191,7 @@ class ExecutionMixin:
             return result
 
         except Exception as e:
-            logger.error(f"Trade execution failed: {e}")
+            logger.error("Trade execution failed: %s", e)
             self._notify_error(str(e))
             self.telegram.notify_error("Trade Execution", str(e))
             return TradeResult(
@@ -239,7 +239,7 @@ class ExecutionMixin:
                 f"Total: ${position_value:.2f}{reversal_msg}\n\n"
                 f"⚡ Time-sensitive signal - executing immediately"
             )
-            logger.info(f"Emergency auto-execute: {signal.signal.value} - {shares} {etf}")
+            logger.info("Emergency auto-execute: %s - %s %s", signal.signal.value, shares, etf)
 
             # Close existing positions if this is a reversal
             if needs_reversal:
@@ -282,7 +282,7 @@ class ExecutionMixin:
         open_positions: dict,
     ) -> Optional[TradeResult]:
         """Request Telegram approval and return result if trade should be blocked."""
-        logger.info(f"Requesting Telegram approval for {signal.signal.value}: {shares} {etf}")
+        logger.info("Requesting Telegram approval for %s: %s %s", signal.signal.value, shares, etf)
 
         # Log approval request
         self.db.log_event(
@@ -431,7 +431,7 @@ class ExecutionMixin:
             entry_price=price,
         )
 
-        logger.info(f"[PAPER] Bought {shares} {etf} @ ${price:.2f} = ${total_value:.2f}")
+        logger.info("[PAPER] Bought %s %s @ $%.2f = $%.2f", shares, etf, price, total_value)
 
         return TradeResult(
             success=True,
@@ -509,7 +509,7 @@ class ExecutionMixin:
                     )
             else:
                 # Fall back to estimate if polling fails - ALERT USER
-                logger.warning(f"Using estimated fill price for order {order_id}")
+                logger.warning("Using estimated fill price for order %s", order_id)
                 fill_price = estimated_value / shares if shares > 0 else 0
                 filled_shares = shares
                 total_value = estimated_value
@@ -544,7 +544,7 @@ class ExecutionMixin:
             )
 
         except ETradeAPIError as e:
-            logger.error(f"E*TRADE API error: {e}")
+            logger.error("E*TRADE API error: %s", e)
             return TradeResult(
                 success=False,
                 signal=signal.signal,

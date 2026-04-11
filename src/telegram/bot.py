@@ -212,7 +212,7 @@ class TelegramBot(
 
     async def _error_handler(self, update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle errors that occur during polling/updates."""
-        logger.error(f"Telegram bot error: {context.error}")
+        logger.error("Telegram bot error: %s", context.error)
 
         # Log the traceback for debugging
         if context.error:
@@ -223,7 +223,7 @@ class TelegramBot(
                     type(context.error), context.error, context.error.__traceback__
                 )
             )
-            logger.error(f"Telegram error traceback:\n{tb_string}")
+            logger.error("Telegram error traceback:\n%s", tb_string)
 
         # Try to notify about the error (but don't fail if this also fails)
         try:
@@ -237,7 +237,7 @@ class TelegramBot(
                     parse_mode="Markdown",
                 )
         except Exception as e:
-            logger.warning(f"Could not send error notification: {e}")
+            logger.warning("Could not send error notification: %s", e)
 
     async def start_polling(self):
         """Start the bot in polling mode (for development/testing)."""
@@ -425,7 +425,7 @@ class TelegramBot(
             parse_mode="Markdown",
             reply_markup=reply_markup,
         )
-        logger.info(f"Test approval request sent with callback_id: {callback_id}")
+        logger.info("Test approval request sent with callback_id: %s", callback_id)
 
     # =========================================================================
     # Callback Handlers
@@ -911,7 +911,7 @@ class TelegramBot(
             return ApprovalResult.APPROVED if success else ApprovalResult.ERROR
 
         except Exception as e:
-            logger.error(f"Failed to request put approval: {e}", exc_info=True)
+            logger.error("Failed to request put approval: %s", e, exc_info=True)
             return ApprovalResult.ERROR
 
     async def _execute_put_order(
@@ -1221,7 +1221,7 @@ class TelegramBot(
             return ApprovalResult.APPROVED if success else ApprovalResult.ERROR
 
         except Exception as e:
-            logger.error(f"Failed to request call approval: {e}", exc_info=True)
+            logger.error("Failed to request call approval: %s", e, exc_info=True)
             return ApprovalResult.ERROR
 
     async def _execute_call_order(
@@ -1406,7 +1406,7 @@ class TelegramBot(
             return ApprovalResult.APPROVED if success else ApprovalResult.ERROR
 
         except Exception as e:
-            logger.error(f"Failed to request BTC approval: {e}", exc_info=True)
+            logger.error("Failed to request BTC approval: %s", e, exc_info=True)
             return ApprovalResult.ERROR
 
     async def _execute_btc_order(
@@ -1509,7 +1509,7 @@ class TelegramBot(
             logger.info("DTE alert sent for position_id=%d dte=%s", position["id"], dte)
 
         except Exception as e:
-            logger.error(f"Failed to send DTE alert: {e}", exc_info=True)
+            logger.error("Failed to send DTE alert: %s", e, exc_info=True)
 
     # =========================================================================
     # Defensive Roll Approval Flow
@@ -1667,7 +1667,7 @@ class TelegramBot(
             return ApprovalResult.APPROVED if success else ApprovalResult.ERROR
 
         except Exception as e:
-            logger.error(f"Failed to request roll approval: {e}", exc_info=True)
+            logger.error("Failed to request roll approval: %s", e, exc_info=True)
             return ApprovalResult.ERROR
 
     async def _execute_roll(
@@ -1904,7 +1904,7 @@ class TelegramBot(
             )
 
         except Exception as e:
-            logger.error(f"Error executing sell all: {e}")
+            logger.error("Error executing sell all: %s", e)
             await self._app.bot.send_message(
                 chat_id=self.chat_id,
                 text=f"Error executing sell all: {str(e)}",
@@ -1937,7 +1937,7 @@ class TelegramBot(
             )
             return True
         except Exception as e:
-            logger.error(f"Failed to send message: {e}")
+            logger.error("Failed to send message: %s", e)
             return False
 
     async def request_trade_approval(
@@ -2014,7 +2014,7 @@ class TelegramBot(
                 return ApprovalResult.TIMEOUT
 
         except Exception as e:
-            logger.error(f"Failed to request approval: {e}")
+            logger.error("Failed to request approval: %s", e)
             return ApprovalResult.ERROR
 
     async def send_trade_executed(

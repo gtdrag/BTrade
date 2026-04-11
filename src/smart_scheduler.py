@@ -143,7 +143,7 @@ class SmartScheduler:
             try:
                 await self.telegram_bot.send_message(message, parse_mode=parse_mode)
             except Exception as e:
-                logger.error(f"Failed to send Telegram notification: {e}")
+                logger.error("Failed to send Telegram notification: %s", e)
 
         run_async(_send())
 
@@ -151,7 +151,7 @@ class SmartScheduler:
         """Handle job events."""
         if event.exception:
             self._error_count += 1
-            logger.error(f"Job failed: {event.exception}")
+            logger.error("Job failed: %s", event.exception)
             self.db.log_event("SCHEDULER_ERROR", str(event.exception))
 
     def _log_signal_check(self, job_type: str, signal: TodaySignal, now: datetime) -> None:
@@ -200,7 +200,7 @@ class SmartScheduler:
             }
 
         self.db.log_event("SIGNAL_CHECK", f"{job_type}: {signal.signal.value}", details)
-        logger.info(f"Signal check logged: {job_type} -> {signal.signal.value}")
+        logger.info("Signal check logged: %s -> %s", job_type, signal.signal.value)
 
     def setup_jobs(self) -> None:
         """Set up scheduled jobs."""
@@ -473,7 +473,7 @@ class SmartScheduler:
             )
 
         except Exception as e:
-            logger.error(f"Put signal check failed: {e}", exc_info=True)
+            logger.error("Put signal check failed: %s", e, exc_info=True)
             self.db.log_event("ERROR", "put_signal_check_error", {"error": str(e)})
             self._send_notification(f"⚠️ Put signal check error: {escape_markdown(str(e))}")
 
@@ -508,7 +508,7 @@ class SmartScheduler:
                 self._handle_put_expired_otm()
 
         except Exception as e:
-            logger.error(f"Assignment detection failed: {e}", exc_info=True)
+            logger.error("Assignment detection failed: %s", e, exc_info=True)
             self.db.log_event("ERROR", "assignment_detection_error", {"error": str(e)})
             self._send_notification(f"Assignment detection error: {escape_markdown(str(e))}")
 
@@ -740,7 +740,7 @@ class SmartScheduler:
                             self._monitoring_approval_pending = False
 
         except Exception as e:
-            logger.error(f"Wheel monitoring failed: {e}", exc_info=True)
+            logger.error("Wheel monitoring failed: %s", e, exc_info=True)
             self.db.log_event("ERROR", "wheel_monitoring_error", {"error": str(e)})
             self._send_notification(f"Wheel monitoring error: {str(e)[:200]}")
 
@@ -788,7 +788,7 @@ class SmartScheduler:
             f"Daily auth check: {auth_status}",
             {"is_authenticated": is_authenticated, "mode": self.bot.config.mode.value},
         )
-        logger.info(f"Auth reminder sent: {auth_status}")
+        logger.info("Auth reminder sent: %s", auth_status)
 
     @requires_trading_day
     @skip_if_wheel_mode
@@ -808,7 +808,9 @@ class SmartScheduler:
 
             if result.success:
                 if result.signal != Signal.CASH:
-                    logger.info(f"Trade executed: {result.action} {result.shares} {result.etf}")
+                    logger.info(
+                        "Trade executed: %s %s %s", result.action, result.shares, result.etf
+                    )
                     # Trade notification is handled by execute_signal via approval flow
 
                     # Mark 10 AM dump position if that's what we entered
@@ -820,11 +822,11 @@ class SmartScheduler:
                     logger.info("No trade signal today")
                     self._send_no_signal_notification(now)
             else:
-                logger.error(f"Trade failed: {result.error}")
+                logger.error("Trade failed: %s", result.error)
                 self._send_error_notification(f"Trade failed: {result.error}")
 
         except Exception as e:
-            logger.error(f"Morning signal job failed: {e}")
+            logger.error("Morning signal job failed: %s", e)
             self._error_count += 1
             self._send_error_notification(f"Morning signal check failed: {e}")
 
@@ -889,7 +891,7 @@ class SmartScheduler:
                     elif symbol == "SBIT" and qty > 0:
                         has_sbit = True
             except Exception as e:
-                logger.warning(f"Could not check positions: {e}")
+                logger.warning("Could not check positions: %s", e)
 
         return has_bitu, has_sbit
 
@@ -950,12 +952,12 @@ class SmartScheduler:
                                 f"Emergency close: Sold {close_symbol} @ ${close_result.price:.2f}"
                             )
                         else:
-                            logger.error(f"Failed to close {close_symbol}: {close_result.error}")
+                            logger.error("Failed to close %s: %s", close_symbol, close_result.error)
                             return  # Don't proceed if we can't close
 
                     # If already holding the right ETF, we're correctly positioned
                     elif has_keep:
-                        logger.info(f"Already holding {keep_symbol} - correctly positioned")
+                        logger.info("Already holding %s - correctly positioned", keep_symbol)
                         return
 
                     # Now execute the momentum trade (still under lock)
@@ -970,16 +972,16 @@ class SmartScheduler:
                             f"@ ${result.price:.2f}"
                         )
                     else:
-                        logger.error(f"{label} trade failed: {result.error}")
+                        logger.error("%s trade failed: %s", label, result.error)
             else:
                 status = getattr(signal, status_attr, None)
                 if status:
                     pct = getattr(status, status_pct_attr)
                     threshold = getattr(self.bot.config.strategy, threshold_attr)
-                    logger.debug(f"{label} check: IBIT {pct:+.1f}% (threshold: {threshold:+.1f}%)")
+                    logger.debug("%s check: IBIT %+.1f% (threshold: %+.1f%)", label, pct, threshold)
 
         except Exception as e:
-            logger.error(f"{label} failed: {e}")
+            logger.error("%s failed: %s", label, e)
             self._error_count += 1
             self._send_error_notification(f"{label} failed: {e}")
 
@@ -1051,7 +1053,7 @@ class SmartScheduler:
                     "Strategy: Captured 10 AM weakness window"
                 )
 
-                logger.info(f"10 AM dump exit: Sold {result.shares} SBIT @ ${result.price:.2f}")
+                logger.info("10 AM dump exit: Sold %s SBIT @ $%.2f", result.shares, result.price)
 
                 self.db.log_event(
                     "TEN_AM_DUMP_EXIT",
@@ -1068,10 +1070,10 @@ class SmartScheduler:
                 logger.info("No SBIT position to close for 10 AM dump")
                 self.bot.strategy.mark_ten_am_dump_exited()
             else:
-                logger.error(f"Failed to close 10 AM dump position: {result.error}")
+                logger.error("Failed to close 10 AM dump position: %s", result.error)
 
         except Exception as e:
-            logger.error(f"10 AM dump exit failed: {e}")
+            logger.error("10 AM dump exit failed: %s", e)
             self._error_count += 1
             self._send_error_notification(f"10 AM dump exit failed: {e}")
 
@@ -1106,7 +1108,7 @@ class SmartScheduler:
 
                 elif "No position found" in (result.error or ""):
                     # No position to close - not a failure, don't retry
-                    logger.info(f"No {etf} position to close")
+                    logger.info("No %s position to close", etf)
                     return (True, None)
 
                 else:
@@ -1116,16 +1118,18 @@ class SmartScheduler:
                     )
                     if attempt < max_retries - 1:
                         wait_time = 2**attempt  # 1s, 2s, 4s
-                        logger.info(f"Retrying in {wait_time}s...")
+                        logger.info("Retrying in %ss...", wait_time)
                         time.sleep(wait_time)
                     else:
                         return (False, result.error)
 
             except Exception as e:
-                logger.error(f"EXCEPTION closing {etf} (attempt {attempt + 1}/{max_retries}): {e}")
+                logger.error(
+                    "EXCEPTION closing %s (attempt %s/%s): %s", etf, attempt + 1, max_retries, e
+                )
                 if attempt < max_retries - 1:
                     wait_time = 2**attempt
-                    logger.info(f"Retrying in {wait_time}s...")
+                    logger.info("Retrying in %ss...", wait_time)
                     time.sleep(wait_time)
                 else:
                     return (False, f"Exception after {max_retries} attempts: {e}")
@@ -1139,9 +1143,9 @@ class SmartScheduler:
 
         # First, log what positions E*TRADE sees
         portfolio = self.bot.get_portfolio_value()
-        logger.info(f"EOD close - portfolio check: {portfolio}")
+        logger.info("EOD close - portfolio check: %s", portfolio)
         if "error" in portfolio:
-            logger.error(f"EOD close - E*TRADE error: {portfolio.get('error')}")
+            logger.error("EOD close - E*TRADE error: %s", portfolio.get("error"))
 
         close_failures = []
         close_successes = []
@@ -1207,7 +1211,7 @@ class SmartScheduler:
             self._send_notification(message)
 
         except Exception as e:
-            logger.error(f"Failed to send close notification: {e}")
+            logger.error("Failed to send close notification: %s", e)
 
     @requires_trading_day
     def _job_hedge_check(self) -> None:
@@ -1248,7 +1252,7 @@ class SmartScheduler:
                 )
 
         except Exception as e:
-            logger.error(f"Hedge check job failed: {e}")
+            logger.error("Hedge check job failed: %s", e)
             self._error_count += 1
             self._send_error_notification(f"Hedge check failed: {e}")
 
@@ -1272,7 +1276,7 @@ class SmartScheduler:
             self._send_notification(message)
 
         except Exception as e:
-            logger.warning(f"Failed to send hedge notification: {e}")
+            logger.warning("Failed to send hedge notification: %s", e)
 
     @requires_trading_day
     def _job_reversal_check(self) -> None:
@@ -1314,7 +1318,7 @@ class SmartScheduler:
                 )
 
         except Exception as e:
-            logger.error(f"Reversal check job failed: {e}")
+            logger.error("Reversal check job failed: %s", e)
             self._error_count += 1
             self._send_error_notification(f"Reversal check failed: {e}")
 
@@ -1336,7 +1340,7 @@ class SmartScheduler:
             self._send_notification(message)
 
         except Exception as e:
-            logger.warning(f"Failed to send reversal notification: {e}")
+            logger.warning("Failed to send reversal notification: %s", e)
 
     def _job_renew_token(self) -> None:
         """Renew E*TRADE token."""
@@ -1345,7 +1349,7 @@ class SmartScheduler:
                 self.bot.client.renew_token()
                 logger.info("E*TRADE token renewed")
             except Exception as e:
-                logger.error(f"Token renewal failed: {e}")
+                logger.error("Token renewal failed: %s", e)
 
     @requires_trading_day
     @skip_if_wheel_mode
@@ -1390,14 +1394,14 @@ class SmartScheduler:
                             ending_cash=ending_cash,
                         )
                     except Exception as e:
-                        logger.error(f"Failed to send daily summary: {e}")
+                        logger.error("Failed to send daily summary: %s", e)
 
                 run_async(_send_summary())
 
-            logger.info(f"Daily summary sent: {trades_today} trades, P/L: ${total_pnl:.2f}")
+            logger.info("Daily summary sent: %s trades, P/L: $%.2f", trades_today, total_pnl)
 
         except Exception as e:
-            logger.error(f"Daily summary failed: {e}")
+            logger.error("Daily summary failed: %s", e)
             self._error_count += 1
 
     @requires_trading_day
@@ -1450,7 +1454,7 @@ class SmartScheduler:
             self._send_notification("\n".join(lines))
 
         except Exception as e:
-            logger.error(f"Wheel daily summary failed: {e}")
+            logger.error("Wheel daily summary failed: %s", e)
             self._error_count += 1
 
     def _job_premarket_reminder(self) -> None:
@@ -1497,11 +1501,11 @@ class SmartScheduler:
 
         # Check if we have any positions
         portfolio = self.bot.get_portfolio_value()
-        logger.info(f"Position update - portfolio result: {portfolio}")
+        logger.info("Position update - portfolio result: %s", portfolio)
 
         # Check for error response
         if "error" in portfolio:
-            logger.error(f"Position update failed - E*TRADE error: {portfolio.get('error')}")
+            logger.error("Position update failed - E*TRADE error: %s", portfolio.get("error"))
             self._send_notification(
                 f"⚠️ Position Update Failed\n\nE*TRADE error: {portfolio.get('error')}",
                 parse_mode=None,
@@ -1594,7 +1598,7 @@ class SmartScheduler:
 
         # Don't use Markdown - message may contain error strings
         self._send_notification(message, parse_mode=None)
-        logger.info(f"Health check sent: {len(issues)} issues found")
+        logger.info("Health check sent: %d issues found", len(issues))
 
     def _job_pattern_analysis(self) -> None:
         """Monthly pattern analysis - runs LLM to discover new trading patterns."""
@@ -1654,11 +1658,11 @@ class SmartScheduler:
                     try:
                         await self.telegram_bot.send_message(message)
                     except Exception as notify_err:
-                        logger.error(f"Failed to send pattern analysis notification: {notify_err}")
-                logger.info(f"Pattern analysis complete: {len(new_patterns)} new patterns")
+                        logger.error("Failed to send pattern analysis notification: %s", notify_err)
+                logger.info("Pattern analysis complete: %d new patterns", len(new_patterns))
 
             except Exception as e:
-                logger.error(f"Pattern analysis failed: {e}")
+                logger.error("Pattern analysis failed: %s", e)
                 # Send error notification
                 if self.telegram_bot:
                     try:
@@ -1699,14 +1703,14 @@ class SmartScheduler:
                     try:
                         await self.telegram_bot.send_message(message, parse_mode="Markdown")
                     except Exception as notify_err:
-                        logger.error(f"Failed to send strategy review notification: {notify_err}")
+                        logger.error("Failed to send strategy review notification: %s", notify_err)
 
                 logger.info(
                     f"Strategy review complete: recommendations={recommendation.has_recommendations}"
                 )
 
             except Exception as e:
-                logger.error(f"Strategy review failed: {e}")
+                logger.error("Strategy review failed: %s", e)
                 # Send error notification
                 if self.telegram_bot:
                     try:
