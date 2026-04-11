@@ -124,6 +124,40 @@ class TelegramBot(
         tail = data.rsplit("_", 1)[-1]
         return tail != expected_id
 
+    async def _wait_for_approval_result(
+        self,
+        flow: ApprovalFlow,
+        timeout_message: str,
+    ) -> Optional[str]:
+        """Wait for an approval flow's event with timeout.
+
+        Consolidates the set-event / wait_for / timeout / cleanup pattern
+        that was previously duplicated across request_put_approval,
+        request_call_approval, request_profit_take_approval, and
+        request_roll_approval.
+
+        Returns the flow's result string on success, or None if the wait
+        timed out (in which case a timeout notification is sent). In both
+        outcomes, the flow's callback_id is cleared so subsequent stale
+        button taps are rejected by _is_stale_callback.
+        """
+        flow.event = asyncio.Event()
+        flow.result = None
+
+        try:
+            await asyncio.wait_for(
+                flow.event.wait(),
+                timeout=self.approval_timeout,
+            )
+        except asyncio.TimeoutError:
+            flow.callback_id = None
+            await self.send_message(timeout_message)
+            return None
+
+        result = flow.result
+        flow.callback_id = None
+        return result
+
     def _build_alt_signal_from_chain(
         self,
         chain: List[Dict],
@@ -906,28 +940,15 @@ class TelegramBot(
                 reply_markup=reply_markup,
             )
 
-            # Set up separate event for put approval (T-03-05: no collision)
-            self._put_approval.event = asyncio.Event()
-            self._put_approval.result = None
-
-            try:
-                await asyncio.wait_for(
-                    self._put_approval.event.wait(),
-                    timeout=self.approval_timeout,
-                )
-            except asyncio.TimeoutError:
-                # Clear callback_id so any subsequent taps on the stale buttons
-                # are rejected by _is_stale_callback
-                self._put_approval.callback_id = None
-                await self.send_message(
-                    f"⏰ *TIMEOUT*\n\nNo response received for put signal at ${signal.strike:.2f}. "
-                    "Suggestion cancelled."
-                )
+            # T-03-05: put flow uses its own ApprovalFlow so it cannot collide
+            # with intraday, call, btc, or roll approvals.
+            result = await self._wait_for_approval_result(
+                self._put_approval,
+                f"⏰ *TIMEOUT*\n\nNo response received for put signal at ${signal.strike:.2f}. "
+                "Suggestion cancelled.",
+            )
+            if result is None:
                 return ApprovalResult.TIMEOUT
-
-            result = self._put_approval.result
-            # Clear callback_id now that this approval has resolved
-            self._put_approval.callback_id = None
 
             if result == "rejected":
                 return ApprovalResult.REJECTED
@@ -1189,25 +1210,13 @@ class TelegramBot(
                 reply_markup=reply_markup,
             )
 
-            # Set up separate event for call approval (avoids collision with put/intraday)
-            self._call_approval.event = asyncio.Event()
-            self._call_approval.result = None
-
-            try:
-                await asyncio.wait_for(
-                    self._call_approval.event.wait(),
-                    timeout=self.approval_timeout,
-                )
-            except asyncio.TimeoutError:
-                self._call_approval.callback_id = None
-                await self.send_message(
-                    f"⏰ *TIMEOUT*\n\nNo response received for call signal at ${signal.strike:.2f}. "
-                    "Suggestion cancelled."
-                )
+            result = await self._wait_for_approval_result(
+                self._call_approval,
+                f"⏰ *TIMEOUT*\n\nNo response received for call signal at ${signal.strike:.2f}. "
+                "Suggestion cancelled.",
+            )
+            if result is None:
                 return ApprovalResult.TIMEOUT
-
-            result = self._call_approval.result
-            self._call_approval.callback_id = None
 
             if result == "rejected":
                 return ApprovalResult.REJECTED
@@ -1391,25 +1400,13 @@ class TelegramBot(
                 reply_markup=reply_markup,
             )
 
-            # Set up fresh event for BTC approval
-            self._btc_approval.event = asyncio.Event()
-            self._btc_approval.result = None
-
-            try:
-                await asyncio.wait_for(
-                    self._btc_approval.event.wait(),
-                    timeout=self.approval_timeout,
-                )
-            except asyncio.TimeoutError:
-                self._btc_approval.callback_id = None
-                await self.send_message(
-                    f"*TIMEOUT*\n\nNo response received for BTC at ${current_ask:.2f}. "
-                    "Suggestion cancelled."
-                )
+            result = await self._wait_for_approval_result(
+                self._btc_approval,
+                f"*TIMEOUT*\n\nNo response received for BTC at ${current_ask:.2f}. "
+                "Suggestion cancelled.",
+            )
+            if result is None:
                 return ApprovalResult.TIMEOUT
-
-            result = self._btc_approval.result
-            self._btc_approval.callback_id = None
 
             if result == "rejected":
                 logger.info("BTC approval rejected for position_id=%d", position_id)
@@ -1657,24 +1654,12 @@ class TelegramBot(
                 reply_markup=reply_markup,
             )
 
-            # Set up fresh event for roll approval
-            self._roll_approval.event = asyncio.Event()
-            self._roll_approval.result = None
-
-            try:
-                await asyncio.wait_for(
-                    self._roll_approval.event.wait(),
-                    timeout=self.approval_timeout,
-                )
-            except asyncio.TimeoutError:
-                self._roll_approval.callback_id = None
-                await self.send_message(
-                    "*TIMEOUT*\n\nNo response received for roll suggestion. Suggestion cancelled."
-                )
+            result = await self._wait_for_approval_result(
+                self._roll_approval,
+                "*TIMEOUT*\n\nNo response received for roll suggestion. Suggestion cancelled.",
+            )
+            if result is None:
                 return ApprovalResult.TIMEOUT
-
-            result = self._roll_approval.result
-            self._roll_approval.callback_id = None
 
             if result == "rejected":
                 logger.info("Roll rejected for position_id=%d", position_id)
