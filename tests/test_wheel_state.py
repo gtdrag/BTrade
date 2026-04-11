@@ -3,7 +3,6 @@ Tests for wheel strategy state machine, dataclasses, and database schema.
 """
 
 import sys
-from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -12,10 +11,10 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.wheel_state import (
-    WheelState,
-    WheelCycle,
-    OptionsPosition,
     VALID_TRANSITIONS,
+    OptionsPosition,
+    WheelCycle,
+    WheelState,
     transition,
 )
 
@@ -489,7 +488,7 @@ class TestWheelCycleCRUD:
 
     def test_create_wheel_cycle_sets_defaults(self, db):
         """create_wheel_cycle() sets state='CASH', underlying='IBIT', and opened_at."""
-        cycle_id = db.create_wheel_cycle()
+        db.create_wheel_cycle()
         cycle = db.get_active_cycle()
         assert cycle is not None
         assert cycle["state"] == "CASH"
@@ -513,10 +512,20 @@ class TestWheelCycleCRUD:
         cycle = db.get_active_cycle()
         assert cycle is not None
         expected_keys = {
-            "id", "state", "underlying", "put_strike", "put_premium_received",
-            "put_expiry_date", "shares_held", "cost_basis",
-            "covered_call_premiums_collected", "realized_pnl",
-            "opened_at", "closed_at", "created_at", "updated_at",
+            "id",
+            "state",
+            "underlying",
+            "put_strike",
+            "put_premium_received",
+            "put_expiry_date",
+            "shares_held",
+            "cost_basis",
+            "covered_call_premiums_collected",
+            "realized_pnl",
+            "opened_at",
+            "closed_at",
+            "created_at",
+            "updated_at",
         }
         assert set(cycle.keys()) == expected_keys
 
@@ -532,8 +541,11 @@ class TestWheelCycleCRUD:
         # Create and close a cycle
         cycle_id = db.create_wheel_cycle()
         from src.wheel_state import WheelState
+
         db.transition_wheel_state(cycle_id, WheelState.SHORT_PUT, reason="sold put")
-        db.transition_wheel_state(cycle_id, WheelState.CASH, reason="put expired", realized_pnl=150.0)
+        db.transition_wheel_state(
+            cycle_id, WheelState.CASH, reason="put expired", realized_pnl=150.0
+        )
         # Create a second cycle
         db.create_wheel_cycle()
         history = db.get_cycle_history()
@@ -562,6 +574,7 @@ class TestTransitionWheelState:
     def test_transition_updates_state_column(self, db, active_cycle):
         """transition_wheel_state() updates the state column in wheel_cycles."""
         from src.wheel_state import WheelState
+
         db.transition_wheel_state(active_cycle, WheelState.SHORT_PUT, reason="sold put")
         cycle = db.get_active_cycle()
         assert cycle["state"] == "SHORT_PUT"
@@ -569,6 +582,7 @@ class TestTransitionWheelState:
     def test_invalid_transition_raises_value_error(self, db, active_cycle):
         """transition_wheel_state() raises ValueError for invalid transitions."""
         from src.wheel_state import WheelState
+
         with pytest.raises(ValueError):
             # CASH -> HOLDING_SHARES is invalid
             db.transition_wheel_state(active_cycle, WheelState.HOLDING_SHARES, reason="bad")
@@ -576,12 +590,14 @@ class TestTransitionWheelState:
     def test_wrong_cycle_id_raises_value_error(self, db, active_cycle):
         """transition_wheel_state() raises ValueError if cycle_id doesn't match active cycle."""
         from src.wheel_state import WheelState
+
         with pytest.raises(ValueError):
             db.transition_wheel_state(99999, WheelState.SHORT_PUT, reason="wrong id")
 
     def test_transition_to_cash_sets_closed_at(self, db, active_cycle):
         """transition_wheel_state to CASH sets closed_at timestamp."""
         from src.wheel_state import WheelState
+
         db.transition_wheel_state(active_cycle, WheelState.SHORT_PUT, reason="sold put")
         db.transition_wheel_state(active_cycle, WheelState.CASH, reason="expired")
         # Get cycle from history (it's now closed)
@@ -591,14 +607,16 @@ class TestTransitionWheelState:
     def test_transition_logs_wheel_transition_event(self, db, active_cycle):
         """transition_wheel_state() logs to logs table with event='wheel_transition'."""
         from src.wheel_state import WheelState
+
         db.transition_wheel_state(active_cycle, WheelState.SHORT_PUT, reason="sold put")
         logs = db.get_logs(limit=10)
-        wheel_logs = [l for l in logs if l["event"] == "wheel_transition"]
+        wheel_logs = [log for log in logs if log["event"] == "wheel_transition"]
         assert len(wheel_logs) >= 1
 
     def test_transition_accepts_kwargs_to_update_additional_fields(self, db, active_cycle):
         """transition_wheel_state accepts **updates to set extra fields like put_strike."""
         from src.wheel_state import WheelState
+
         db.transition_wheel_state(
             active_cycle,
             WheelState.SHORT_PUT,
@@ -628,7 +646,14 @@ class TestOptionsPositions:
         return db.create_wheel_cycle()
 
     def _open_put(self, db, cycle_id, **kwargs):
-        """Helper to open a put position with defaults."""
+        """Helper to open a put position with defaults.
+
+        LO-03: supplies default Greek values (delta/gamma/theta/vega/iv) so
+        every CRUD test in this class exercises the Greek storage path —
+        not just the single test that passes them explicitly. If the INSERT
+        column order for Greeks ever drifts, the regression surface is now
+        every test in the class, not just one.
+        """
         defaults = dict(
             cycle_id=cycle_id,
             symbol="IBIT260515P00048000",
@@ -637,6 +662,12 @@ class TestOptionsPositions:
             expiry_date="2026-05-15",
             dte_at_entry=39,
             premium_received=1.50,
+            quantity=1,
+            delta=-0.25,
+            gamma=0.05,
+            theta=-0.10,
+            vega=0.15,
+            iv=0.35,
         )
         defaults.update(kwargs)
         return db.open_wheel_position(**defaults)
@@ -649,7 +680,7 @@ class TestOptionsPositions:
 
     def test_open_wheel_position_stores_greeks_individually(self, db, cycle_id):
         """open_wheel_position() stores Greeks as individual columns, not JSON."""
-        pos_id = db.open_wheel_position(
+        db.open_wheel_position(
             cycle_id=cycle_id,
             symbol="IBIT260515P00048000",
             option_type="PUT",
@@ -744,44 +775,91 @@ class TestCostBasis:
     def test_assignment_sets_cost_basis_strike_minus_premium(self, db, cycle_id):
         """After assignment, cost_basis = put_strike - put_premium_received (per share)."""
         from src.wheel_state import WheelState
-        db.transition_wheel_state(cycle_id, WheelState.SHORT_PUT, reason="sold put",
-                                   put_strike=50.0, put_premium_received=2.50)
+
+        db.transition_wheel_state(
+            cycle_id,
+            WheelState.SHORT_PUT,
+            reason="sold put",
+            put_strike=50.0,
+            put_premium_received=2.50,
+        )
         # Caller provides cost_basis on assignment
         cost_basis = 50.0 - 2.50  # = 47.50
-        db.transition_wheel_state(cycle_id, WheelState.HOLDING_SHARES, reason="assigned",
-                                   shares_held=100, cost_basis=cost_basis)
+        db.transition_wheel_state(
+            cycle_id,
+            WheelState.HOLDING_SHARES,
+            reason="assigned",
+            shares_held=100,
+            cost_basis=cost_basis,
+        )
         cycle = db.get_active_cycle()
         assert cycle["cost_basis"] == pytest.approx(47.50)
 
     def test_covered_call_premium_reduces_cost_basis(self, db, cycle_id):
         """After collecting covered call premium, cost_basis decreases."""
         from src.wheel_state import WheelState
-        db.transition_wheel_state(cycle_id, WheelState.SHORT_PUT, reason="sold put",
-                                   put_strike=50.0, put_premium_received=2.50)
-        db.transition_wheel_state(cycle_id, WheelState.HOLDING_SHARES, reason="assigned",
-                                   shares_held=100, cost_basis=47.50)
+
+        db.transition_wheel_state(
+            cycle_id,
+            WheelState.SHORT_PUT,
+            reason="sold put",
+            put_strike=50.0,
+            put_premium_received=2.50,
+        )
+        db.transition_wheel_state(
+            cycle_id,
+            WheelState.HOLDING_SHARES,
+            reason="assigned",
+            shares_held=100,
+            cost_basis=47.50,
+        )
         # Record covered call premium reduces cost_basis
         new_cost_basis = 47.50 - 1.50  # = 46.00
         new_cc_premiums = 1.50
-        db.transition_wheel_state(cycle_id, WheelState.COVERED_CALL, reason="sold call",
-                                   cost_basis=new_cost_basis,
-                                   covered_call_premiums_collected=new_cc_premiums)
+        db.transition_wheel_state(
+            cycle_id,
+            WheelState.COVERED_CALL,
+            reason="sold call",
+            cost_basis=new_cost_basis,
+            covered_call_premiums_collected=new_cc_premiums,
+        )
         cycle = db.get_active_cycle()
         assert cycle["cost_basis"] == pytest.approx(46.00)
 
     def test_second_covered_call_accumulates_premiums(self, db, cycle_id):
         """After second covered call, cost_basis decreases further and premiums accumulate."""
         from src.wheel_state import WheelState
-        db.transition_wheel_state(cycle_id, WheelState.SHORT_PUT, reason="sold put",
-                                   put_strike=50.0, put_premium_received=2.50)
-        db.transition_wheel_state(cycle_id, WheelState.HOLDING_SHARES, reason="assigned",
-                                   shares_held=100, cost_basis=47.50)
-        db.transition_wheel_state(cycle_id, WheelState.COVERED_CALL, reason="sold call 1",
-                                   cost_basis=46.00, covered_call_premiums_collected=1.50)
+
+        db.transition_wheel_state(
+            cycle_id,
+            WheelState.SHORT_PUT,
+            reason="sold put",
+            put_strike=50.0,
+            put_premium_received=2.50,
+        )
+        db.transition_wheel_state(
+            cycle_id,
+            WheelState.HOLDING_SHARES,
+            reason="assigned",
+            shares_held=100,
+            cost_basis=47.50,
+        )
+        db.transition_wheel_state(
+            cycle_id,
+            WheelState.COVERED_CALL,
+            reason="sold call 1",
+            cost_basis=46.00,
+            covered_call_premiums_collected=1.50,
+        )
         # Call expires, go back to HOLDING_SHARES, then sell another call
         db.transition_wheel_state(cycle_id, WheelState.HOLDING_SHARES, reason="call expired")
-        db.transition_wheel_state(cycle_id, WheelState.COVERED_CALL, reason="sold call 2",
-                                   cost_basis=45.00, covered_call_premiums_collected=2.50)
+        db.transition_wheel_state(
+            cycle_id,
+            WheelState.COVERED_CALL,
+            reason="sold call 2",
+            cost_basis=45.00,
+            covered_call_premiums_collected=2.50,
+        )
         cycle = db.get_active_cycle()
         assert cycle["cost_basis"] == pytest.approx(45.00)
         assert cycle["covered_call_premiums_collected"] == pytest.approx(2.50)
@@ -789,10 +867,21 @@ class TestCostBasis:
     def test_compute_cycle_pnl_holding_shares(self, db, cycle_id):
         """compute_cycle_pnl with HOLDING_SHARES returns unrealized_pnl = (price - cost_basis) * shares."""
         from src.wheel_state import WheelState
-        db.transition_wheel_state(cycle_id, WheelState.SHORT_PUT, reason="sold put",
-                                   put_strike=50.0, put_premium_received=2.50)
-        db.transition_wheel_state(cycle_id, WheelState.HOLDING_SHARES, reason="assigned",
-                                   shares_held=100, cost_basis=47.50)
+
+        db.transition_wheel_state(
+            cycle_id,
+            WheelState.SHORT_PUT,
+            reason="sold put",
+            put_strike=50.0,
+            put_premium_received=2.50,
+        )
+        db.transition_wheel_state(
+            cycle_id,
+            WheelState.HOLDING_SHARES,
+            reason="assigned",
+            shares_held=100,
+            cost_basis=47.50,
+        )
         cycle = db.get_active_cycle()
         pnl = db.compute_cycle_pnl(cycle, current_price=50.0)
         assert pnl["unrealized_pnl"] == pytest.approx(250.0)  # (50.0 - 47.50) * 100
@@ -800,10 +889,13 @@ class TestCostBasis:
     def test_compute_cycle_pnl_cash_state(self, db, cycle_id):
         """compute_cycle_pnl with CASH state returns unrealized_pnl=0 and realized_pnl from cycle."""
         from src.wheel_state import WheelState
-        db.transition_wheel_state(cycle_id, WheelState.SHORT_PUT, reason="sold put",
-                                   put_premium_received=2.50)
-        db.transition_wheel_state(cycle_id, WheelState.CASH, reason="put expired",
-                                   realized_pnl=250.0)
+
+        db.transition_wheel_state(
+            cycle_id, WheelState.SHORT_PUT, reason="sold put", put_premium_received=2.50
+        )
+        db.transition_wheel_state(
+            cycle_id, WheelState.CASH, reason="put expired", realized_pnl=250.0
+        )
         history = db.get_cycle_history(limit=1)
         cycle = history[0]
         pnl = db.compute_cycle_pnl(cycle, current_price=0.0)
@@ -813,12 +905,15 @@ class TestCostBasis:
     def test_put_expires_worthless_realized_pnl(self, db, cycle_id):
         """Put expires worthless: cycle transitions to CASH with realized_pnl = premium * 100."""
         from src.wheel_state import WheelState
-        db.transition_wheel_state(cycle_id, WheelState.SHORT_PUT, reason="sold put",
-                                   put_premium_received=2.50)
+
+        db.transition_wheel_state(
+            cycle_id, WheelState.SHORT_PUT, reason="sold put", put_premium_received=2.50
+        )
         # Caller computes realized_pnl and passes it via **updates
         realized = 2.50 * 100  # = 250.0
-        db.transition_wheel_state(cycle_id, WheelState.CASH, reason="put expired worthless",
-                                   realized_pnl=realized)
+        db.transition_wheel_state(
+            cycle_id, WheelState.CASH, reason="put expired worthless", realized_pnl=realized
+        )
         history = db.get_cycle_history(limit=1)
         cycle = history[0]
         assert cycle["realized_pnl"] == pytest.approx(250.0)

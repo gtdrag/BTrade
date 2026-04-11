@@ -231,6 +231,60 @@ class TestDatabaseConcurrency:
         assert len(logs) == 1
         assert logs[0]["event"] == "From db1"
 
+    def test_concurrent_writes_from_multiple_threads(self, tmp_path):
+        """ME-08: actual concurrent writes from threads must not deadlock or
+        corrupt data.
+
+        The previous test_multiple_connections was sequential — it wrote from
+        one Database, then read from another. It did NOT exercise the path
+        where two threads contend on the same SQLite file and one of them
+        hits "database is locked". This test spawns N threads and has each
+        one insert M log events. After all threads finish, every event must
+        be present in the database exactly once and all threads must have
+        finished without raising.
+        """
+        import threading
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        db_path = tmp_path / "concurrent_writes.db"
+
+        # Pre-create the schema from the main thread; each writer thread
+        # will open its own Database instance against the same path.
+        Database(db_path)
+
+        thread_count = 8
+        events_per_thread = 25
+        errors: list[BaseException] = []
+        errors_lock = threading.Lock()
+
+        def writer(thread_id: int) -> None:
+            try:
+                writer_db = Database(db_path)
+                for i in range(events_per_thread):
+                    writer_db.log_event(
+                        "INFO",
+                        f"t{thread_id}_e{i}",
+                        {"thread_id": thread_id, "seq": i},
+                    )
+            except BaseException as exc:
+                with errors_lock:
+                    errors.append(exc)
+
+        with ThreadPoolExecutor(max_workers=thread_count) as executor:
+            futures = [executor.submit(writer, tid) for tid in range(thread_count)]
+            for future in as_completed(futures):
+                future.result()  # re-raises any per-thread exception
+
+        assert not errors, f"Writer threads raised: {errors}"
+
+        # Verify no data corruption: every expected event is present once.
+        reader = Database(db_path)
+        logs = reader.get_logs(limit=thread_count * events_per_thread + 10)
+        events = {log["event"] for log in logs}
+        expected = {f"t{tid}_e{i}" for tid in range(thread_count) for i in range(events_per_thread)}
+        missing = expected - events
+        assert not missing, f"Missing {len(missing)} events after concurrent writes: {missing}"
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

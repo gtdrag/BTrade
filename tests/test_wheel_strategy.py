@@ -8,7 +8,6 @@ Implementation lives in src/wheel_strategy.py.
 import os
 import sys
 from pathlib import Path
-from typing import Optional
 from unittest.mock import patch
 
 import pandas as pd
@@ -30,41 +29,7 @@ def _make_mock_history(high_values, close_values):
     )
 
 
-def _make_contract(
-    option_type: str,
-    strike: float,
-    delta: float,
-    bid: float,
-    expiry_year: int = 2026,
-    expiry_month: int = 5,
-    expiry_day: int = 15,
-    dte: int = 35,
-    symbol: Optional[str] = None,
-    iv: float = 0.35,
-    gamma: float = 0.05,
-    theta: float = -0.04,
-    vega: float = 0.10,
-) -> dict:
-    """Build a minimal contract dict matching get_ibit_options_chain() shape."""
-    return {
-        "symbol": symbol or f"IBIT260515{option_type[0]}{int(strike * 1000):08d}",
-        "option_type": option_type,
-        "strike": strike,
-        "expiry_year": expiry_year,
-        "expiry_month": expiry_month,
-        "expiry_day": expiry_day,
-        "expiry_date": f"{expiry_year}-{expiry_month:02d}-{expiry_day:02d}",
-        "dte": dte,
-        "bid": bid,
-        "ask": bid + 0.10,
-        "last": bid + 0.05,
-        "delta": delta,
-        "gamma": gamma,
-        "theta": theta,
-        "vega": vega,
-        "iv": iv,
-    }
-
+from tests.conftest import make_contract as _make_contract  # LO-01
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -326,6 +291,38 @@ class TestStrikeSelection:
             result = strategy.select_put_strike()
         assert result is not None
         assert result["bid"] == pytest.approx(1.80)
+
+    def test_delta_filter_is_inclusive_at_both_boundaries(self, strategy, mock_client):
+        """ME-04: pin the `delta_min <= abs(delta) <= delta_max` boundaries.
+
+        The default filter is 0.20 <= abs(delta) <= 0.30 — both ends inclusive.
+        If a refactor accidentally changes either comparison to strict `<`, a
+        contract sitting exactly on the boundary would be dropped and the put
+        signal pipeline would silently lose candidates. This test picks a
+        chain containing only a single contract at each boundary (0.20 and
+        0.30) to verify both still qualify.
+        """
+        # Lower boundary: only one contract, exactly delta=-0.20 -> must select
+        chain_lo = [_make_contract("PUT", 50.0, delta=-0.20, bid=0.80)]
+        with patch.object(mock_client, "get_ibit_options_chain", return_value=chain_lo):
+            result_lo = strategy.select_put_strike()
+        assert result_lo is not None
+        assert result_lo["delta"] == pytest.approx(-0.20)
+
+        # Upper boundary: only one contract, exactly delta=-0.30 -> must select
+        chain_hi = [_make_contract("PUT", 48.0, delta=-0.30, bid=1.60)]
+        with patch.object(mock_client, "get_ibit_options_chain", return_value=chain_hi):
+            result_hi = strategy.select_put_strike()
+        assert result_hi is not None
+        assert result_hi["delta"] == pytest.approx(-0.30)
+
+        # Just outside: delta=-0.19 and delta=-0.31 must both be rejected
+        chain_out_lo = [_make_contract("PUT", 50.0, delta=-0.19, bid=0.60)]
+        chain_out_hi = [_make_contract("PUT", 48.0, delta=-0.31, bid=1.80)]
+        with patch.object(mock_client, "get_ibit_options_chain", return_value=chain_out_lo):
+            assert strategy.select_put_strike() is None
+        with patch.object(mock_client, "get_ibit_options_chain", return_value=chain_out_hi):
+            assert strategy.select_put_strike() is None
 
 
 # ---------------------------------------------------------------------------

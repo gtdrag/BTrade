@@ -45,6 +45,51 @@ def _reset_database_singleton_and_env():
             os.environ["DATABASE_PATH"] = original_db_path
 
 
+def make_contract(
+    option_type: str,
+    strike: float,
+    delta: float,
+    bid: float,
+    ask: float = None,
+    dte: int = 35,
+    symbol: str = None,
+    iv: float = 0.35,
+    gamma: float = 0.05,
+    theta: float = -0.04,
+    vega: float = 0.10,
+    expiry_year: int = 2026,
+    expiry_month: int = 5,
+    expiry_day: int = 15,
+) -> dict:
+    """Build a minimal contract dict matching get_ibit_options_chain() shape (LO-01).
+
+    Consolidates three drift-prone copies of _make_contract() that used to
+    live in test_wheel_strategy.py, test_covered_call.py, and
+    test_profit_management.py. If the contract shape ever changes (e.g. a
+    new required field), there is now one place to update.
+    """
+    if ask is None:
+        ask = bid + 0.10
+    return {
+        "symbol": symbol or f"IBIT260515{option_type[0]}{int(strike * 1000):08d}",
+        "option_type": option_type,
+        "strike": strike,
+        "expiry_year": expiry_year,
+        "expiry_month": expiry_month,
+        "expiry_day": expiry_day,
+        "expiry_date": f"{expiry_year}-{expiry_month:02d}-{expiry_day:02d}",
+        "dte": dte,
+        "bid": bid,
+        "ask": ask,
+        "last": bid + 0.05,
+        "delta": delta,
+        "gamma": gamma,
+        "theta": theta,
+        "vega": vega,
+        "iv": iv,
+    }
+
+
 def make_smart_scheduler(telegram_bot=None):
     """Build a SmartScheduler by running its real __init__ (HI-07).
 

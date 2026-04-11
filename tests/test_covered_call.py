@@ -18,7 +18,6 @@ Covers:
 import sys
 from datetime import date
 from pathlib import Path
-from typing import Optional
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -31,46 +30,10 @@ from src.etrade_client import MockETradeClient
 from src.wheel_state import WheelState
 from src.wheel_strategy import CallSignal, WheelStrategy
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def _make_contract(
-    option_type: str,
-    strike: float,
-    delta: float,
-    bid: float,
-    expiry_year: int = 2026,
-    expiry_month: int = 5,
-    expiry_day: int = 15,
-    dte: int = 35,
-    symbol: Optional[str] = None,
-    iv: float = 0.35,
-    gamma: float = 0.05,
-    theta: float = -0.04,
-    vega: float = 0.10,
-) -> dict:
-    """Build a minimal contract dict matching get_ibit_options_chain() shape."""
-    return {
-        "symbol": symbol or f"IBIT260515{option_type[0]}{int(strike * 1000):08d}",
-        "option_type": option_type,
-        "strike": strike,
-        "expiry_year": expiry_year,
-        "expiry_month": expiry_month,
-        "expiry_day": expiry_day,
-        "expiry_date": f"{expiry_year}-{expiry_month:02d}-{expiry_day:02d}",
-        "dte": dte,
-        "bid": bid,
-        "ask": bid + 0.10,
-        "last": bid + 0.05,
-        "delta": delta,
-        "gamma": gamma,
-        "theta": theta,
-        "vega": vega,
-        "iv": iv,
-    }
+from tests.conftest import make_contract as _make_contract  # LO-01
 
 
 def _setup_holding_shares_cycle(db: Database) -> int:

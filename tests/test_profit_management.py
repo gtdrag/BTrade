@@ -43,43 +43,7 @@ def _make_etrade_mock():
 # ---------------------------------------------------------------------------
 
 
-def _make_contract(
-    option_type: str,
-    strike: float,
-    delta: float,
-    bid: float,
-    ask: float = None,
-    dte: int = 35,
-    symbol: str = None,
-    iv: float = 0.35,
-    gamma: float = 0.05,
-    theta: float = -0.04,
-    vega: float = 0.10,
-    expiry_year: int = 2026,
-    expiry_month: int = 5,
-    expiry_day: int = 15,
-) -> dict:
-    """Build a minimal contract dict matching get_ibit_options_chain() shape."""
-    if ask is None:
-        ask = bid + 0.10
-    return {
-        "symbol": symbol or f"IBIT260515{option_type[0]}{int(strike * 1000):08d}",
-        "option_type": option_type,
-        "strike": strike,
-        "expiry_year": expiry_year,
-        "expiry_month": expiry_month,
-        "expiry_day": expiry_day,
-        "expiry_date": f"{expiry_year}-{expiry_month:02d}-{expiry_day:02d}",
-        "dte": dte,
-        "bid": bid,
-        "ask": ask,
-        "last": bid + 0.05,
-        "delta": delta,
-        "gamma": gamma,
-        "theta": theta,
-        "vega": vega,
-        "iv": iv,
-    }
+from tests.conftest import make_contract as _make_contract  # LO-01
 
 
 @pytest.fixture
@@ -1154,6 +1118,44 @@ class TestBTCCallbackRouting:
         assert bot._call_approval.result is None
         assert bot._put_approval.result is None
 
+    def test_btc_approve_from_unauthorized_chat_is_rejected(self):
+        """ME-10: btc_approve from a non-owner chat_id must NOT set the result.
+
+        _handle_callback's authorization check runs before any prefix
+        dispatch. A unauthorized user tapping a still-visible btc_approve
+        button in a forwarded message should see the "Unauthorized" alert
+        and leave `_btc_approval.result` untouched. If the auth check is
+        ever accidentally skipped for btc_* (e.g. a refactor that short-
+        circuits the dispatch table), this test fails.
+        """
+        bot = _make_telegram_bot()
+        bot.chat_id = "12345"  # owner
+        bot._btc_approval.event = asyncio.Event()
+        bot._btc_approval.callback_id = "1"
+
+        update = self._make_update(chat_id="99999", data="btc_approve_1")
+
+        asyncio.get_event_loop().run_until_complete(bot._handle_callback(update, MagicMock()))
+
+        # Result must NOT be set and the unauthorized alert must fire
+        assert bot._btc_approval.result is None
+        assert not bot._btc_approval.event.is_set()
+        update.callback_query.answer.assert_awaited_with("🚫 Unauthorized", show_alert=True)
+
+    def test_btc_reject_from_unauthorized_chat_is_rejected(self):
+        """ME-10: btc_reject from a non-owner chat_id must NOT set the result."""
+        bot = _make_telegram_bot()
+        bot.chat_id = "12345"
+        bot._btc_approval.event = asyncio.Event()
+        bot._btc_approval.callback_id = "1"
+
+        update = self._make_update(chat_id="99999", data="btc_reject_1")
+
+        asyncio.get_event_loop().run_until_complete(bot._handle_callback(update, MagicMock()))
+
+        assert bot._btc_approval.result is None
+        assert not bot._btc_approval.event.is_set()
+
 
 class TestSchedulerBTCWiring:
     """Verify _job_wheel_monitoring dispatches BTC and DTE alerts correctly."""
@@ -1686,6 +1688,35 @@ class TestRollCallbackRouting:
         assert bot._btc_approval.result is None
         assert bot._call_approval.result is None
         assert bot._put_approval.result is None
+
+    def test_roll_approve_from_unauthorized_chat_is_rejected(self):
+        """ME-10: roll_approve from a non-owner chat_id must NOT set the result."""
+        bot = _make_telegram_bot()
+        bot.chat_id = "12345"  # owner
+        bot._roll_approval.event = asyncio.Event()
+        bot._roll_approval.callback_id = "1"
+
+        update = self._make_update(chat_id="99999", data="roll_approve_roll_1")
+
+        asyncio.get_event_loop().run_until_complete(bot._handle_callback(update, MagicMock()))
+
+        assert bot._roll_approval.result is None
+        assert not bot._roll_approval.event.is_set()
+        update.callback_query.answer.assert_awaited_with("🚫 Unauthorized", show_alert=True)
+
+    def test_roll_reject_from_unauthorized_chat_is_rejected(self):
+        """ME-10: roll_reject from a non-owner chat_id must NOT set the result."""
+        bot = _make_telegram_bot()
+        bot.chat_id = "12345"
+        bot._roll_approval.event = asyncio.Event()
+        bot._roll_approval.callback_id = "1"
+
+        update = self._make_update(chat_id="99999", data="roll_reject_roll_1")
+
+        asyncio.get_event_loop().run_until_complete(bot._handle_callback(update, MagicMock()))
+
+        assert bot._roll_approval.result is None
+        assert not bot._roll_approval.event.is_set()
 
 
 class TestSchedulerRollWiring:
