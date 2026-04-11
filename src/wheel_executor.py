@@ -256,19 +256,19 @@ class WheelExecutor:
                 covered_call_premiums_collected=new_total_premiums,
             )
             self.db.open_wheel_position(
-                cycle_id,
-                signal.symbol,
-                "CALL",
-                signal.strike,
-                signal.expiry_date,
-                signal.dte,
-                signal.premium,
-                1,
-                signal.delta,
-                signal.gamma,
-                signal.theta,
-                signal.vega,
-                signal.iv,
+                cycle_id=cycle_id,
+                symbol=signal.symbol,
+                option_type="CALL",
+                strike=signal.strike,
+                expiry_date=signal.expiry_date,
+                dte_at_entry=signal.dte,
+                premium_received=signal.premium,
+                quantity=1,
+                delta=signal.delta,
+                gamma=signal.gamma,
+                theta=signal.theta,
+                vega=signal.vega,
+                iv=signal.iv,
             )
 
             self.db.log_event(

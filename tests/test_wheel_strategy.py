@@ -176,6 +176,35 @@ class TestPutSignal:
         result = strategy.get_put_signal()
         assert result is None, "Expected None when cycle state is HOLDING_SHARES"
 
+    def test_no_signal_when_covered_call(self, strategy, db):
+        """ME-03: get_put_signal() returns None when active cycle is COVERED_CALL.
+
+        Previously COVERED_CALL was not in the blocking list, meaning the
+        system could attempt to sell a second put while already short a
+        covered call. That would violate the wheel strategy's sequential
+        flow (put → shares → call → put) and potentially break the cash
+        accounting.
+        """
+        from src.wheel_state import WheelState
+
+        cycle_id = db.create_wheel_cycle()
+        db.transition_wheel_state(
+            cycle_id,
+            WheelState.SHORT_PUT,
+            reason="sold put",
+            put_strike=50.0,
+            put_premium_received=2.0,
+        )
+        db.transition_wheel_state(
+            cycle_id, WheelState.HOLDING_SHARES, reason="assigned", shares_held=100, cost_basis=48.0
+        )
+        db.transition_wheel_state(
+            cycle_id, WheelState.COVERED_CALL, reason="sold call", cost_basis=47.0
+        )
+
+        result = strategy.get_put_signal()
+        assert result is None, "Expected None when cycle state is COVERED_CALL"
+
     def test_signal_fires_when_cycle_cash(self, strategy, db):
         """get_put_signal() returns PutSignal when active cycle is in CASH state."""
         # Create cycle in CASH state (default)

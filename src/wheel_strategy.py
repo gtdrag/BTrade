@@ -160,7 +160,10 @@ class WheelStrategy:
             PutSignal if all conditions are met, None otherwise.
 
         Gate order (T-03-04: state check first):
-        1. State gate — no signal if cycle is SHORT_PUT or HOLDING_SHARES.
+        1. State gate — no signal if cycle is SHORT_PUT, HOLDING_SHARES, or COVERED_CALL
+           (ME-03 fix: COVERED_CALL was previously missing from the block list,
+           which would have allowed a second put to be sold while a covered call
+           was already in flight).
         2. Price gate — IBIT must be >= 2% below 5-day high.
         3. Strike selection — must find a put in the 0.20-0.30 abs(delta) range.
         4. Cash gate — available cash must be >= selected strike * 100.
@@ -169,7 +172,11 @@ class WheelStrategy:
         cycle = self.db.get_active_cycle()
         if cycle is not None:
             state = cycle["state"]
-            if state in (WheelState.SHORT_PUT.value, WheelState.HOLDING_SHARES.value):
+            if state in (
+                WheelState.SHORT_PUT.value,
+                WheelState.HOLDING_SHARES.value,
+                WheelState.COVERED_CALL.value,
+            ):
                 logger.debug(
                     "WheelStrategy: no signal — active cycle is %s (blocking states)",
                     state,

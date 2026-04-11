@@ -331,20 +331,22 @@ class TestExecuteCallOrder:
             bot._execute_call_order(signal, mock_client, mock_db, "acc-key")
         )
 
+        # HI-02 fix: assert with keyword arguments to match production call style
+        # and to be resilient against additional optional keyword parameters.
         mock_db.open_wheel_position.assert_called_once_with(
-            7,
-            signal.symbol,
-            "CALL",
-            50.0,
-            "2026-05-15",
-            37,
-            1.80,
-            1,
-            signal.delta,
-            signal.gamma,
-            signal.theta,
-            signal.vega,
-            signal.iv,
+            cycle_id=7,
+            symbol=signal.symbol,
+            option_type="CALL",
+            strike=50.0,
+            expiry_date="2026-05-15",
+            dte_at_entry=37,
+            premium_received=1.80,
+            quantity=1,
+            delta=signal.delta,
+            gamma=signal.gamma,
+            theta=signal.theta,
+            vega=signal.vega,
+            iv=signal.iv,
         )
 
     def test_rejects_below_cost_basis(self):

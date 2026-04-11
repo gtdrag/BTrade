@@ -171,6 +171,25 @@ class TestAssignmentDetection:
 
         assert result is None
 
+    def test_skips_on_expiry_date_itself(self, db, mock_client, setup_short_put_cycle):
+        """ME-05: On the expiry date itself, returns None (not settled yet).
+
+        Options don't settle until after market close on the expiry date,
+        so the reconciliation job must NOT treat expiry-day runs as
+        settled. This test pins the `today <= expiry` boundary so a future
+        refactor swapping `<=` to `<` fails loudly.
+        """
+        cycle_id, position_id = setup_short_put_cycle
+        strategy = WheelStrategy(client=mock_client, db=db, account_id_key="test_key")
+
+        mock_now = MagicMock()
+        mock_now.date.return_value = date(2026, 4, 3)  # exactly the expiry date
+
+        with patch("src.wheel_strategy.get_et_now", return_value=mock_now):
+            result = strategy.detect_and_process_expiry()
+
+        assert result is None, "Expected None on expiry date (settlement not yet complete)"
+
     def test_skips_when_no_active_cycle(self, db, mock_client):
         """When get_active_cycle() returns None, returns None."""
         strategy = WheelStrategy(client=mock_client, db=db, account_id_key="test_key")
