@@ -184,6 +184,14 @@ class Database:
                 )
             """
             )
+            # Indexes for log queries — without these, get_events() scans the full
+            # table, which degrades over time as monitoring jobs accumulate rows.
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_logs_timestamp ON logs(timestamp)"
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_logs_level ON logs(level)"
+            )
 
             # Strategy parameters table - stores approved Claude recommendations
             cursor.execute(
@@ -246,6 +254,11 @@ class Database:
                 )
             """
             )
+            # Index for get_active_cycle() which filters on closed_at IS NULL
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_wheel_cycles_closed_at "
+                "ON wheel_cycles(closed_at)"
+            )
 
             cursor.execute(
                 """
@@ -272,6 +285,16 @@ class Database:
                     updated_at TEXT NOT NULL
                 )
             """
+            )
+            # Index for get_cycle_positions() and get_open_position_for_cycle()
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_options_positions_cycle_id "
+                "ON options_positions(cycle_id)"
+            )
+            # Index for queries filtering by status (OPEN vs CLOSED)
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_options_positions_status "
+                "ON options_positions(status)"
             )
 
             # Migration: Add roll_count and dte_alert_sent columns for profit management (Phase 5)
