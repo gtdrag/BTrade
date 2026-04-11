@@ -280,11 +280,45 @@ MARKET_HOLIDAYS = {
 }
 
 
+# The hardcoded holiday set is valid through this year. Queries for dates in
+# later years will log a warning so the stale list is surfaced rather than
+# silently returning False for actual holidays (MD-06 fix).
+MARKET_HOLIDAYS_LAST_YEAR = 2028
+
+
 def is_market_holiday(date: Optional[datetime.date] = None) -> bool:
-    """Check if date is a market holiday."""
+    """Check if date is a market holiday.
+
+    Returns True if the date is in the hardcoded MARKET_HOLIDAYS set.
+    Logs a warning (once per year, not on every call) when queried for a
+    date in a year beyond MARKET_HOLIDAYS_LAST_YEAR — the answer may be
+    incorrect because the hardcoded list has not been refreshed.
+    """
     if date is None:
         date = get_et_now().date()
+
+    if date.year > MARKET_HOLIDAYS_LAST_YEAR:
+        _warn_holiday_list_stale(date.year)
+
     return date in MARKET_HOLIDAYS
+
+
+# Module-level cache so we only warn once per (process, year) combination
+_HOLIDAY_WARN_CACHE: set = set()
+
+
+def _warn_holiday_list_stale(year: int) -> None:
+    """Emit a one-time warning that the hardcoded holiday list is stale."""
+    if year in _HOLIDAY_WARN_CACHE:
+        return
+    _HOLIDAY_WARN_CACHE.add(year)
+    logger.warning(
+        "is_market_holiday queried for year %d but MARKET_HOLIDAYS only has "
+        "entries through %d — the answer may be incorrect. Please refresh "
+        "MARKET_HOLIDAYS in src/utils.py or integrate a market calendar package.",
+        year,
+        MARKET_HOLIDAYS_LAST_YEAR,
+    )
 
 
 def is_trading_day(date: Optional[datetime.date] = None) -> bool:

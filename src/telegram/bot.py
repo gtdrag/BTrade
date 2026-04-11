@@ -371,11 +371,17 @@ class TelegramBot(
     # =========================================================================
 
     async def _cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /start command - shows chat_id for setup (available to anyone)."""
-        chat_id = update.effective_chat.id
+        """Handle /start command.
+
+        Authorized users see their chat_id and command list. Unauthorized
+        users get a generic "not authorized" message — we no longer echo
+        their chat_id or the TELEGRAM_CHAT_ID setup instructions to strangers
+        (LO-02 fix).
+        """
         is_authorized = self._is_authorized(update)
 
         if is_authorized:
+            chat_id = update.effective_chat.id
             await update.message.reply_text(
                 f"🤖 *IBIT Trading Bot*\n\n"
                 f"✅ You are authorized\n"
@@ -386,14 +392,14 @@ class TelegramBot(
                 parse_mode="Markdown",
             )
         else:
-            # Show chat_id for setup purposes, but indicate not authorized
+            # Generic response to strangers — no chat_id echo, no setup hints
             await update.message.reply_text(
-                f"🤖 *IBIT Trading Bot*\n\n"
-                f"🚫 Not authorized for this bot\n\n"
-                f"Your Chat ID: `{chat_id}`\n\n"
-                f"If you are the owner, add this to your environment:\n"
-                f"`TELEGRAM_CHAT_ID={chat_id}`",
+                "🚫 Not authorized.",
                 parse_mode="Markdown",
+            )
+            logger.warning(
+                "Unauthorized /start attempt from chat_id=%s",
+                update.effective_chat.id,
             )
 
     async def _cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):

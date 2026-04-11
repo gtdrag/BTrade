@@ -475,7 +475,9 @@ class SmartScheduler:
         except Exception as e:
             logger.error("Put signal check failed: %s", e, exc_info=True)
             self.db.log_event("ERROR", "put_signal_check_error", {"error": str(e)})
-            self._send_notification(f"⚠️ Put signal check error: {escape_markdown(str(e))}")
+            # LO-03: send a generic message to Telegram; full exception is
+            # in the server log above for post-mortem.
+            self._send_notification("⚠️ Put signal check error. See server logs for details.")
 
     @requires_trading_day
     @requires_wheel_strategy
@@ -510,7 +512,7 @@ class SmartScheduler:
         except Exception as e:
             logger.error("Assignment detection failed: %s", e, exc_info=True)
             self.db.log_event("ERROR", "assignment_detection_error", {"error": str(e)})
-            self._send_notification(f"Assignment detection error: {escape_markdown(str(e))}")
+            self._send_notification("Assignment detection error. See server logs for details.")
 
     def _handle_assignment(self) -> None:
         """Notify on put assignment and optionally request a covered call."""

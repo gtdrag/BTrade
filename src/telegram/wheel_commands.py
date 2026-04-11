@@ -75,6 +75,9 @@ class WheelCommandsMixin:
           /wheelmode on   - Enable wheel mode (disables intraday strategies)
           /wheelmode off  - Disable wheel mode (re-enables intraday strategies)
           /wheelmode      - Show current wheel mode status
+
+        Rate limited to one mode-change per 5 seconds to prevent rapid
+        on/off spam writing to the DB (LO-04).
         """
         if not self._is_authorized(update):
             await self._send_unauthorized_response(update)
@@ -82,6 +85,17 @@ class WheelCommandsMixin:
 
         db = get_database()
         args = context.args
+
+        # Rate limit (LO-04): reject mode changes within 5s of the previous
+        # toggle. Status queries (no args) bypass the rate limit.
+        if args:
+            last_change = getattr(self, "_wheelmode_last_change_at", None)
+            now_ts = get_et_now().timestamp()
+            if last_change is not None and (now_ts - last_change) < 5.0:
+                await update.message.reply_text(
+                    "⏳ Wheel mode was just toggled. Please wait a few seconds.",
+                )
+                return
 
         # Guard: no args — show current status (T-06-05: no IndexError on empty args)
         if not args:
@@ -119,3 +133,6 @@ class WheelCommandsMixin:
                 parse_mode="Markdown",
             )
             logger.info("Wheel mode DISABLED via /wheelmode Telegram command")
+
+        # Update the rate-limit timestamp on successful toggle
+        self._wheelmode_last_change_at = get_et_now().timestamp()
