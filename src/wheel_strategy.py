@@ -40,10 +40,10 @@ from typing import Any, Dict, List, Optional
 
 import yfinance as yf
 
-from src.database import Database
-from src.etrade_client import ETradeAPIError
-from src.utils import get_et_now
-from src.wheel_state import WheelState
+from .database import Database
+from .etrade_client import ETradeAPIError
+from .utils import get_et_now
+from .wheel_state import WheelState
 
 logger = logging.getLogger(__name__)
 
