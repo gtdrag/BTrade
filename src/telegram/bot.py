@@ -7,8 +7,7 @@ This is the entry point for the modular Telegram bot.
 import asyncio
 import logging
 import os
-from datetime import datetime
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
@@ -19,9 +18,7 @@ from telegram.ext import (
 )
 
 from ..async_utils import run_sync_in_executor
-from ..etrade_client import ETradeAPIError, ETradeAuthError, extract_order_id
-from ..utils import get_et_now, normalize_expiry_date, parse_expiry_components
-from ..wheel_state import WheelState
+from ..utils import get_et_now, normalize_expiry_date
 from .analysis_commands import AnalysisCommandsMixin
 from .auth_commands import AuthCommandsMixin
 from .backtest_commands import BacktestCommandsMixin
@@ -128,7 +125,7 @@ class TelegramBot(
         """
         if not data.startswith(prefix):
             return None
-        suffix = data[len(prefix):]
+        suffix = data[len(prefix) :]
         return suffix if suffix else None
 
     def _is_stale_callback(self, data: str, expected_id: Optional[str]) -> bool:
@@ -143,56 +140,6 @@ class TelegramBot(
         # Extract trailing id from the data — last underscore-separated token
         tail = data.rsplit("_", 1)[-1]
         return tail != expected_id
-
-    def _preview_and_place_option(
-        self,
-        client: Any,
-        account_id_key: str,
-        option_type: str,
-        expiry_year: int,
-        expiry_month: int,
-        expiry_day: int,
-        strike: float,
-        action: str,
-        quantity: int,
-        price: float,
-    ) -> Tuple[Dict[str, Any], Optional[str]]:
-        """Run the standard preview + place flow for an options order.
-
-        Returns:
-            Tuple of (place_response, order_id). The order_id may be None if
-            neither response shape contained one (caller should treat as
-            "pending" or "unknown").
-        """
-        preview_response = client.preview_options_order(
-            account_id_key,
-            "IBIT",
-            option_type,
-            expiry_year,
-            expiry_month,
-            expiry_day,
-            strike,
-            action,
-            quantity,
-            price,
-        )
-        preview_ids = preview_response.get("PreviewIds")
-
-        place_response = client.place_options_order(
-            account_id_key,
-            "IBIT",
-            option_type,
-            expiry_year,
-            expiry_month,
-            expiry_day,
-            strike,
-            action,
-            quantity,
-            price,
-            preview_ids=preview_ids,
-        )
-
-        return place_response, extract_order_id(place_response)
 
     def _is_authorized(self, update: Update) -> bool:
         """
@@ -932,60 +879,18 @@ class TelegramBot(
     ) -> bool:
         """Preview, place a put sell-to-open order, then record it in the DB.
 
-        Order is only recorded if placement succeeds (T-03-08: no DB write on failure).
-        Logs only summary data (T-03-09).
-
-        Returns True on success, False on any failure.
+        Thin wrapper over WheelExecutor.execute_put_sell. This method exists
+        only to format and send the Telegram notification based on the
+        executor's structured result.
         """
-        try:
-            # Use bid as limit price (conservative for sell-to-open)
-            limit_price = signal.premium
+        from ..wheel_executor import WheelExecutor
 
-            _place_response, order_id = self._preview_and_place_option(
-                client,
-                account_id_key,
-                "PUT",
-                signal.expiry_year,
-                signal.expiry_month,
-                signal.expiry_day,
-                signal.strike,
-                "SELL_OPEN",
-                1,
-                limit_price,
-            )
+        executor = WheelExecutor(client, db, account_id_key)
+        result = executor.execute_put_sell(signal)
 
-            # Record in DB — only after successful placement (T-03-08).
-            # open_short_put_cycle() groups create + transition + open_position
-            # into a single transaction so a crash mid-flow cannot leave an
-            # orphaned cycle record.
-            cycle_id, _position_id = db.open_short_put_cycle(
-                symbol=signal.symbol,
-                strike=signal.strike,
-                premium_received=signal.premium,
-                expiry_date=signal.expiry_date,
-                dte_at_entry=signal.dte,
-                delta=signal.delta,
-                gamma=signal.gamma,
-                theta=signal.theta,
-                vega=signal.vega,
-                iv=signal.iv,
-                quantity=1,
-            )
-
-            # T-03-10: Audit log
-            db.log_event(
-                "INFO",
-                "put_order_placed",
-                {
-                    "strike": signal.strike,
-                    "delta": signal.delta,
-                    "premium": signal.premium,
-                    "dte": signal.dte,
-                    "cycle_id": cycle_id,
-                    "order_id": str(order_id) if order_id else "unknown",
-                },
-            )
-
+        if result.success:
+            cycle_id = result.data["cycle_id"]
+            order_id = result.data.get("order_id")
             await self._app.bot.send_message(
                 chat_id=self.chat_id,
                 text=(
@@ -998,33 +903,24 @@ class TelegramBot(
                 ),
                 parse_mode="Markdown",
             )
-            logger.info(
-                "Put order placed: strike=%.2f dte=%d cycle_id=%d",
-                signal.strike,
-                signal.dte,
-                cycle_id,
-            )
             return True
 
-        except (ETradeAPIError, ETradeAuthError) as e:
-            logger.error("Failed to execute put order (E*TRADE): %s", e, exc_info=True)
-            try:
-                await self._app.bot.send_message(
-                    chat_id=self.chat_id,
-                    text=f"⚠️ *PUT ORDER FAILED*\n\n{escape_markdown(str(e))}",
-                    parse_mode="Markdown",
-                )
-            except Exception as notify_err:
-                logger.warning("Put order failure notification failed: %s", notify_err)
-            return False
+        # Failure: format notification based on failure_kind
+        try:
+            await self._app.bot.send_message(
+                chat_id=self.chat_id,
+                text=f"⚠️ *PUT ORDER FAILED*\n\n{escape_markdown(result.error or 'Unknown error')}",
+                parse_mode="Markdown",
+            )
+        except Exception as notify_err:
+            logger.warning("Put order failure notification failed: %s", notify_err)
+        return False
 
     async def _handle_put_adjust(self, query: Any, data: str) -> None:
         """Show 3-5 nearby alternative put strikes for user selection."""
         await self._handle_option_adjust(query, data, option_type="PUT")
 
-    async def _handle_option_adjust(
-        self, query: Any, data: str, option_type: str
-    ) -> None:
+    async def _handle_option_adjust(self, query: Any, data: str, option_type: str) -> None:
         """Show 3-5 nearby alternative strikes for put or call adjust flow.
 
         Filters the stored chain to the adjust delta range for the given
@@ -1077,7 +973,7 @@ class TelegramBot(
             raise ValueError(f"Unsupported option_type: {option_type!r}")
 
         # Extract callback_id suffix from the adjust prefix
-        callback_id = data[len(prefix):]
+        callback_id = data[len(prefix) :]
 
         # Filter candidates — cost basis floor applied for calls only
         candidates = [
@@ -1097,9 +993,7 @@ class TelegramBot(
         suggested_strike = signal.strike if signal else None
         if suggested_strike is not None:
             strikes = [float(c.get("strike", 0)) for c in candidates]
-            nearest_idx = min(
-                range(len(strikes)), key=lambda i: abs(strikes[i] - suggested_strike)
-            )
+            nearest_idx = min(range(len(strikes)), key=lambda i: abs(strikes[i] - suggested_strike))
             start = max(0, nearest_idx - 2)
             end = min(len(candidates), nearest_idx + 3)
             alternatives = [
@@ -1295,106 +1189,19 @@ class TelegramBot(
     ) -> bool:
         """Preview, place a covered call sell-to-open order, then record it in the DB.
 
-        STALE SIGNAL GUARD (T-04-08): Re-reads active cycle and verifies signal.strike >= cycle cost_basis
-        before placing order. Rejects if cost basis has changed since signal was generated.
-
-        Order is only recorded if placement succeeds.
-        Logs only summary data (T-04-11).
-
-        Returns True on success, False on any failure.
+        Thin wrapper over WheelExecutor.execute_call_sell. The executor enforces
+        the T-04-08 stale signal guard (cost basis floor) and returns a
+        structured result; this method renders the appropriate Telegram notification.
         """
-        try:
-            # STALE SIGNAL GUARD: re-read fresh cycle from DB before placing order
-            cycle = db.get_active_cycle()
-            if cycle is None:
-                logger.error("_execute_call_order: no active cycle found")
-                await self._app.bot.send_message(
-                    chat_id=self.chat_id,
-                    text="⚠️ *CALL ORDER REJECTED*\n\nNo active wheel cycle found.",
-                    parse_mode="Markdown",
-                )
-                return False
+        from ..wheel_executor import WheelExecutor
 
-            current_cost_basis = cycle.get("cost_basis", 0.0) or 0.0
-            if signal.strike < current_cost_basis:
-                # Stale signal — strike is now below cost basis
-                logger.warning(
-                    "Call strike %.2f is below current cost basis %.2f — rejecting stale signal",
-                    signal.strike,
-                    current_cost_basis,
-                )
-                await self._app.bot.send_message(
-                    chat_id=self.chat_id,
-                    text=(
-                        f"⚠️ *CALL ORDER REJECTED*\n\n"
-                        f"Call strike ${signal.strike:.2f} is below current cost basis "
-                        f"${current_cost_basis:.2f}. Order rejected."
-                    ),
-                    parse_mode="Markdown",
-                )
-                return False
+        executor = WheelExecutor(client, db, account_id_key)
+        result = executor.execute_call_sell(signal)
 
-            # Use bid as limit price (conservative for sell-to-open)
-            limit_price = signal.premium
-
-            _place_response, order_id = self._preview_and_place_option(
-                client,
-                account_id_key,
-                "CALL",
-                signal.expiry_year,
-                signal.expiry_month,
-                signal.expiry_day,
-                signal.strike,
-                "SELL_OPEN",
-                1,
-                limit_price,
-            )
-
-            # Record in DB — only after successful placement
-            cycle_id = cycle["id"]
-            old_cost_basis = current_cost_basis
-            old_premiums = cycle.get("covered_call_premiums_collected") or 0.0
-            new_cost_basis = old_cost_basis - signal.premium
-            new_total_premiums = old_premiums + signal.premium
-
-            db.transition_wheel_state(
-                cycle_id,
-                WheelState.COVERED_CALL,
-                "call_sold",
-                cost_basis=new_cost_basis,
-                covered_call_premiums_collected=new_total_premiums,
-            )
-            db.open_wheel_position(
-                cycle_id,
-                signal.symbol,
-                "CALL",
-                signal.strike,
-                signal.expiry_date,
-                signal.dte,
-                signal.premium,
-                1,
-                signal.delta,
-                signal.gamma,
-                signal.theta,
-                signal.vega,
-                signal.iv,
-            )
-
-            # T-04-11: Audit log
-            db.log_event(
-                "INFO",
-                "call_order_placed",
-                {
-                    "strike": signal.strike,
-                    "delta": signal.delta,
-                    "premium": signal.premium,
-                    "dte": signal.dte,
-                    "cycle_id": cycle_id,
-                    "order_id": str(order_id) if order_id else "unknown",
-                    "new_cost_basis": new_cost_basis,
-                },
-            )
-
+        if result.success:
+            cycle_id = result.data["cycle_id"]
+            order_id = result.data.get("order_id")
+            new_cost_basis = result.data["new_cost_basis"]
             await self._app.bot.send_message(
                 chat_id=self.chat_id,
                 text=(
@@ -1408,26 +1215,28 @@ class TelegramBot(
                 ),
                 parse_mode="Markdown",
             )
-            logger.info(
-                "Call order placed: strike=%.2f dte=%d cycle_id=%d new_cost_basis=%.2f",
-                signal.strike,
-                signal.dte,
-                cycle_id,
-                new_cost_basis,
-            )
             return True
 
-        except (ETradeAPIError, ETradeAuthError) as e:
-            logger.error("Failed to execute call order (E*TRADE): %s", e, exc_info=True)
-            try:
-                await self._app.bot.send_message(
-                    chat_id=self.chat_id,
-                    text=f"⚠️ *CALL ORDER FAILED*\n\n{escape_markdown(str(e))}",
-                    parse_mode="Markdown",
-                )
-            except Exception as notify_err:
-                logger.warning("Call order failure notification failed: %s", notify_err)
+        # Stale-signal / no-cycle rejections get a different heading than
+        # E*TRADE failures (the order was never attempted).
+        if result.failure_kind in ("stale_signal", "no_cycle"):
+            await self._app.bot.send_message(
+                chat_id=self.chat_id,
+                text=f"⚠️ *CALL ORDER REJECTED*\n\n{escape_markdown(result.error or '')}",
+                parse_mode="Markdown",
+            )
             return False
+
+        # E*TRADE API/auth failure
+        try:
+            await self._app.bot.send_message(
+                chat_id=self.chat_id,
+                text=f"⚠️ *CALL ORDER FAILED*\n\n{escape_markdown(result.error or 'Unknown error')}",
+                parse_mode="Markdown",
+            )
+        except Exception as notify_err:
+            logger.warning("Call order failure notification failed: %s", notify_err)
+        return False
 
     async def _handle_call_adjust(self, query: Any, data: str) -> None:
         """Show 3-5 nearby alternative call strikes for user selection.
@@ -1567,59 +1376,18 @@ class TelegramBot(
     ) -> bool:
         """Preview and place a buy-to-close order, then update DB state.
 
-        T-05-06: No DB mutation (close_wheel_position, transition_wheel_state) on API failure.
-        T-05-08: Stale signal guard — re-reads open position before executing.
-        T-05-09: Audit log for every order attempt.
-
-        Returns True on success, False on any failure.
+        Thin wrapper over WheelExecutor.execute_btc. The executor handles
+        T-05-06 (no DB mutation on failure) and T-05-09 (audit log).
         """
-        try:
+        from ..wheel_executor import WheelExecutor
+
+        executor = WheelExecutor(client, db, account_id_key)
+        result = executor.execute_btc(position, cycle, close_price)
+
+        if result.success:
             symbol = position["symbol"]
-            option_type = position.get("option_type", "PUT")
-            quantity = int(position.get("quantity", 1))
-            strike_price = float(position.get("strike", 0))
-
-            # Parse expiry via shared helper (handles both ISO strings and date objects)
-            expiry_year, expiry_month, expiry_day = parse_expiry_components(
-                position.get("expiry_date", "")
-            )
-
-            _place_response, order_id = self._preview_and_place_option(
-                client,
-                account_id_key,
-                option_type,
-                expiry_year,
-                expiry_month,
-                expiry_day,
-                strike_price,
-                "BUY_CLOSE",
-                quantity,
-                close_price,
-            )
-
-            # DB mutations — only after successful order placement (T-05-06)
-            db.close_wheel_position(position["id"], close_price)
-
-            # Determine next cycle state based on current state
-            cycle_state = cycle.get("state", "")
-            if cycle_state == WheelState.SHORT_PUT.value or cycle_state == "SHORT_PUT":
-                next_state = WheelState.CASH
-            else:
-                next_state = WheelState.HOLDING_SHARES
-
-            db.transition_wheel_state(cycle["id"], next_state, "profit_take_btc")
-
-            db.log_event(
-                "INFO",
-                "btc_order_placed",
-                {
-                    "position_id": position["id"],
-                    "close_price": close_price,
-                    "cycle_id": cycle["id"],
-                    "order_id": str(order_id) if order_id else "unknown",
-                },
-            )
-
+            order_id = result.data.get("order_id")
+            next_state_value = result.data["next_state"]
             await self._app.bot.send_message(
                 chat_id=self.chat_id,
                 text=(
@@ -1627,30 +1395,22 @@ class TelegramBot(
                     f"Symbol: {escape_markdown(symbol)}\n"
                     f"Close price: ${close_price:.2f}/share\n"
                     f"Order ID: {escape_markdown(str(order_id) if order_id else 'pending')}\n"
-                    f"Cycle transitioned to: {next_state.value}"
+                    f"Cycle transitioned to: {next_state_value}"
                 ),
                 parse_mode="Markdown",
             )
-            logger.info(
-                "BTC order placed: position_id=%d close_price=%.2f cycle_id=%d",
-                position["id"],
-                close_price,
-                cycle["id"],
-            )
             return True
 
-        except (ETradeAPIError, ETradeAuthError) as e:
-            logger.error("Failed to execute BTC order (E*TRADE): %s", e, exc_info=True)
-            # T-05-06: Do NOT call close_wheel_position or transition_wheel_state on failure
-            try:
-                await self._app.bot.send_message(
-                    chat_id=self.chat_id,
-                    text=f"*BTC ORDER FAILED*\n\n{escape_markdown(str(e))}",
-                    parse_mode="Markdown",
-                )
-            except Exception as notify_err:
-                logger.warning("BTC order failure notification failed: %s", notify_err)
-            return False
+        # E*TRADE failure — notify and return False
+        try:
+            await self._app.bot.send_message(
+                chat_id=self.chat_id,
+                text=f"*BTC ORDER FAILED*\n\n{escape_markdown(result.error or 'Unknown error')}",
+                parse_mode="Markdown",
+            )
+        except Exception as notify_err:
+            logger.warning("BTC order failure notification failed: %s", notify_err)
+        return False
 
     async def send_dte_alert(self, position: dict, cycle: dict, db: Any) -> None:
         """Send an informational DTE warning message (no action buttons).
@@ -1878,111 +1638,60 @@ class TelegramBot(
     ) -> bool:
         """Execute a two-step roll: BTC current position, then STO new position.
 
-        Step 1: Buy-to-close current option. If this fails, no DB changes are made.
-        Step 2: Sell-to-open new option. If this fails after BTC succeeds, old position
-                is closed and cycle transitions to safe state (CASH for put, HOLDING_SHARES
-                for call). Error notification is sent with BTC order ID.
-
-        T-05-08: Stale signal guard — ensures old position is actually OPEN before BTC.
-        T-05-09: Audit log for every step.
-
-        Returns True on full success, False on any failure.
+        Thin wrapper over WheelExecutor.execute_roll. The executor handles all
+        partial-failure recovery and returns a structured result that carries
+        enough information to render the appropriate notification.
         """
-        symbol = position["symbol"]
-        option_type = position.get("option_type", "PUT")
-        quantity = int(position.get("quantity", 1))
-        old_roll_count = position.get("roll_count", 0)
-        strike_price = float(position.get("strike", 0))
-        btc_result = None
+        from ..wheel_executor import WheelExecutor
 
-        # Parse expiry via shared helper (handles both ISO strings and date objects)
-        expiry_year, expiry_month, expiry_day = parse_expiry_components(
-            position.get("expiry_date", "")
-        )
+        executor = WheelExecutor(client, db, account_id_key)
+        result = executor.execute_roll(position, new_contract, cycle, btc_price)
 
-        # Step 1: BTC current position
-        try:
-            btc_result, _btc_order_id_unused = self._preview_and_place_option(
-                client,
-                account_id_key,
-                option_type,
-                expiry_year,
-                expiry_month,
-                expiry_day,
-                strike_price,
-                "BUY_CLOSE",
-                quantity,
-                btc_price,
-            )
-        except Exception as e:
-            # BTC failed — do NOT modify any DB state
-            logger.error("Roll BTC failed for position_id=%d: %s", position["id"], e)
-            db.log_event(
-                "ERROR", "roll_btc_failed", {"position_id": position["id"], "error": str(e)}
-            )
+        if result.success:
+            old_strike = result.data["old_strike"]
+            new_strike = result.data["new_strike"]
+            net_credit = result.data["net_credit"]
+            roll_count = result.data["roll_count"]
             try:
                 await self._app.bot.send_message(
                     chat_id=self.chat_id,
-                    text=f"*ROLL FAILED*\n\nBTC step failed: {escape_markdown(str(e))}\nNo changes made.",
+                    text=(
+                        "*ROLL COMPLETE*\n\n"
+                        f"Closed: ${old_strike:.2f} strike\n"
+                        f"Opened: ${new_strike:.2f} strike\n"
+                        f"Net credit: ${net_credit:.2f}/share\n"
+                        f"Roll count: {roll_count}/2"
+                    ),
+                    parse_mode="Markdown",
+                )
+            except Exception:
+                pass
+            return True
+
+        # BTC step failed — no DB changes were made
+        if result.failure_kind == "roll_btc_failed":
+            try:
+                await self._app.bot.send_message(
+                    chat_id=self.chat_id,
+                    text=(
+                        f"*ROLL FAILED*\n\nBTC step failed: "
+                        f"{escape_markdown(result.error or '')}\nNo changes made."
+                    ),
                     parse_mode="Markdown",
                 )
             except Exception:
                 pass
             return False
 
-        # BTC succeeded — close old position in DB
-        db.close_wheel_position(position["id"], btc_price)
-
-        btc_order_id = extract_order_id(btc_result) if btc_result else None
-
-        # Step 2: STO new position
-        new_symbol = new_contract.get("symbol", symbol)
-        new_bid = float(new_contract.get("bid", 0))
-        new_strike = float(new_contract.get("strike", 0))
-        new_expiry_year = int(new_contract.get("expiry_year", 0))
-        new_expiry_month = int(new_contract.get("expiry_month", 0))
-        new_expiry_day = int(new_contract.get("expiry_day", 0))
-
-        try:
-            sto_result, _sto_order_id_unused = self._preview_and_place_option(
-                client,
-                account_id_key,
-                option_type,
-                new_expiry_year,
-                new_expiry_month,
-                new_expiry_day,
-                new_strike,
-                "SELL_OPEN",
-                quantity,
-                new_bid,
-            )
-        except Exception as e:
-            # STO failed after BTC succeeded — transition cycle to safe state
-            logger.error("Roll STO failed for position_id=%d: %s", position["id"], e)
-            cycle_state = cycle.get("state", "")
-            if cycle_state == WheelState.SHORT_PUT.value or cycle_state == "SHORT_PUT":
-                safe_state = WheelState.CASH
-                safe_reason = "roll_sto_failed_put"
-            else:
-                safe_state = WheelState.HOLDING_SHARES
-                safe_reason = "roll_sto_failed_call"
-
-            db.transition_wheel_state(cycle["id"], safe_state, safe_reason)
-            db.log_event(
-                "ERROR",
-                "roll_sto_failed",
-                {
-                    "position_id": position["id"],
-                    "btc_order_id": str(btc_order_id) if btc_order_id else "unknown",
-                    "error": str(e),
-                },
-            )
+        # STO step failed after BTC succeeded — partial failure
+        if result.failure_kind == "roll_sto_failed":
+            btc_order_id = result.data.get("btc_order_id")
             try:
                 await self._app.bot.send_message(
                     chat_id=self.chat_id,
                     text=(
                         f"*ROLL PARTIAL FAILURE*\n\n"
-                        f"BTC executed but STO failed: {escape_markdown(str(e))}\n"
+                        f"BTC executed but STO failed: {escape_markdown(result.error or '')}\n"
                         f"Position closed. You may need to manually open a new position.\n"
                         f"BTC order: {escape_markdown(str(btc_order_id) if btc_order_id else 'N/A')}"
                     ),
@@ -1992,64 +1701,7 @@ class TelegramBot(
                 pass
             return False
 
-        # Both steps succeeded — open new position in DB
-        new_position_id = db.open_wheel_position(
-            cycle_id=cycle["id"],
-            symbol=new_symbol,
-            option_type=option_type,
-            strike=float(new_contract.get("strike", 0)),
-            expiry_date=str(new_contract.get("expiry_date", "")),
-            dte_at_entry=int(new_contract.get("dte", 0)),
-            premium_received=new_bid,
-            quantity=quantity,
-            delta=new_contract.get("delta"),
-            gamma=new_contract.get("gamma"),
-            theta=new_contract.get("theta"),
-            vega=new_contract.get("vega"),
-            iv=new_contract.get("iv"),
-        )
-
-        # Set roll_count on new position to old_roll_count + 1
-        db.set_roll_count(new_position_id, old_roll_count + 1)
-
-        sto_order_id = extract_order_id(sto_result) if sto_result else None
-
-        db.log_event(
-            "INFO",
-            "roll_executed",
-            {
-                "old_position_id": position["id"],
-                "new_position_id": new_position_id,
-                "new_strike": float(new_contract.get("strike", 0)),
-                "roll_count": old_roll_count + 1,
-                "btc_order_id": str(btc_order_id) if btc_order_id else "unknown",
-                "sto_order_id": str(sto_order_id) if sto_order_id else "unknown",
-            },
-        )
-
-        net_credit = new_bid - btc_price
-        try:
-            await self._app.bot.send_message(
-                chat_id=self.chat_id,
-                text=(
-                    "*ROLL COMPLETE*\n\n"
-                    f"Closed: ${float(position.get('strike', 0)):.2f} strike\n"
-                    f"Opened: ${float(new_contract.get('strike', 0)):.2f} strike\n"
-                    f"Net credit: ${net_credit:.2f}/share\n"
-                    f"Roll count: {old_roll_count + 1}/2"
-                ),
-                parse_mode="Markdown",
-            )
-        except Exception:
-            pass
-
-        logger.info(
-            "Roll executed: position_id=%d -> new_position_id=%d roll_count=%d",
-            position["id"],
-            new_position_id,
-            old_roll_count + 1,
-        )
-        return True
+        return False
 
     async def _handle_param_recommendation(self, query, data: str):
         """Handle parameter recommendation approval/rejection."""
