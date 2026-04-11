@@ -988,50 +988,87 @@ class TelegramBot(
             return False
 
     async def _handle_put_adjust(self, query: Any, data: str) -> None:
-        """Show 3-5 nearby alternative put strikes for user selection.
+        """Show 3-5 nearby alternative put strikes for user selection."""
+        await self._handle_option_adjust(query, data, option_type="PUT")
 
-        Filters the stored chain to puts with abs(delta) in the adjust
-        delta range (wider than entry range), finds strikes around the
-        originally suggested strike, and renders them as inline buttons
-        so the user can pick one or reject all.
+    async def _handle_option_adjust(
+        self, query: Any, data: str, option_type: str
+    ) -> None:
+        """Show 3-5 nearby alternative strikes for put or call adjust flow.
+
+        Filters the stored chain to the adjust delta range for the given
+        option type, sorts by strike, picks 2 below and 2 above the
+        originally suggested strike, and renders the results as inline
+        buttons. Call flows additionally hard-filter strikes below
+        cost_basis (T-04-10).
+
+        Args:
+            query: Telegram callback query.
+            data: Full callback_data string starting with
+                  ``"put_adjust_"`` or ``"call_adjust_"``.
+            option_type: ``"PUT"`` or ``"CALL"``.
         """
         from ..wheel_strategy import WheelStrategy  # local — avoid circular
 
-        chain = self._put_approval_chain or []
-        signal = self._put_approval_signal
+        if option_type == "PUT":
+            chain = self._put_approval_chain or []
+            signal = self._put_approval_signal
+            prefix = "put_adjust_"
+            alt_prefix = "put_alt_"
+            reject_prefix = "put_alt_reject_"
+            delta_min = WheelStrategy.PUT_ADJUST_DELTA_MIN
+            delta_max = WheelStrategy.PUT_ADJUST_DELTA_MAX
+            cost_basis = 0.0
+            section_title = "SELECT ALTERNATIVE STRIKE"
+            section_line = "Choose a put strike or reject all:"
+            empty_range_msg = (
+                f"⚠️ No alternative strikes available in the "
+                f"{delta_min:.2f}–{delta_max:.2f} delta range."
+            )
+            empty_alt_msg = "⚠️ No alternative strikes different from the suggested strike."
+        elif option_type == "CALL":
+            chain = self._call_approval_chain or []
+            signal = self._call_approval_signal
+            prefix = "call_adjust_"
+            alt_prefix = "call_alt_"
+            reject_prefix = "call_alt_reject_"
+            delta_min = WheelStrategy.CALL_ADJUST_DELTA_MIN
+            delta_max = WheelStrategy.CALL_ADJUST_DELTA_MAX
+            cost_basis = signal.cost_basis if signal else 0.0
+            section_title = "SELECT ALTERNATIVE CALL STRIKE"
+            section_line = "Choose a call strike or reject all:"
+            empty_range_msg = (
+                f"⚠️ No profitable call strikes above cost basis ${cost_basis:.2f}. "
+                "Consider waiting for price recovery."
+            )
+            empty_alt_msg = "⚠️ No alternative call strikes different from the suggested strike."
+        else:
+            raise ValueError(f"Unsupported option_type: {option_type!r}")
 
-        # Extract callback_id suffix from the put_adjust_ prefix
-        callback_id = data[len("put_adjust_") :]  # e.g. "put_HHMMSS"
+        # Extract callback_id suffix from the adjust prefix
+        callback_id = data[len(prefix):]
 
-        delta_min = WheelStrategy.PUT_ADJUST_DELTA_MIN
-        delta_max = WheelStrategy.PUT_ADJUST_DELTA_MAX
-
-        # Filter to wider delta range for alternatives
+        # Filter candidates — cost basis floor applied for calls only
         candidates = [
             c
             for c in chain
-            if c.get("option_type") == "PUT"
+            if c.get("option_type") == option_type
             and delta_min <= abs(float(c.get("delta", 0))) <= delta_max
+            and (option_type != "CALL" or float(c.get("strike", 0)) >= cost_basis)
         ]
-        # Sort by strike ascending
         candidates.sort(key=lambda c: float(c.get("strike", 0)))
 
         if not candidates:
-            await query.edit_message_text(
-                text=(
-                    f"⚠️ No alternative strikes available in the "
-                    f"{delta_min:.2f}–{delta_max:.2f} delta range."
-                ),
-                parse_mode="Markdown",
-            )
+            await query.edit_message_text(text=empty_range_msg, parse_mode="Markdown")
             return
 
-        # Find the suggested strike's index and take 2 below and 2 above
+        # Pick 2 below and 2 above the suggested strike
         suggested_strike = signal.strike if signal else None
         if suggested_strike is not None:
-            # Find nearest index
             strikes = [float(c.get("strike", 0)) for c in candidates]
-            nearest_idx = min(range(len(strikes)), key=lambda i: abs(strikes[i] - suggested_strike))
+            nearest_idx = min(
+                range(len(strikes)), key=lambda i: abs(strikes[i] - suggested_strike)
+            )
             start = max(0, nearest_idx - 2)
             end = min(len(candidates), nearest_idx + 3)
             alternatives = [
@@ -1043,10 +1080,7 @@ class TelegramBot(
             alternatives = candidates[:5]
 
         if not alternatives:
-            await query.edit_message_text(
-                text="⚠️ No alternative strikes different from the suggested strike.",
-                parse_mode="Markdown",
-            )
+            await query.edit_message_text(text=empty_alt_msg, parse_mode="Markdown")
             return
 
         # Build buttons: one per alternative strike
@@ -1058,17 +1092,21 @@ class TelegramBot(
             alt_dte = int(c.get("dte", 0))
             label = f"${alt_strike:.2f} | δ={alt_delta:.2f} | ${alt_bid:.2f}bid | {alt_dte}DTE"
             keyboard.append(
-                [InlineKeyboardButton(label, callback_data=f"put_alt_{alt_strike}_{callback_id}")]
+                [
+                    InlineKeyboardButton(
+                        label, callback_data=f"{alt_prefix}{alt_strike}_{callback_id}"
+                    )
+                ]
             )
 
         # Reject all button
         keyboard.append(
-            [InlineKeyboardButton("❌ Reject All", callback_data=f"put_alt_reject_{callback_id}")]
+            [InlineKeyboardButton("❌ Reject All", callback_data=f"{reject_prefix}{callback_id}")]
         )
 
         reply_markup = InlineKeyboardMarkup(keyboard)
         await query.edit_message_text(
-            text="🔄 *SELECT ALTERNATIVE STRIKE*\n\nChoose a put strike or reject all:",
+            text=f"🔄 *{section_title}*\n\n{section_line}",
             parse_mode="Markdown",
             reply_markup=reply_markup,
         )
@@ -1382,92 +1420,10 @@ class TelegramBot(
     async def _handle_call_adjust(self, query: Any, data: str) -> None:
         """Show 3-5 nearby alternative call strikes for user selection.
 
-        Filters the stored chain to calls in the call-adjust delta range,
-        then applies a HARD COST BASIS FILTER (T-04-10): only shows strikes
-        >= cost_basis. If no qualifying strikes exist, shows a warning
-        instead of presenting options.
+        Delegates to _handle_option_adjust which applies the HARD COST BASIS
+        FILTER (T-04-10) for calls.
         """
-        from ..wheel_strategy import WheelStrategy  # local — avoid circular
-
-        chain = self._call_approval_chain or []
-        signal = self._call_approval_signal
-
-        # Extract callback_id suffix from the call_adjust_ prefix
-        callback_id = data[len("call_adjust_") :]  # e.g. "call_HHMMSS"
-
-        # Cost basis from signal (protected by T-04-10)
-        cost_basis = signal.cost_basis if signal else 0.0
-
-        delta_min = WheelStrategy.CALL_ADJUST_DELTA_MIN
-        delta_max = WheelStrategy.CALL_ADJUST_DELTA_MAX
-
-        # Filter to CALL contracts with wider delta range for alternatives
-        # HARD FILTER: only strikes >= cost_basis (T-04-10)
-        candidates = [
-            c
-            for c in chain
-            if c.get("option_type") == "CALL"
-            and delta_min <= abs(float(c.get("delta", 0))) <= delta_max
-            and float(c.get("strike", 0)) >= cost_basis
-        ]
-        # Sort by strike ascending
-        candidates.sort(key=lambda c: float(c.get("strike", 0)))
-
-        if not candidates:
-            await query.edit_message_text(
-                text=(
-                    f"⚠️ No profitable call strikes above cost basis ${cost_basis:.2f}. "
-                    "Consider waiting for price recovery."
-                ),
-                parse_mode="Markdown",
-            )
-            return
-
-        # Find the suggested strike's index and take 2 below and 2 above
-        suggested_strike = signal.strike if signal else None
-        if suggested_strike is not None:
-            strikes = [float(c.get("strike", 0)) for c in candidates]
-            nearest_idx = min(range(len(strikes)), key=lambda i: abs(strikes[i] - suggested_strike))
-            start = max(0, nearest_idx - 2)
-            end = min(len(candidates), nearest_idx + 3)
-            alternatives = [
-                c
-                for c in candidates[start:end]
-                if abs(float(c.get("strike", 0)) - suggested_strike) > 0.01
-            ]
-        else:
-            alternatives = candidates[:5]
-
-        if not alternatives:
-            await query.edit_message_text(
-                text="⚠️ No alternative call strikes different from the suggested strike.",
-                parse_mode="Markdown",
-            )
-            return
-
-        # Build buttons: one per alternative strike
-        keyboard = []
-        for c in alternatives:
-            alt_strike = float(c.get("strike", 0))
-            alt_delta = abs(float(c.get("delta", 0)))
-            alt_bid = float(c.get("bid", 0))
-            alt_dte = int(c.get("dte", 0))
-            label = f"${alt_strike:.2f} | δ={alt_delta:.2f} | ${alt_bid:.2f}bid | {alt_dte}DTE"
-            keyboard.append(
-                [InlineKeyboardButton(label, callback_data=f"call_alt_{alt_strike}_{callback_id}")]
-            )
-
-        # Reject all button
-        keyboard.append(
-            [InlineKeyboardButton("❌ Reject All", callback_data=f"call_alt_reject_{callback_id}")]
-        )
-
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text(
-            text="🔄 *SELECT ALTERNATIVE CALL STRIKE*\n\nChoose a call strike or reject all:",
-            parse_mode="Markdown",
-            reply_markup=reply_markup,
-        )
+        await self._handle_option_adjust(query, data, option_type="CALL")
 
     # =========================================================================
     # Profit-Take (BTC) Approval Flow
