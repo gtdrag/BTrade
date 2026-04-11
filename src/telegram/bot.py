@@ -19,6 +19,7 @@ from telegram.ext import (
 )
 
 from ..async_utils import run_sync_in_executor
+from ..etrade_client import extract_order_id
 from ..utils import get_et_now, normalize_expiry_date, parse_expiry_components
 from ..wheel_state import WheelState
 from .analysis_commands import AnalysisCommandsMixin
@@ -920,9 +921,7 @@ class TelegramBot(
                 preview_ids=preview_ids,
             )
 
-            order_id = place_response.get("orderId") or place_response.get("OrderIds", [{}])[0].get(
-                "orderId"
-            )
+            order_id = extract_order_id(place_response)
 
             # Record in DB — only after successful placement (T-03-08).
             # open_short_put_cycle() groups create + transition + open_position
@@ -1289,9 +1288,7 @@ class TelegramBot(
                 preview_ids=preview_ids,
             )
 
-            order_id = place_response.get("orderId") or place_response.get("OrderIds", [{}])[0].get(
-                "orderId"
-            )
+            order_id = extract_order_id(place_response)
 
             # Record in DB — only after successful placement
             cycle_id = cycle["id"]
@@ -1633,9 +1630,7 @@ class TelegramBot(
                 preview_ids=preview_ids,
             )
 
-            order_id = place_response.get("orderId") or place_response.get("OrderIds", [{}])[0].get(
-                "orderId"
-            )
+            order_id = extract_order_id(place_response)
 
             # DB mutations — only after successful order placement (T-05-06)
             db.close_wheel_position(position["id"], close_price)
@@ -1988,11 +1983,7 @@ class TelegramBot(
         # BTC succeeded — close old position in DB
         db.close_wheel_position(position["id"], btc_price)
 
-        btc_order_id = (
-            btc_result.get("orderId") or btc_result.get("OrderIds", [{}])[0].get("orderId")
-            if btc_result
-            else None
-        )
+        btc_order_id = extract_order_id(btc_result) if btc_result else None
 
         # Step 2: STO new position
         new_symbol = new_contract.get("symbol", symbol)
@@ -2086,11 +2077,7 @@ class TelegramBot(
         # Set roll_count on new position to old_roll_count + 1
         db.set_roll_count(new_position_id, old_roll_count + 1)
 
-        sto_order_id = (
-            sto_result.get("orderId") or sto_result.get("OrderIds", [{}])[0].get("orderId")
-            if sto_result
-            else None
-        )
+        sto_order_id = extract_order_id(sto_result) if sto_result else None
 
         db.log_event(
             "INFO",

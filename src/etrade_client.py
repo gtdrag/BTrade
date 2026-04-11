@@ -46,6 +46,31 @@ class ETradeAPIError(Exception):
     pass
 
 
+def extract_order_id(response: Dict[str, Any]) -> Optional[str]:
+    """Extract the order ID from a place_options_order or place_order response.
+
+    E*TRADE returns the order ID under one of two keys depending on the
+    endpoint/version: ``"orderId"`` (flat) or ``"OrderIds": [{"orderId": ...}]``
+    (nested). This helper tries both.
+
+    Returns:
+        The order ID as a string, or None if neither shape contained one.
+    """
+    if not isinstance(response, dict):
+        return None
+    order_id = response.get("orderId")
+    if order_id is not None:
+        return str(order_id)
+    nested = response.get("OrderIds", [])
+    if isinstance(nested, list) and nested:
+        first = nested[0]
+        if isinstance(first, dict):
+            nested_id = first.get("orderId")
+            if nested_id is not None:
+                return str(nested_id)
+    return None
+
+
 class ETradeClient:
     """
     E*TRADE API client with OAuth 1.0a authentication.
