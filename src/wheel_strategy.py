@@ -49,43 +49,12 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
-class CallSignal:
-    """Signal to sell a covered call on IBIT shares already held.
+class OptionSignal:
+    """Shared fields for put and call signals on IBIT options.
 
-    All price/premium values are per-share (multiply by 100 for total contract value).
-    total_premium = premium * 100 (one contract = 100 shares).
-    cost_basis is the adjusted cost basis per share at the time of signal generation --
-    used for display and re-validation before execution.
-
-    Threat mitigations:
-      T-04-01: strike is always >= cost_basis (hard filter in select_call_strike).
-      T-04-06: Only summary data (strike, delta, cost_basis) is logged -- never raw chain.
-    """
-
-    strike: float
-    expiry_date: str
-    expiry_year: int
-    expiry_month: int
-    expiry_day: int
-    delta: float
-    premium: float        # bid price per share
-    dte: int
-    total_premium: float  # premium * 100 (one contract)
-    symbol: str
-    iv: float
-    gamma: float
-    theta: float
-    vega: float
-    cost_basis: float     # adjusted cost basis -- for display and re-validation
-
-
-@dataclass
-class PutSignal:
-    """Signal to sell a cash-secured put on IBIT.
-
-    All price/premium values are per-share (multiply by 100 for total contract value).
-    max_risk = strike * 100 (maximum cash required to secure 1 contract).
-    pullback_pct < 0 indicates IBIT is below its 5-day high (negative = drop).
+    All price/premium values are per-share; multiply by 100 for total contract
+    value. Both PutSignal and CallSignal inherit from this base — use the
+    subclasses directly, never OptionSignal on its own.
     """
 
     strike: float
@@ -96,12 +65,41 @@ class PutSignal:
     delta: float
     premium: float   # bid price per share
     dte: int
-    max_risk: float  # strike * 100
     symbol: str
     iv: float
     gamma: float
     theta: float
     vega: float
+
+
+@dataclass
+class CallSignal(OptionSignal):
+    """Signal to sell a covered call on IBIT shares already held.
+
+    Extends OptionSignal with call-specific fields:
+      total_premium = premium * 100 (one contract = 100 shares).
+      cost_basis is the adjusted cost basis per share at the time of signal
+      generation — used for display and re-validation before execution.
+
+    Threat mitigations:
+      T-04-01: strike is always >= cost_basis (hard filter in select_call_strike).
+      T-04-06: Only summary data (strike, delta, cost_basis) is logged — never raw chain.
+    """
+
+    total_premium: float  # premium * 100 (one contract)
+    cost_basis: float     # adjusted cost basis — for display and re-validation
+
+
+@dataclass
+class PutSignal(OptionSignal):
+    """Signal to sell a cash-secured put on IBIT.
+
+    Extends OptionSignal with put-specific fields:
+      max_risk = strike * 100 (maximum cash required to secure 1 contract).
+      pullback_pct < 0 indicates IBIT is below its 5-day high.
+    """
+
+    max_risk: float      # strike * 100
     pullback_pct: float  # e.g. -3.2 means IBIT is 3.2% below 5-day high
 
 
