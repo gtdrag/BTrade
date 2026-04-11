@@ -1519,8 +1519,40 @@ _db_instance: Optional[Database] = None
 
 
 def get_database(db_path: Optional[Path] = None) -> Database:
-    """Get or create database singleton."""
+    """Get or create the database singleton.
+
+    Args:
+        db_path: Path to the database file. Honored only on the FIRST call.
+                 Subsequent calls ignore this argument and return the existing
+                 instance. If you need a different database (e.g. for tests),
+                 call reset_database() first.
+
+    Raises:
+        RuntimeError: If db_path is provided but differs from the path used
+                      to construct the existing singleton. This catches silent
+                      bugs where a caller expects a different database.
+    """
     global _db_instance
     if _db_instance is None:
         _db_instance = Database(db_path)
+        return _db_instance
+
+    # Singleton already exists — warn if caller passed a different path
+    if db_path is not None and Path(db_path) != Path(_db_instance.db_path):
+        raise RuntimeError(
+            f"get_database() called with db_path={db_path!r}, but the "
+            f"singleton was already initialized with db_path={_db_instance.db_path!r}. "
+            "Call reset_database() first to override."
+        )
     return _db_instance
+
+
+def reset_database() -> None:
+    """Reset the database singleton. Intended for test isolation only.
+
+    After calling this, the next get_database() call will construct a fresh
+    instance — including a new SQLite connection pool. Production code should
+    never call this.
+    """
+    global _db_instance
+    _db_instance = None
