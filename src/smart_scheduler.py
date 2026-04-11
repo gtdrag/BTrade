@@ -4,10 +4,11 @@ Smart Scheduler - Automated execution of trading strategy.
 Runs the smart strategy at market open and close.
 """
 
+import functools
 import logging
 from datetime import datetime
 from enum import Enum
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_EXECUTED, JobExecutionEvent
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -21,6 +22,63 @@ from .utils import ET, get_et_now, is_trading_day, run_async
 from .wheel_strategy import WheelStrategy
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Job guard decorators
+# ---------------------------------------------------------------------------
+# The scheduler has ~15 job methods that share the same preamble guards:
+#   1. Bail out on non-trading days (weekends / market holidays)
+#   2. Bail out if WheelStrategy is not initialized (wheel-specific jobs)
+#   3. Bail out if wheel_mode is enabled (intraday jobs that should sleep
+#      while the wheel strategy is active)
+# These decorators consolidate those guards. They preserve the wrapped
+# function's name via functools.wraps so APScheduler still sees the original
+# _job_X names in its logs.
+#
+# Note: `is_trading_day` and `get_et_now` are referenced through the module
+# namespace, not captured at decoration time, so tests that monkey-patch
+# `src.smart_scheduler.is_trading_day` still work.
+
+
+def requires_trading_day(func: Callable) -> Callable:
+    """Skip the job if today is not a trading day (weekend or market holiday)."""
+
+    @functools.wraps(func)
+    def wrapper(self, *args, **kwargs):
+        if not is_trading_day(get_et_now().date()):
+            logger.debug("Not a trading day, skipping %s", func.__name__)
+            return None
+        return func(self, *args, **kwargs)
+
+    return wrapper
+
+
+def requires_wheel_strategy(func: Callable) -> Callable:
+    """Skip the job if WheelStrategy is not initialized on the scheduler."""
+
+    @functools.wraps(func)
+    def wrapper(self, *args, **kwargs):
+        if not self.wheel_strategy:
+            logger.warning("WheelStrategy not initialized, skipping %s", func.__name__)
+            return None
+        return func(self, *args, **kwargs)
+
+    return wrapper
+
+
+def skip_if_wheel_mode(func: Callable) -> Callable:
+    """Skip the intraday job when wheel_mode_enabled=1 (TR-01)."""
+
+    @functools.wraps(func)
+    def wrapper(self, *args, **kwargs):
+        wheel_mode = self.db.get_bot_state().get("wheel_mode_enabled", 1)
+        if wheel_mode:
+            logger.info("Wheel mode enabled - skipping %s", func.__name__)
+            return None
+        return func(self, *args, **kwargs)
+
+    return wrapper
 
 
 class BotStatus(Enum):
@@ -349,6 +407,8 @@ class SmartScheduler:
 
         logger.info("Scheduler jobs configured")
 
+    @requires_trading_day
+    @requires_wheel_strategy
     def _job_put_signal_check(self) -> None:
         """Check for put entry signal and send Telegram approval if signal fires.
 
@@ -356,15 +416,6 @@ class SmartScheduler:
         and, if a signal fires, bridges to the async Telegram approval flow via
         run_async() (CLAUDE.md async/sync bridge pattern).
         """
-        now = get_et_now()
-        if not is_trading_day(now.date()):
-            logger.info("Not a trading day, skipping put signal check")
-            return
-
-        if not self.wheel_strategy:
-            logger.warning("WheelStrategy not initialized, skipping put signal check")
-            return
-
         try:
             signal = self.wheel_strategy.get_put_signal()
             if signal is None:
@@ -419,6 +470,8 @@ class SmartScheduler:
             self.db.log_event("ERROR", "put_signal_check_error", {"error": str(e)})
             self._send_notification(f"⚠️ Put signal check error: {escape_markdown(str(e))}")
 
+    @requires_trading_day
+    @requires_wheel_strategy
     def _job_assignment_detection(self) -> None:
         """Check for put assignment or OTM expiry after the expiry date passes.
 
@@ -430,14 +483,6 @@ class SmartScheduler:
         On OTM expiry: sends Telegram notification with realized P&L.
         No active cycle / not expired yet / API error: silently logs and returns.
         """
-        now = get_et_now()
-        if not is_trading_day(now.date()):
-            logger.info("Not a trading day, skipping assignment detection")
-            return
-
-        if not self.wheel_strategy:
-            logger.warning("WheelStrategy not initialized, skipping assignment detection")
-            return
 
         try:
             result = self.wheel_strategy.detect_and_process_expiry()
@@ -616,6 +661,8 @@ class SmartScheduler:
             self.db.log_event("ERROR", "assignment_detection_error", {"error": str(e)})
             self._send_notification(f"Assignment detection error: {escape_markdown(str(e))}")
 
+    @requires_trading_day
+    @requires_wheel_strategy
     def _job_wheel_monitoring(self) -> None:
         """Monitor open options positions for profit target, tested, and DTE warning.
 
@@ -624,21 +671,12 @@ class SmartScheduler:
         Plan 02 will wire the Telegram notification flows based on these flags.
 
         Guards (in order):
-        - Non-trading day: skip
-        - No WheelStrategy (client not configured): skip
+        - Non-trading day: skip (decorator)
+        - No WheelStrategy (client not configured): skip (decorator)
         - _monitoring_approval_pending: skip (approval already in flight)
         - No active cycle: skip
         - Cycle state not SHORT_PUT or COVERED_CALL: skip (no open option to monitor)
         """
-        now = get_et_now()
-        if not is_trading_day(now.date()):
-            logger.info("Not a trading day, skipping wheel monitoring")
-            return
-
-        if not self.wheel_strategy:
-            logger.warning("WheelStrategy not initialized, skipping wheel monitoring")
-            return
-
         if self._monitoring_approval_pending:
             logger.info("Monitoring approval pending, skipping wheel monitoring")
             return
@@ -767,12 +805,10 @@ class SmartScheduler:
             self.db.log_event("ERROR", "wheel_monitoring_error", {"error": str(e)})
             self._send_notification(f"Wheel monitoring error: {str(e)[:200]}")
 
+    @requires_trading_day
     def _job_auth_reminder(self) -> None:
         """Send daily authentication reminder at 8:00 AM ET."""
         now = get_et_now()
-
-        if not is_trading_day(now.date()):
-            return
 
         # Check if E*TRADE is authenticated
         is_authenticated = False
@@ -815,20 +851,11 @@ class SmartScheduler:
         )
         logger.info(f"Auth reminder sent: {auth_status}")
 
+    @requires_trading_day
+    @skip_if_wheel_mode
     def _job_morning_signal(self) -> None:
         """Execute morning trading signal."""
         now = get_et_now()
-
-        if not is_trading_day(now.date()):
-            logger.info("Not a trading day, skipping")
-            return
-
-        # TR-01: skip intraday when wheel mode is active
-        wheel_mode = self.db.get_bot_state().get("wheel_mode_enabled", 1)
-        if wheel_mode:
-            logger.info("Wheel mode enabled - skipping _job_morning_signal")
-            return
-
         logger.info("Executing morning signal check")
 
         try:
@@ -940,7 +967,6 @@ class SmartScheduler:
         close_symbol: str,
         keep_symbol: str,
         mark_traded: Any,
-        job_name: str,
     ) -> None:
         """Shared crash/pump day check.
 
@@ -950,17 +976,11 @@ class SmartScheduler:
         - status_attr / status_pct_attr: where to read the trigger percent
         - close_symbol / keep_symbol: ETF to close vs ETF to flip into
         - mark_traded: strategy method to call on success
+
+        Trading-day and wheel-mode guards are handled by the wrapper decorators
+        on _job_crash_day_check / _job_pump_day_check.
         """
         now = get_et_now()
-
-        if not is_trading_day(now.date()):
-            return
-
-        # TR-01: skip intraday when wheel mode is active
-        wheel_mode = self.db.get_bot_state().get("wheel_mode_enabled", 1)
-        if wheel_mode:
-            logger.info(f"Wheel mode enabled - skipping {job_name}")
-            return
 
         try:
             signal = self.bot.strategy.get_today_signal(**signal_kwargs)
@@ -1024,6 +1044,8 @@ class SmartScheduler:
             self._error_count += 1
             self._send_error_notification(f"{label} failed: {e}")
 
+    @requires_trading_day
+    @skip_if_wheel_mode
     def _job_crash_day_check(self) -> None:
         """Check for intraday crash signal and execute if triggered."""
         self._job_momentum_signal_check(
@@ -1037,9 +1059,10 @@ class SmartScheduler:
             close_symbol="BITU",
             keep_symbol="SBIT",
             mark_traded=self.bot.strategy.mark_crash_day_traded,
-            job_name="_job_crash_day_check",
         )
 
+    @requires_trading_day
+    @skip_if_wheel_mode
     def _job_pump_day_check(self) -> None:
         """Check for intraday pump signal and execute if triggered."""
         self._job_momentum_signal_check(
@@ -1053,21 +1076,13 @@ class SmartScheduler:
             close_symbol="SBIT",
             keep_symbol="BITU",
             mark_traded=self.bot.strategy.mark_pump_day_traded,
-            job_name="_job_pump_day_check",
         )
 
+    @requires_trading_day
+    @skip_if_wheel_mode
     def _job_ten_am_dump_exit(self) -> None:
         """Exit 10 AM dump position at 10:30 AM ET."""
         now = get_et_now()
-
-        if not is_trading_day(now.date()):
-            return
-
-        # TR-01: skip intraday when wheel mode is active
-        wheel_mode = self.db.get_bot_state().get("wheel_mode_enabled", 1)
-        if wheel_mode:
-            logger.info("Wheel mode enabled - skipping _job_ten_am_dump_exit")
-            return
 
         # Check if we have a 10 AM dump position open
         if not self.bot.strategy._ten_am_dump_position_open:
@@ -1178,13 +1193,9 @@ class SmartScheduler:
 
         return (False, None)
 
+    @requires_trading_day
     def _job_close_positions(self) -> None:
         """Close any open positions before market close with retry logic."""
-        now = get_et_now()
-
-        if not is_trading_day(now.date()):
-            return
-
         logger.info("Closing positions before market close")
 
         # First, log what positions E*TRADE sees
@@ -1259,12 +1270,10 @@ class SmartScheduler:
         except Exception as e:
             logger.error(f"Failed to send close notification: {e}")
 
+    @requires_trading_day
     def _job_hedge_check(self) -> None:
         """Check and execute trailing hedges if position has gained enough."""
         now = get_et_now()
-
-        if not is_trading_day(now.date()):
-            return
 
         # Only run during market hours (9:40 AM - 3:50 PM ET)
         if now.hour < 9 or (now.hour == 9 and now.minute < 40):
@@ -1326,12 +1335,10 @@ class SmartScheduler:
         except Exception as e:
             logger.warning(f"Failed to send hedge notification: {e}")
 
+    @requires_trading_day
     def _job_reversal_check(self) -> None:
         """Check and execute position reversal if BITU is down enough."""
         now = get_et_now()
-
-        if not is_trading_day(now.date()):
-            return
 
         # Only run during market hours (9:40 AM - 3:50 PM ET)
         if now.hour < 9 or (now.hour == 9 and now.minute < 40):
@@ -1401,19 +1408,11 @@ class SmartScheduler:
             except Exception as e:
                 logger.error(f"Token renewal failed: {e}")
 
+    @requires_trading_day
+    @skip_if_wheel_mode
     def _job_daily_summary(self) -> None:
         """Send daily summary via Telegram at 4:00 PM ET."""
         now = get_et_now()
-
-        if not is_trading_day(now.date()):
-            return
-
-        # TR-01: skip intraday summary when wheel mode is active
-        wheel_mode = self.db.get_bot_state().get("wheel_mode_enabled", 1)
-        if wheel_mode:
-            logger.info("Wheel mode enabled - skipping _job_daily_summary")
-            return
-
         logger.info("Sending daily summary")
 
         try:
@@ -1462,11 +1461,10 @@ class SmartScheduler:
             logger.error(f"Daily summary failed: {e}")
             self._error_count += 1
 
+    @requires_trading_day
     def _job_wheel_daily_summary(self) -> None:
         """Send wheel position summary at 4:30 PM ET (TR-05)."""
         now = get_et_now()
-        if not is_trading_day(now.date()):
-            return
 
         try:
             cycle = self.db.get_active_cycle()
@@ -1553,12 +1551,10 @@ class SmartScheduler:
         )
         logger.info("Pre-market reminder sent")
 
+    @requires_trading_day
     def _job_position_update(self) -> None:
         """Send hourly position update if holding a position."""
         now = get_et_now()
-
-        if not is_trading_day(now.date()):
-            return
 
         # Check if we have any positions
         portfolio = self.bot.get_portfolio_value()
@@ -1605,13 +1601,9 @@ class SmartScheduler:
         )
         logger.info("Position update sent")
 
+    @requires_trading_day
     def _job_health_check(self) -> None:
         """Morning health check - verify account, data feeds, etc."""
-        now = get_et_now()
-
-        if not is_trading_day(now.date()):
-            return
-
         issues = []
         status_lines = []
 
