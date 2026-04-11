@@ -104,6 +104,36 @@ def is_friday(date: Optional[datetime.date] = None) -> bool:
     return date.weekday() == 4
 
 
+def normalize_expiry_date(expiry) -> str:
+    """Convert an expiry value (date, datetime, or string) to ISO string.
+
+    Useful when options chain contracts may return either a ``date`` object
+    (mock client) or a string (real E*TRADE API). Returns a canonical
+    ``YYYY-MM-DD`` string in both cases.
+    """
+    if hasattr(expiry, "isoformat"):
+        return expiry.isoformat()
+    return str(expiry)
+
+
+def parse_expiry_components(expiry_str) -> Tuple[int, int, int]:
+    """Parse an expiry value to ``(year, month, day)``.
+
+    Accepts either an ISO-format string or a ``date``-like object with
+    ``.year``/``.month``/``.day`` attributes.
+
+    Raises:
+        ValueError: If the input can't be parsed.
+    """
+    if isinstance(expiry_str, str) and expiry_str:
+        d = datetime.date.fromisoformat(expiry_str)
+    elif hasattr(expiry_str, "year") and hasattr(expiry_str, "month"):
+        d = expiry_str
+    else:
+        raise ValueError(f"Cannot parse expiry_date: {expiry_str!r}")
+    return d.year, d.month, d.day
+
+
 def calculate_dip_percentage(open_price: float, current_price: float) -> float:
     """
     Calculate dip percentage from open.

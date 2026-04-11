@@ -19,7 +19,7 @@ from telegram.ext import (
 )
 
 from ..async_utils import run_sync_in_executor
-from ..utils import get_et_now
+from ..utils import get_et_now, normalize_expiry_date, parse_expiry_components
 from ..wheel_state import WheelState
 from .analysis_commands import AnalysisCommandsMixin
 from .auth_commands import AuthCommandsMixin
@@ -836,11 +836,9 @@ class TelegramBot(
                             PutSignal as PS,  # local import — avoid circular
                         )
 
-                        expiry_date = matching.get("expiry_date", signal.expiry_date)
-                        if hasattr(expiry_date, "isoformat"):
-                            expiry_date = expiry_date.isoformat()
-                        else:
-                            expiry_date = str(expiry_date)
+                        expiry_date = normalize_expiry_date(
+                            matching.get("expiry_date", signal.expiry_date)
+                        )
                         alt_signal = PS(
                             strike=float(matching["strike"]),
                             expiry_date=expiry_date,
@@ -1174,11 +1172,9 @@ class TelegramBot(
                             CallSignal as CS,  # local import — avoid circular
                         )
 
-                        expiry_date = matching.get("expiry_date", signal.expiry_date)
-                        if hasattr(expiry_date, "isoformat"):
-                            expiry_date = expiry_date.isoformat()
-                        else:
-                            expiry_date = str(expiry_date)
+                        expiry_date = normalize_expiry_date(
+                            matching.get("expiry_date", signal.expiry_date)
+                        )
                         alt_signal = CS(
                             strike=float(matching["strike"]),
                             expiry_date=expiry_date,
@@ -1602,19 +1598,10 @@ class TelegramBot(
             quantity = int(position.get("quantity", 1))
             strike_price = float(position.get("strike", 0))
 
-            # Parse expiry from position's expiry_date (ISO format: YYYY-MM-DD)
-            from datetime import date as _date
-
-            expiry_str = position.get("expiry_date", "")
-            if isinstance(expiry_str, str) and expiry_str:
-                expiry_date = _date.fromisoformat(expiry_str)
-            elif hasattr(expiry_str, "year"):
-                expiry_date = expiry_str
-            else:
-                raise ValueError(f"Cannot parse expiry_date: {expiry_str}")
-            expiry_year = expiry_date.year
-            expiry_month = expiry_date.month
-            expiry_day = expiry_date.day
+            # Parse expiry via shared helper (handles both ISO strings and date objects)
+            expiry_year, expiry_month, expiry_day = parse_expiry_components(
+                position.get("expiry_date", "")
+            )
 
             # Preview order
             preview_response = client.preview_options_order(
@@ -1948,19 +1935,10 @@ class TelegramBot(
         strike_price = float(position.get("strike", 0))
         btc_result = None
 
-        # Parse expiry from position's expiry_date (ISO format: YYYY-MM-DD)
-        from datetime import date as _date
-
-        expiry_str = position.get("expiry_date", "")
-        if isinstance(expiry_str, str) and expiry_str:
-            expiry_date = _date.fromisoformat(expiry_str)
-        elif hasattr(expiry_str, "year"):
-            expiry_date = expiry_str
-        else:
-            raise ValueError(f"Cannot parse expiry_date: {expiry_str}")
-        expiry_year = expiry_date.year
-        expiry_month = expiry_date.month
-        expiry_day = expiry_date.day
+        # Parse expiry via shared helper (handles both ISO strings and date objects)
+        expiry_year, expiry_month, expiry_day = parse_expiry_components(
+            position.get("expiry_date", "")
+        )
 
         # Step 1: BTC current position
         try:

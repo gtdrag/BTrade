@@ -42,7 +42,7 @@ import yfinance as yf
 
 from .database import Database
 from .etrade_client import ETradeAPIError
-from .utils import get_et_now
+from .utils import get_et_now, normalize_expiry_date
 from .wheel_state import WheelState
 
 logger = logging.getLogger(__name__)
@@ -217,12 +217,8 @@ class WheelStrategy:
             cash,
         )
 
-        expiry_date = contract.get("expiry_date")
-        # expiry_date may be a date object from MockETradeClient
-        if hasattr(expiry_date, "isoformat"):
-            expiry_date_str = expiry_date.isoformat()
-        else:
-            expiry_date_str = str(expiry_date)
+        # expiry_date may be a date object from MockETradeClient or an ISO string
+        expiry_date_str = normalize_expiry_date(contract.get("expiry_date"))
 
         return PutSignal(
             strike=float(contract["strike"]),
@@ -345,11 +341,7 @@ class WheelStrategy:
             cost_basis,
         )
 
-        expiry_date = contract.get("expiry_date")
-        if hasattr(expiry_date, "isoformat"):
-            expiry_date_str = expiry_date.isoformat()
-        else:
-            expiry_date_str = str(expiry_date)
+        expiry_date_str = normalize_expiry_date(contract.get("expiry_date"))
 
         premium = float(contract["bid"])
         return CallSignal(
