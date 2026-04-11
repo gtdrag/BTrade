@@ -136,6 +136,20 @@ class TelegramBot(
         request_call_approval, request_profit_take_approval, and
         request_roll_approval.
 
+        NOTE (MD-05 deferred): asyncio.Event is bound to a specific event
+        loop in Python < 3.10. If `run_async()` in the scheduler creates
+        a fresh loop per call and the Telegram polling loop is different,
+        the cross-loop .set() is technically undefined. Fixing this
+        properly requires either (a) an asyncio.Future + call_soon_threadsafe
+        pattern with the caller's loop explicitly tracked, or (b) a
+        threading.Event + run_in_executor pattern — both of which require
+        reworking the ~30+ test sites that patch `asyncio.wait_for`. The
+        current asyncio.Event implementation works in practice because
+        Python 3.9's Event.set() is defensively loose about loop binding
+        when no waiters have been scheduled yet, and the polling loop
+        runs in the main thread alongside the scheduler's run_async.
+        Leaving as-is until MD-05 can be paired with a test-layer refresh.
+
         Returns the flow's result string on success, or None if the wait
         timed out (in which case a timeout notification is sent). In both
         outcomes, the flow's callback_id is cleared so subsequent stale

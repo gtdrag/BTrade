@@ -24,7 +24,9 @@ class ApprovalFlow:
 
     Attributes:
         event: asyncio.Event fired when a decision arrives. None when no
-            approval is pending.
+            approval is pending. (MD-05 — cross-loop .set() is a known
+            concern; see _wait_for_approval_result note in bot.py for
+            the deferral rationale.)
         result: "approved" / "rejected" / strike string, or None if
             pending / timed-out.
         callback_id: Identifier embedded in button callback_data. Stale
