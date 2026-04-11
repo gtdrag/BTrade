@@ -12,6 +12,7 @@ import datetime
 import json
 import os
 import sqlite3
+import threading
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -1524,12 +1525,15 @@ class Database:
         return {"unrealized_pnl": unrealized, "realized_pnl": realized}
 
 
-# Singleton instance
+# Singleton instance — guarded by _db_lock so concurrent APScheduler worker
+# threads cannot race to create two separate Database instances pointing at
+# the same file (MD-02 fix).
 _db_instance: Optional[Database] = None
+_db_lock = threading.Lock()
 
 
 def get_database(db_path: Optional[Path] = None) -> Database:
-    """Get or create the database singleton.
+    """Get or create the database singleton (thread-safe).
 
     Args:
         db_path: Path to the database file. Honored only on the FIRST call.
@@ -1543,9 +1547,15 @@ def get_database(db_path: Optional[Path] = None) -> Database:
                       bugs where a caller expects a different database.
     """
     global _db_instance
+    # Double-checked locking: fast path without acquiring the lock when the
+    # singleton is already created (common case under heavy scheduler load).
     if _db_instance is None:
-        _db_instance = Database(db_path)
-        return _db_instance
+        with _db_lock:
+            # Re-check under the lock — another thread may have created it
+            # between our first check and the lock acquisition.
+            if _db_instance is None:
+                _db_instance = Database(db_path)
+                return _db_instance
 
     # Singleton already exists — warn if caller passed a different path
     if db_path is not None and Path(db_path) != Path(_db_instance.db_path):
@@ -1565,4 +1575,5 @@ def reset_database() -> None:
     never call this.
     """
     global _db_instance
-    _db_instance = None
+    with _db_lock:
+        _db_instance = None

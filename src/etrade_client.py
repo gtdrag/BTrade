@@ -8,6 +8,7 @@ import logging
 import math
 import os
 import time
+import uuid
 import webbrowser
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -19,6 +20,20 @@ from requests_oauthlib import OAuth1Session
 from .utils import get_et_now
 
 logger = logging.getLogger(__name__)
+
+
+def _make_client_order_id(prefix: str) -> str:
+    """Build a collision-resistant clientOrderId.
+
+    Seconds-granularity timestamps alone collide when rapid-fire orders
+    fire inside the same second — notably the roll flow does BTC + STO
+    back-to-back. E*TRADE rejects duplicate clientOrderIds, so append a
+    6-hex-char random suffix from uuid4 to make collisions practically
+    impossible even for sub-second bursts (MD-04 fix).
+
+    Format: ``{prefix}_{YYYYMMDDHHMMSS}_{hex6}``
+    """
+    return f"{prefix}_{get_et_now().strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex[:6]}"
 
 
 # E*TRADE API endpoints
@@ -773,7 +788,7 @@ class ETradeClient:
         return {
             key: {
                 "orderType": "OPTN",
-                "clientOrderId": f"OPTN_{get_et_now().strftime('%Y%m%d%H%M%S')}",
+                "clientOrderId": _make_client_order_id("OPTN"),
                 "Order": [order],
             }
         }
@@ -964,7 +979,7 @@ class ETradeClient:
         return {
             key: {
                 "orderType": "EQ",
-                "clientOrderId": f"IBIT_{get_et_now().strftime('%Y%m%d%H%M%S')}",
+                "clientOrderId": _make_client_order_id("IBIT"),
                 "Order": [order],
             }
         }
@@ -1310,7 +1325,7 @@ class MockETradeClient:
         return {
             key: {
                 "orderType": "OPTN",
-                "clientOrderId": f"OPTN_{get_et_now().strftime('%Y%m%d%H%M%S')}",
+                "clientOrderId": _make_client_order_id("OPTN"),
                 "Order": [order],
             }
         }
