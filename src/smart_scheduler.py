@@ -19,6 +19,13 @@ from .smart_strategy import Signal, TodaySignal
 from .telegram_bot import TelegramBot, escape_markdown
 from .trading_bot import TradeResult, TradingBot
 from .utils import ET, get_et_now, is_trading_day, run_async
+from .wheel_notifications import (
+    compute_called_away_metrics,
+    format_assignment_message,
+    format_call_expired_otm_message,
+    format_called_away_message,
+    format_put_expired_otm_message,
+)
 from .wheel_strategy import WheelStrategy
 
 logger = logging.getLogger(__name__)
@@ -492,174 +499,106 @@ class SmartScheduler:
                 return
 
             if result == "assigned":
-                cycle = self.wheel_strategy.db.get_active_cycle()
-                cost_basis = cycle["cost_basis"] if cycle else 0.0
-                strike = cycle["put_strike"] if cycle else 0.0
-
-                # Get call signal — may be None if no profitable strikes above cost basis
-                call_signal = self.wheel_strategy.get_call_signal()
-
-                if call_signal is None:
-                    # No profitable strikes above cost basis — notify but don't error (T-04-12)
-                    message = (
-                        "*PUT ASSIGNMENT DETECTED*\n\n"
-                        f"Shares acquired: 100 IBIT\n"
-                        f"Strike: ${strike:.2f}\n"
-                        f"Cost basis: ${cost_basis:.2f}/share\n\n"
-                        "No profitable call strikes above cost basis. "
-                        "Will re-check when conditions improve."
-                    )
-                    self._send_notification(message)
-                else:
-                    # Notify about assignment and trigger call approval
-                    message = (
-                        "*PUT ASSIGNMENT DETECTED*\n\n"
-                        f"Shares acquired: 100 IBIT\n"
-                        f"Strike: ${strike:.2f}\n"
-                        f"Cost basis: ${cost_basis:.2f}/share\n\n"
-                        f"Suggesting covered call: ${call_signal.strike:.2f} strike, "
-                        f"{call_signal.dte} DTE, ${call_signal.premium:.2f} premium..."
-                    )
-                    self._send_notification(message)
-
-                    chain = self.wheel_strategy.client.get_ibit_options_chain()
-                    run_async(
-                        self.telegram_bot.request_call_approval(
-                            signal=call_signal,
-                            chain=chain,
-                            client=self.wheel_strategy.client,
-                            db=self.db,
-                            account_id_key=self.wheel_strategy.account_id_key,
-                        )
-                    )
-
-                self.db.log_event(
-                    "INFO",
-                    "assignment_notified",
-                    {
-                        "cost_basis": cost_basis,
-                        "strike": strike,
-                        "call_signal": call_signal is not None,
-                    },
-                )
-
+                self._handle_assignment()
             elif result == "called_away":
-                # Full-cycle complete — shares called away, compute and report cycle summary
-                history = self.db.get_cycle_history(limit=1)
-                last_cycle = history[0] if history else {}
-                pnl = last_cycle.get("realized_pnl", 0.0) or 0.0
-                opened_at = last_cycle.get("opened_at", "")
-                closed_at = last_cycle.get("closed_at", "")
-                put_premium = (last_cycle.get("put_premium_received") or 0.0) * 100
-                call_premiums = (last_cycle.get("covered_call_premiums_collected") or 0.0) * 100
-
-                # Annualized return calculation
-                days_in_cycle = 1  # minimum to avoid division by zero
-                if opened_at and closed_at:
-                    try:
-                        from datetime import datetime as _dt
-
-                        d_open = _dt.fromisoformat(opened_at)
-                        d_close = _dt.fromisoformat(closed_at)
-                        days_in_cycle = max((d_close - d_open).days, 1)
-                    except (ValueError, TypeError):
-                        pass
-
-                capital_at_risk = (last_cycle.get("put_strike") or 50.0) * 100
-                annualized_return = (
-                    (pnl / capital_at_risk) * (365 / days_in_cycle) * 100
-                    if capital_at_risk > 0
-                    else 0.0
-                )
-
-                message = (
-                    "*SHARES CALLED AWAY -- CYCLE COMPLETE*\n\n"
-                    f"Put premium: ${put_premium:.2f}\n"
-                    f"Call premiums: ${call_premiums:.2f}\n"
-                    f"Total P&L: ${pnl:.2f}\n"
-                    f"Days in cycle: {days_in_cycle}\n"
-                    f"Annualized return: {annualized_return:.1f}%\n\n"
-                    "Wheel cycle complete. Ready for next put signal."
-                )
-                self._send_notification(message)
-                self.db.log_event(
-                    "INFO",
-                    "called_away_notified",
-                    {
-                        "realized_pnl": pnl,
-                        "days_in_cycle": days_in_cycle,
-                        "annualized_return": annualized_return,
-                    },
-                )
-
+                self._handle_called_away()
             elif result == "call_expired_otm":
-                # OTM call expiry — shares kept, loop back and suggest new covered call
-                cycle = self.wheel_strategy.db.get_active_cycle()
-                cost_basis = cycle["cost_basis"] if cycle else 0.0
-
-                call_signal = self.wheel_strategy.get_call_signal()
-
-                if call_signal is None:
-                    message = (
-                        "*COVERED CALL EXPIRED (OTM)*\n\n"
-                        f"Shares kept. Premium already collected.\n"
-                        f"Cost basis: ${cost_basis:.2f}/share\n\n"
-                        "No profitable call strikes above cost basis. "
-                        "Will re-check when conditions improve."
-                    )
-                    self._send_notification(message)
-                else:
-                    message = (
-                        "*COVERED CALL EXPIRED (OTM)*\n\n"
-                        f"Shares kept. Premium already collected.\n"
-                        f"Cost basis: ${cost_basis:.2f}/share\n\n"
-                        f"Suggesting new covered call: ${call_signal.strike:.2f} strike, "
-                        f"{call_signal.dte} DTE, ${call_signal.premium:.2f} premium..."
-                    )
-                    self._send_notification(message)
-
-                    chain = self.wheel_strategy.client.get_ibit_options_chain()
-                    run_async(
-                        self.telegram_bot.request_call_approval(
-                            signal=call_signal,
-                            chain=chain,
-                            client=self.wheel_strategy.client,
-                            db=self.db,
-                            account_id_key=self.wheel_strategy.account_id_key,
-                        )
-                    )
-
-                self.db.log_event(
-                    "INFO",
-                    "call_otm_expiry_notified",
-                    {
-                        "cost_basis": cost_basis,
-                        "call_signal": call_signal is not None,
-                    },
-                )
-
+                self._handle_call_expired_otm()
             elif result == "expired_otm":
-                # Cycle is now CASH (closed) — read from history
-                history = self.db.get_cycle_history(limit=1)
-                last_cycle = history[0] if history else {}
-                pnl = last_cycle.get("realized_pnl", 0.0) or 0.0
-                message = (
-                    "*PUT EXPIRED WORTHLESS (OTM)*\n\n"
-                    f"Full premium kept\n"
-                    f"Realized P&L: ${pnl:.2f}\n\n"
-                    "Cycle complete. Ready for next put signal."
-                )
-                self._send_notification(message)
-                self.db.log_event(
-                    "INFO",
-                    "otm_expiry_notified",
-                    {"realized_pnl": pnl},
-                )
+                self._handle_put_expired_otm()
 
         except Exception as e:
             logger.error(f"Assignment detection failed: {e}", exc_info=True)
             self.db.log_event("ERROR", "assignment_detection_error", {"error": str(e)})
             self._send_notification(f"Assignment detection error: {escape_markdown(str(e))}")
+
+    def _handle_assignment(self) -> None:
+        """Notify on put assignment and optionally request a covered call."""
+        cycle = self.wheel_strategy.db.get_active_cycle()
+        cost_basis = cycle["cost_basis"] if cycle else 0.0
+        strike = cycle["put_strike"] if cycle else 0.0
+
+        # Call signal may be None if no profitable strikes above cost basis
+        call_signal = self.wheel_strategy.get_call_signal()
+
+        message = format_assignment_message(cost_basis, strike, call_signal)
+        self._send_notification(message)
+
+        # If a profitable call exists, trigger the Telegram approval flow
+        if call_signal is not None:
+            chain = self.wheel_strategy.client.get_ibit_options_chain()
+            run_async(
+                self.telegram_bot.request_call_approval(
+                    signal=call_signal,
+                    chain=chain,
+                    client=self.wheel_strategy.client,
+                    db=self.db,
+                    account_id_key=self.wheel_strategy.account_id_key,
+                )
+            )
+
+        self.db.log_event(
+            "INFO",
+            "assignment_notified",
+            {
+                "cost_basis": cost_basis,
+                "strike": strike,
+                "call_signal": call_signal is not None,
+            },
+        )
+
+    def _handle_called_away(self) -> None:
+        """Notify on full-cycle completion after shares were called away."""
+        history = self.db.get_cycle_history(limit=1)
+        last_cycle = history[0] if history else {}
+
+        message = format_called_away_message(last_cycle)
+        self._send_notification(message)
+
+        metrics = compute_called_away_metrics(last_cycle)
+        self.db.log_event("INFO", "called_away_notified", metrics)
+
+    def _handle_call_expired_otm(self) -> None:
+        """Notify on OTM call expiry and optionally request a new covered call."""
+        cycle = self.wheel_strategy.db.get_active_cycle()
+        cost_basis = cycle["cost_basis"] if cycle else 0.0
+
+        call_signal = self.wheel_strategy.get_call_signal()
+
+        message = format_call_expired_otm_message(cost_basis, call_signal)
+        self._send_notification(message)
+
+        if call_signal is not None:
+            chain = self.wheel_strategy.client.get_ibit_options_chain()
+            run_async(
+                self.telegram_bot.request_call_approval(
+                    signal=call_signal,
+                    chain=chain,
+                    client=self.wheel_strategy.client,
+                    db=self.db,
+                    account_id_key=self.wheel_strategy.account_id_key,
+                )
+            )
+
+        self.db.log_event(
+            "INFO",
+            "call_otm_expiry_notified",
+            {
+                "cost_basis": cost_basis,
+                "call_signal": call_signal is not None,
+            },
+        )
+
+    def _handle_put_expired_otm(self) -> None:
+        """Notify on put expiring worthless (OTM) — cycle is now CASH (closed)."""
+        history = self.db.get_cycle_history(limit=1)
+        last_cycle = history[0] if history else {}
+        pnl = last_cycle.get("realized_pnl", 0.0) or 0.0
+
+        message = format_put_expired_otm_message(pnl)
+        self._send_notification(message)
+
+        self.db.log_event("INFO", "otm_expiry_notified", {"realized_pnl": pnl})
 
     @requires_trading_day
     @requires_wheel_strategy
