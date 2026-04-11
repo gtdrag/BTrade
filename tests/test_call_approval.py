@@ -406,25 +406,25 @@ class TestCallAdjust:
             bot._handle_call_adjust(query, "call_adjust_call_103000")
         )
 
-        # edit_message_text was called; grab what was passed
+        # HI-04 fix: unconditional assertions — if reply_markup is missing
+        # (a bug), the test should fail loudly instead of silently passing.
         query.edit_message_text.assert_called_once()
         call_args = query.edit_message_text.call_args
-        # The keyboard in reply_markup should not contain below-basis strikes
         reply_markup = call_args.kwargs.get("reply_markup") or (
             call_args.args[1] if len(call_args.args) > 1 else None
         )
-        if reply_markup is not None:
-            # Extract all button callback_data strings
-            button_data = [btn.callback_data for row in reply_markup.inline_keyboard for btn in row]
-            # No button should reference strikes below cost_basis=49.0
-            for bd in button_data:
-                if "call_alt_" in bd and "reject" not in bd:
-                    parts = bd.split("_")
-                    try:
-                        strike_val = float(parts[2])
-                        assert strike_val >= 49.0, f"Strike {strike_val} is below cost_basis 49.0"
-                    except (IndexError, ValueError):
-                        pass
+        assert reply_markup is not None, "Expected reply_markup with alternative strikes"
+
+        button_data = [btn.callback_data for row in reply_markup.inline_keyboard for btn in row]
+        # Must have at least one alt-strike button (not just the reject button)
+        alt_buttons = [bd for bd in button_data if "call_alt_" in bd and "reject" not in bd]
+        assert alt_buttons, "Expected at least one call_alt_ button above cost basis"
+
+        for bd in alt_buttons:
+            parts = bd.split("_")
+            # Let parse errors crash the test — callback format drift is a bug
+            strike_val = float(parts[2])
+            assert strike_val >= 49.0, f"Strike {strike_val} is below cost_basis 49.0"
 
     def test_no_alternatives_sends_warning(self):
         """If no strikes above cost_basis in chain, sends warning message."""
@@ -445,12 +445,13 @@ class TestCallAdjust:
         query.edit_message_text.assert_called_once()
         call_args = query.edit_message_text.call_args
         text = call_args.kwargs.get("text") or (call_args.args[0] if call_args.args else "")
-        # Should mention cost basis or no profitable strikes
+        # HI-08 fix: removed overly broad "above" alternative — any message
+        # containing the word "above" would have matched. Require a specific
+        # phrase indicating no profitable strikes.
+        lowered = text.lower()
         assert (
-            "cost basis" in text.lower()
-            or "no profitable" in text.lower()
-            or "above" in text.lower()
-        )
+            "no profitable" in lowered or "cost basis" in lowered
+        ), f"Expected 'no profitable' or 'cost basis' in warning message, got: {text}"
 
 
 # ---------------------------------------------------------------------------
@@ -682,12 +683,30 @@ class TestSchedulerCallSuggestion:
 
         scheduler._send_notification.assert_called_once()
         notification_msg = scheduler._send_notification.call_args[0][0]
-        # Must include P&L and annualized return info
+
+        # HI-03 fix: assert the actual computed values, not substring-only.
+        # Expected P&L = 330.0 (from mocked cycle history)
         assert (
-            "P&L" in notification_msg
-            or "pnl" in notification_msg.lower()
-            or "$330" in notification_msg
+            "$330.00" in notification_msg
+        ), f"Expected '$330.00' in summary, got: {notification_msg}"
+
+        # Expected annualized return from the mocked 44-day cycle
+        # (2026-04-01 to 2026-05-15 = 44 days):
+        #   capital_at_risk = 48.0 * 100 = 4800
+        #   return_pct = 330 / 4800 * (365 / 44) * 100 = ~57.0%
+        # Accept any annualized value that matches the math to 1 decimal.
+        import re
+
+        annualized_match = re.search(r"Annualized return: (-?\d+\.\d+)%", notification_msg)
+        assert (
+            annualized_match is not None
+        ), f"Expected 'Annualized return: X.X%' line, got: {notification_msg}"
+        actual_annualized = float(annualized_match.group(1))
+        expected_annualized = (330.0 / 4800.0) * (365 / 44) * 100
+        assert abs(actual_annualized - expected_annualized) < 0.2, (
+            f"Annualized return {actual_annualized}% doesn't match "
+            f"expected ~{expected_annualized:.1f}%"
         )
-        assert "annualized" in notification_msg.lower() or "%" in notification_msg
+
         # Should NOT call run_async (no call suggestion on called_away)
         mock_run_async.assert_not_called()

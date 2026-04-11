@@ -992,11 +992,15 @@ class TestBuyToClose:
         mock_db = MagicMock()
 
         async def run():
-            await bot._execute_btc_order(
+            return await bot._execute_btc_order(
                 position, cycle, mock_client, mock_db, "acc", close_price=0.60
             )
 
-        asyncio.get_event_loop().run_until_complete(run())
+        # HI-05 fix: assert the return value. A bug returning False on success
+        # (or raising silently after the API call) would previously be missed
+        # because the test ignored the return.
+        result = asyncio.get_event_loop().run_until_complete(run())
+        assert result is True, f"_execute_btc_order should return True on success, got {result}"
         mock_client.preview_options_order.assert_called_once()
         mock_client.place_options_order.assert_called_once()
 

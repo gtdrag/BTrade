@@ -7,7 +7,7 @@ When wheel_mode_enabled=0, intraday jobs run normally.
 
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock, patch, AsyncMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -42,6 +42,19 @@ class TestWheelModeDatabase:
         db.update_bot_state(wheel_mode_enabled=1)
         state = db.get_bot_state()
         assert state.get("wheel_mode_enabled") == 1
+
+    def test_wheel_mode_toggle_idempotent(self, db):
+        """LO-05: setting wheel_mode to its current value is a no-op and does not raise."""
+        # Fresh DB starts with wheel_mode_enabled=1. Re-setting to 1 should be
+        # idempotent (this guards against future DB changes that might reject
+        # no-op updates or emit unintended side-effects).
+        db.update_bot_state(wheel_mode_enabled=1)
+        db.update_bot_state(wheel_mode_enabled=1)
+        assert db.get_bot_state().get("wheel_mode_enabled") == 1
+
+        db.update_bot_state(wheel_mode_enabled=0)
+        db.update_bot_state(wheel_mode_enabled=0)
+        assert db.get_bot_state().get("wheel_mode_enabled") == 0
 
 
 class TestWheelModeSchedulerGating:
@@ -82,7 +95,6 @@ class TestWheelModeSchedulerGating:
     @patch("src.smart_scheduler.get_et_now")
     def test_intraday_gated_when_wheel_mode_on(self, mock_now, mock_trading_day):
         """When wheel_mode_enabled=1, _job_morning_signal returns early without calling get_today_signal."""
-        from datetime import datetime
         mock_now.return_value = MagicMock()
 
         scheduler = self._make_scheduler(wheel_mode_enabled=1)
@@ -101,6 +113,7 @@ class TestWheelModeSchedulerGating:
         scheduler = self._make_scheduler(wheel_mode_enabled=0)
         # Make get_today_signal return a mock signal so execution doesn't blow up
         from src.smart_strategy import Signal
+
         mock_signal = MagicMock()
         mock_signal.signal = Signal.CASH
         scheduler.bot.get_today_signal.return_value = mock_signal
@@ -115,12 +128,15 @@ class TestWheelModeSchedulerGating:
         # Core intraday logic SHOULD be reached
         scheduler.bot.get_today_signal.assert_called_once()
 
-    @pytest.mark.parametrize("method_name,setup_attr,setup_value", [
-        ("_job_morning_signal", None, None),
-        ("_job_crash_day_check", None, None),
-        ("_job_pump_day_check", None, None),
-        ("_job_ten_am_dump_exit", "_ten_am_dump_position_open", True),
-    ])
+    @pytest.mark.parametrize(
+        "method_name,setup_attr,setup_value",
+        [
+            ("_job_morning_signal", None, None),
+            ("_job_crash_day_check", None, None),
+            ("_job_pump_day_check", None, None),
+            ("_job_ten_am_dump_exit", "_ten_am_dump_position_open", True),
+        ],
+    )
     @patch("src.smart_scheduler.is_trading_day", return_value=True)
     @patch("src.smart_scheduler.get_et_now")
     def test_all_four_intraday_jobs_gated(
@@ -215,7 +231,7 @@ class TestWheelCommand:
     @patch("src.telegram.wheel_commands.get_database")
     async def test_wheel_cmd_active_cycle(self, mock_get_db, mock_now):
         """_cmd_wheel with active cycle shows state, cost basis, DTE, premium."""
-        from datetime import date, datetime
+        from datetime import date
 
         mock_db = MagicMock()
         mock_db.get_active_cycle.return_value = {
@@ -449,14 +465,18 @@ class TestWheelDailySummary:
         # Should include position details, DTE, max risk, premium
         assert "PUT" in msg
         assert "DTE" in msg
-        assert "5000" in msg or "5,000" in msg  # max risk = 50 * 100
-        assert "1.50" in msg
+        # ME-07 fix: assert the max risk label + value together so an
+        # unrelated "5000" in the message (e.g. an order ID) doesn't pass
+        # the check. The render format is "max risk: $5,000".
+        assert "max risk: $5,000" in msg, f"Expected 'max risk: $5,000' in message, got: {msg}"
+        assert "premium: $1.50" in msg, f"Expected 'premium: $1.50' in message, got: {msg}"
 
     @patch("src.smart_scheduler.is_trading_day", return_value=True)
     @patch("src.smart_scheduler.get_et_now")
     def test_wheel_summary_job_registered(self, mock_now, mock_trading_day):
         """setup_jobs() registers 'wheel_daily_summary' job with CronTrigger at 16:30."""
         from unittest.mock import MagicMock
+
         from src.smart_scheduler import SmartScheduler
 
         scheduler = object.__new__(SmartScheduler)
@@ -483,9 +503,9 @@ class TestWheelDailySummary:
 
         scheduler.setup_jobs()
 
-        assert "wheel_daily_summary" in added_jobs, (
-            f"wheel_daily_summary job not registered. Jobs found: {list(added_jobs.keys())}"
-        )
+        assert (
+            "wheel_daily_summary" in added_jobs
+        ), f"wheel_daily_summary job not registered. Jobs found: {list(added_jobs.keys())}"
 
 
 # ---------------------------------------------------------------------------
@@ -498,9 +518,11 @@ class TestDashboardNoCycle:
 
     def test_dashboard_no_cycle_empty_positions(self):
         """_build_wheel_positions_df with None/empty list returns empty DataFrame."""
-        import pandas as pd
-        from app import _build_wheel_positions_df
         from datetime import date
+
+        import pandas as pd
+
+        from app import _build_wheel_positions_df
 
         result = _build_wheel_positions_df([], date.today())
         assert isinstance(result, pd.DataFrame)
@@ -508,9 +530,11 @@ class TestDashboardNoCycle:
 
     def test_dashboard_no_cycle_none_positions(self):
         """_build_wheel_positions_df with empty positions (no OPEN status) returns empty DataFrame."""
-        import pandas as pd
-        from app import _build_wheel_positions_df
         from datetime import date
+
+        import pandas as pd
+
+        from app import _build_wheel_positions_df
 
         # All positions are CLOSED — should produce empty DataFrame
         positions = [
@@ -534,9 +558,11 @@ class TestDashboardWithCycle:
 
     def test_build_wheel_positions_df_columns(self):
         """_build_wheel_positions_df returns DataFrame with expected columns."""
-        import pandas as pd
-        from app import _build_wheel_positions_df
         from datetime import date
+
+        import pandas as pd
+
+        from app import _build_wheel_positions_df
 
         positions = [
             {
@@ -557,8 +583,9 @@ class TestDashboardWithCycle:
 
     def test_build_wheel_positions_df_dte_calculation(self):
         """DTE is calculated correctly as (expiry - now_date).days."""
-        from app import _build_wheel_positions_df
         from datetime import date
+
+        from app import _build_wheel_positions_df
 
         today = date(2026, 4, 8)
         positions = [
@@ -574,6 +601,7 @@ class TestDashboardWithCycle:
         ]
         df = _build_wheel_positions_df(positions, today)
         from datetime import date as date_cls
+
         expected_dte = (date_cls(2026, 5, 15) - today).days
         assert df.iloc[0]["DTE"] == expected_dte
 
@@ -584,6 +612,7 @@ class TestBuildCycleHistoryDf:
     def test_build_cycle_history_df_empty(self):
         """_build_cycle_history_df with empty list returns empty DataFrame."""
         import pandas as pd
+
         from app import _build_cycle_history_df
 
         result = _build_cycle_history_df([])
@@ -593,6 +622,7 @@ class TestBuildCycleHistoryDf:
     def test_build_cycle_history_df_columns(self):
         """_build_cycle_history_df returns DataFrame with correct columns."""
         import pandas as pd
+
         from app import _build_cycle_history_df
 
         cycles = [
@@ -610,7 +640,15 @@ class TestBuildCycleHistoryDf:
         df = _build_cycle_history_df(cycles)
         assert isinstance(df, pd.DataFrame)
         assert not df.empty
-        expected_cols = ["State", "Start", "End", "Put Premium", "CC Premium", "Total P&L", "Annualized %"]
+        expected_cols = [
+            "State",
+            "Start",
+            "End",
+            "Put Premium",
+            "CC Premium",
+            "Total P&L",
+            "Annualized %",
+        ]
         for col in expected_cols:
             assert col in df.columns, f"Column '{col}' missing from DataFrame"
 
@@ -631,8 +669,16 @@ class TestBuildCycleHistoryDf:
             }
         ]
         df = _build_cycle_history_df(cycles)
-        # Just verify it's present and non-null for a valid cycle
-        assert df.iloc[0]["Annualized %"] is not None
+
+        # ME-06 fix: assert the exact computed value, not just non-None.
+        # Cycle: 31 days, $225 P&L, cost_basis 50.0 → capital at risk $5000.
+        # total_prem = (1.50 + 0.75) * 100 = $225
+        # annualized = 225 / 5000 * (365 / 31) * 100 = 52.983...%
+        # The formatter rounds to 1 decimal.
+        expected = f"{(225.0 / 5000.0) * (365 / 31) * 100:.1f}%"
+        assert (
+            df.iloc[0]["Annualized %"] == expected
+        ), f"Expected Annualized % = {expected}, got {df.iloc[0]['Annualized %']}"
 
 
 class TestCalcTotalPremium:

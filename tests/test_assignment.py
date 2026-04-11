@@ -16,7 +16,7 @@ so all tests should fail with AttributeError before implementation.
 import sys
 from datetime import date
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -24,9 +24,8 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.etrade_client import MockETradeClient
-from src.wheel_strategy import WheelStrategy
 from src.wheel_state import WheelState
-
+from src.wheel_strategy import WheelStrategy
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -37,6 +36,7 @@ from src.wheel_state import WheelState
 def db(tmp_path):
     """Create an isolated test database (each test gets a unique tmp file)."""
     from src.database import Database
+
     return Database(db_path=tmp_path / "test.db")
 
 
@@ -124,10 +124,14 @@ class TestAssignmentDetection:
         mock_now.date.return_value = date(2026, 4, 7)
 
         with patch("src.wheel_strategy.get_et_now", return_value=mock_now):
-            with patch.object(mock_client, "get_account_positions", return_value=ibit_equity_positions):
+            with patch.object(
+                mock_client, "get_account_positions", return_value=ibit_equity_positions
+            ) as mock_get_positions:
                 result = strategy.detect_and_process_expiry()
 
         assert result == "assigned"
+        # HI-06 fix: verify the positions query used the strategy's account_id_key
+        mock_get_positions.assert_called_with("test_key")
 
     def test_detects_otm_expiry_when_no_shares(self, db, mock_client, setup_short_put_cycle):
         """
@@ -228,7 +232,9 @@ class TestAssignmentTransition:
         mock_now.date.return_value = date(2026, 4, 7)
 
         with patch("src.wheel_strategy.get_et_now", return_value=mock_now):
-            with patch.object(mock_client, "get_account_positions", return_value=ibit_equity_positions):
+            with patch.object(
+                mock_client, "get_account_positions", return_value=ibit_equity_positions
+            ):
                 strategy.detect_and_process_expiry()
 
         cycle = db.get_active_cycle()
@@ -248,7 +254,9 @@ class TestAssignmentTransition:
         mock_now.date.return_value = date(2026, 4, 7)
 
         with patch("src.wheel_strategy.get_et_now", return_value=mock_now):
-            with patch.object(mock_client, "get_account_positions", return_value=ibit_equity_positions):
+            with patch.object(
+                mock_client, "get_account_positions", return_value=ibit_equity_positions
+            ):
                 strategy.detect_and_process_expiry()
 
         cycle = db.get_active_cycle()
@@ -268,7 +276,9 @@ class TestAssignmentTransition:
         mock_now.date.return_value = date(2026, 4, 7)
 
         with patch("src.wheel_strategy.get_et_now", return_value=mock_now):
-            with patch.object(mock_client, "get_account_positions", return_value=ibit_equity_positions):
+            with patch.object(
+                mock_client, "get_account_positions", return_value=ibit_equity_positions
+            ):
                 strategy.detect_and_process_expiry()
 
         positions = db.get_cycle_positions(cycle_id)

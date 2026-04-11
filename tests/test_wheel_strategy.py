@@ -8,9 +8,8 @@ Implementation lives in src/wheel_strategy.py.
 import os
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock, patch
-
 from typing import Optional
+from unittest.mock import patch
 
 import pandas as pd
 import pytest
@@ -23,10 +22,12 @@ from src.wheel_strategy import PutSignal, WheelStrategy
 
 def _make_mock_history(high_values, close_values):
     """Build a DataFrame mimicking yf.Ticker().history() output."""
-    return pd.DataFrame({
-        "High": high_values,
-        "Close": close_values,
-    })
+    return pd.DataFrame(
+        {
+            "High": high_values,
+            "Close": close_values,
+        }
+    )
 
 
 def _make_contract(
@@ -69,10 +70,12 @@ def _make_contract(
 # Fixtures
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture
 def db(tmp_path):
     """Create an isolated test database."""
     from src.database import Database
+
     os.environ["DATABASE_PATH"] = str(tmp_path / "test.db")
     return Database(tmp_path / "test.db")
 
@@ -81,6 +84,7 @@ def db(tmp_path):
 def mock_client():
     """Return a MockETradeClient with $100k cash and IBIT spot = 50.0."""
     from src.etrade_client import MockETradeClient
+
     client = MockETradeClient(initial_cash=100_000.0)
     client.set_mock_price("IBIT", 50.0)
     return client
@@ -95,6 +99,24 @@ def strategy(mock_client, db):
 # ---------------------------------------------------------------------------
 # TestPutSignal — tests for WheelStrategy.get_put_signal()
 # ---------------------------------------------------------------------------
+
+
+class TestWheelStrategyDefaults:
+    """LO-04: verify WheelStrategy.__init__ sets the expected default thresholds.
+
+    Hardcoded defaults from the strategy constants are load-bearing — changing
+    them silently (e.g. from -2.0 to -0.2) would radically change behavior
+    without any test breakage. Pin the expected values here so such accidents
+    produce a loud failure.
+    """
+
+    def test_default_thresholds(self, strategy):
+        assert strategy.pullback_threshold == -2.0
+        assert strategy.delta_min == 0.20
+        assert strategy.delta_max == 0.30
+        assert strategy.call_delta_min == 0.25
+        assert strategy.call_delta_max == 0.35
+
 
 class TestPutSignal:
     """Tests for WheelStrategy.get_put_signal()."""
@@ -127,6 +149,7 @@ class TestPutSignal:
     def test_no_signal_when_short_put_active(self, strategy, db):
         """get_put_signal() returns None when active cycle is SHORT_PUT."""
         from src.wheel_state import WheelState
+
         cycle_id = db.create_wheel_cycle()
         db.transition_wheel_state(cycle_id, WheelState.SHORT_PUT, reason="sold put")
 
@@ -137,11 +160,18 @@ class TestPutSignal:
     def test_no_signal_when_holding_shares(self, strategy, db):
         """get_put_signal() returns None when active cycle is HOLDING_SHARES."""
         from src.wheel_state import WheelState
+
         cycle_id = db.create_wheel_cycle()
-        db.transition_wheel_state(cycle_id, WheelState.SHORT_PUT, reason="sold put",
-                                   put_strike=50.0, put_premium_received=2.0)
-        db.transition_wheel_state(cycle_id, WheelState.HOLDING_SHARES, reason="assigned",
-                                   shares_held=100, cost_basis=48.0)
+        db.transition_wheel_state(
+            cycle_id,
+            WheelState.SHORT_PUT,
+            reason="sold put",
+            put_strike=50.0,
+            put_premium_received=2.0,
+        )
+        db.transition_wheel_state(
+            cycle_id, WheelState.HOLDING_SHARES, reason="assigned", shares_held=100, cost_basis=48.0
+        )
 
         result = strategy.get_put_signal()
         assert result is None, "Expected None when cycle state is HOLDING_SHARES"
@@ -198,6 +228,7 @@ class TestPutSignal:
 # ---------------------------------------------------------------------------
 # TestStrikeSelection — tests for WheelStrategy.select_put_strike()
 # ---------------------------------------------------------------------------
+
 
 class TestStrikeSelection:
     """Tests for WheelStrategy.select_put_strike()."""
@@ -272,6 +303,7 @@ class TestStrikeSelection:
 # TestCashValidation — tests for cash collateral gate in get_put_signal()
 # ---------------------------------------------------------------------------
 
+
 class TestCashValidation:
     """Tests for cash collateral validation inside get_put_signal()."""
 
@@ -285,6 +317,7 @@ class TestCashValidation:
     def test_signal_none_when_insufficient_cash(self, db, mock_client):
         """get_put_signal() returns None when cash < strike * 100."""
         from src.etrade_client import MockETradeClient
+
         # Need a strike around 48.0, so require $4800. Set cash to $3000.
         poor_client = MockETradeClient(initial_cash=3_000.0)
         poor_client.set_mock_price("IBIT", 50.0)
@@ -298,6 +331,7 @@ class TestCashValidation:
     def test_signal_fires_when_sufficient_cash(self, db, mock_client):
         """get_put_signal() returns PutSignal when cash >= strike * 100."""
         from src.etrade_client import MockETradeClient
+
         # Rich client has $5000, strike ~ 48.0 => requires $4800 => sufficient
         rich_client = MockETradeClient(initial_cash=5_000.0)
         rich_client.set_mock_price("IBIT", 50.0)
