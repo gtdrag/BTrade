@@ -27,6 +27,7 @@ import pandas as pd
 from .data_providers import AlpacaProvider, MarketDataManager, create_data_manager
 from .database import Database, get_database
 from .error_alerting import AlertSeverity, alert_error
+from .utils import get_et_now
 
 logger = logging.getLogger(__name__)
 
@@ -273,7 +274,7 @@ class SmartStrategy:
     def get_ibit_data(self, days: int = 10) -> pd.DataFrame:
         """Fetch recent IBIT data from Alpaca."""
         # Cache data for 5 minutes
-        now = datetime.now()
+        now = get_et_now()
         if (
             self._ibit_data is not None
             and self._last_data_fetch is not None
@@ -513,7 +514,7 @@ class SmartStrategy:
         this triggers a SBIT buy signal.
         """
         today = date.today()
-        now = datetime.now()
+        now = get_et_now()
 
         # Reset crash day flag if it's a new day
         if self._crash_day_trade_date != today:
@@ -589,7 +590,7 @@ class SmartStrategy:
         this triggers a BITU buy signal.
         """
         today = date.today()
-        now = datetime.now()
+        now = get_et_now()
 
         # Reset pump day flag if it's a new day
         if self._pump_day_trade_date != today:
@@ -668,7 +669,7 @@ class SmartStrategy:
         Unlike crash/pump day, this triggers EVERY trading day at the entry time.
         """
         today = date.today()
-        now = datetime.now()
+        now = get_et_now()
         current_time = now.strftime("%H:%M")
 
         # Reset flags if it's a new day
@@ -736,7 +737,7 @@ class SmartStrategy:
             return None
 
         today = date.today()
-        now = datetime.now()
+        now = get_et_now()
 
         # Reset flags if it's a new day
         if self._discovered_pattern_trade_date != today:

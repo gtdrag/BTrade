@@ -6,13 +6,13 @@ Commands in this module:
 """
 
 import logging
-from datetime import datetime
 from typing import TYPE_CHECKING
 
 from telegram import Update
 from telegram.ext import ContextTypes
 
 from ..async_utils import run_sync_in_executor
+from ..utils import get_et_now
 
 if TYPE_CHECKING:
     from .bot import TelegramBot
@@ -114,7 +114,7 @@ class AuthCommandsMixin:
         self._pending_auth_request = {
             "request_token": request_token,
             "client": temp_client,
-            "timestamp": datetime.now(),
+            "timestamp": get_et_now(),
         }
 
         await update.message.reply_text(
@@ -160,7 +160,7 @@ class AuthCommandsMixin:
         # Check if request hasn't expired (5 min timeout)
         from datetime import timedelta
 
-        age = datetime.now() - self._pending_auth_request["timestamp"]
+        age = get_et_now() - self._pending_auth_request["timestamp"]
         if age > timedelta(minutes=5):
             self._pending_auth_request = None
             await update.message.reply_text(

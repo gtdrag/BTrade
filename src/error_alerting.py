@@ -24,6 +24,8 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, Optional
 
+from .utils import get_et_now
+
 logger = logging.getLogger(__name__)
 
 
@@ -62,13 +64,13 @@ class AlertState:
         if last_time is None:
             return True
 
-        elapsed = (datetime.now() - last_time).total_seconds()
+        elapsed = (get_et_now() - last_time).total_seconds()
         return elapsed >= self.rate_limits.get(severity, 300)
 
     def record_alert(self, category: str, severity: AlertSeverity):
         """Record that an alert was sent."""
         key = f"{severity.value}:{category}"
-        self.last_alert_time[key] = datetime.now()
+        self.last_alert_time[key] = get_et_now()
         self.alert_counts[key] = self.alert_counts.get(key, 0) + 1
 
 
@@ -141,7 +143,7 @@ async def _send_telegram_alert(
             )
             alert_text += f"\n\n*Context:*\n{context_str}"
 
-        alert_text += f"\n\n_Time: {datetime.now().strftime('%H:%M:%S ET')}_"
+        alert_text += f"\n\n_Time: {get_et_now().strftime('%H:%M:%S ET')}_"
 
         return await bot.send_message(alert_text, parse_mode="Markdown")
 

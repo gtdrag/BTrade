@@ -11,12 +11,17 @@ Features:
 - Bold pop-art design
 """
 
+from __future__ import annotations
+
 import json
 import os
-from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from dotenv import load_dotenv
+
+if TYPE_CHECKING:
+    import pandas as pd  # noqa: F401  — used in string annotations
 
 # Settings file for persistence across refreshes
 SETTINGS_FILE = Path(__file__).parent / ".user_settings.json"
@@ -301,7 +306,9 @@ def init_session_state():
     if "scheduler" not in st.session_state:
         st.session_state.scheduler = None
     if "last_refresh" not in st.session_state:
-        st.session_state.last_refresh = datetime.now()
+        from src.utils import get_et_now
+
+        st.session_state.last_refresh = get_et_now()
     if "dialog_open" not in st.session_state:
         st.session_state.dialog_open = False
 
@@ -364,7 +371,9 @@ def get_or_create_bot():
 
 def get_cached_status(bot):
     """Get bot status from session cache or fetch if stale (>30s)."""
-    now = datetime.now()
+    from src.utils import get_et_now
+
+    now = get_et_now()
     cache_key = "cached_status"
     cache_time_key = "cached_status_time"
 
@@ -383,7 +392,9 @@ def get_cached_status(bot):
 
 def get_cached_portfolio(bot):
     """Get portfolio from session cache or fetch if stale (>30s)."""
-    now = datetime.now()
+    from src.utils import get_et_now
+
+    now = get_et_now()
     cache_key = "cached_portfolio"
     cache_time_key = "cached_portfolio_time"
 
@@ -671,10 +682,205 @@ def render_status_bar(bot, scheduler, cached_status):
             st.session_state.dialog_open = True
 
 
+# ---------------------------------------------------------------------------
+# Wheel Strategy dashboard helpers (TR-04)
+# ---------------------------------------------------------------------------
+
+
+def _build_wheel_positions_df(positions: list, now_date) -> pd.DataFrame:
+    """Build DataFrame for active (OPEN) options positions table.
+
+    Args:
+        positions: List of position dicts from get_cycle_positions().
+        now_date: datetime.date representing today (ET).
+
+    Returns:
+        pandas DataFrame with columns [Type, Strike, Expiry, DTE, Delta, Theta, Premium],
+        or empty DataFrame if no OPEN positions.
+    """
+    from datetime import date as date_cls
+
+    import pandas as pd
+
+    if not positions:
+        return pd.DataFrame()
+
+    rows = []
+    for p in positions:
+        if p.get("status") != "OPEN":
+            continue
+        expiry = date_cls.fromisoformat(p["expiry_date"])
+        dte = max(0, (expiry - now_date).days)
+        rows.append(
+            {
+                "Type": p["option_type"],
+                "Strike": f"${p['strike']:.0f}",
+                "Expiry": p["expiry_date"],
+                "DTE": dte,
+                "Delta": f"{p['delta']}" if p.get("delta") is not None else "N/A",
+                "Theta": f"{p['theta']}" if p.get("theta") is not None else "N/A",
+                "Premium": f"${p['premium_received']:.2f}",
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def _build_cycle_history_df(cycles: list) -> pd.DataFrame:
+    """Build DataFrame for completed wheel cycles table.
+
+    Args:
+        cycles: List of cycle dicts from get_cycle_history().
+
+    Returns:
+        pandas DataFrame with columns [State, Start, End, Put Premium, CC Premium,
+        Total P&L, Annualized %], or empty DataFrame if cycles is empty.
+    """
+    import pandas as pd
+
+    if not cycles:
+        return pd.DataFrame()
+
+    rows = []
+    for c in cycles:
+        put_prem = c.get("put_premium_received") or 0.0
+        cc_prem = c.get("covered_call_premiums_collected") or 0.0
+        total_pnl = c.get("realized_pnl")
+        cost_basis = c.get("cost_basis") or 0.0
+
+        # Annualized return: (total_premium_dollars / (cost_basis * 100)) * (365 / days_held) * 100
+        annualized = "N/A"
+        opened_at = c.get("opened_at")
+        closed_at = c.get("closed_at")
+        if opened_at and closed_at and cost_basis and cost_basis > 0:
+            try:
+                from datetime import datetime as dt_cls
+
+                opened_dt = dt_cls.fromisoformat(opened_at)
+                closed_dt = dt_cls.fromisoformat(closed_at)
+                days_held = max(1, (closed_dt - opened_dt).days)
+                total_prem_dollars = (put_prem + cc_prem) * 100
+                annualized = (
+                    f"{(total_prem_dollars / (cost_basis * 100)) * (365 / days_held) * 100:.1f}%"
+                )
+            except Exception:
+                annualized = "N/A"
+
+        rows.append(
+            {
+                "State": c.get("state", ""),
+                "Start": opened_at[:10] if opened_at else "",
+                "End": closed_at[:10] if closed_at else "—",
+                "Put Premium": f"${put_prem:.2f}",
+                "CC Premium": f"${cc_prem:.2f}",
+                "Total P&L": f"${total_pnl:.2f}" if total_pnl is not None else "N/A",
+                "Annualized %": annualized,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def _calc_total_premium(cycle: dict) -> float:
+    """Calculate total premium collected in dollars (per 100 shares).
+
+    Args:
+        cycle: Wheel cycle dict with put_premium_received and
+               covered_call_premiums_collected (per-share values).
+
+    Returns:
+        Total premium in dollars: (put_premium + cc_premiums) * 100.
+    """
+    put_prem = cycle.get("put_premium_received") or 0.0
+    cc_prem = cycle.get("covered_call_premiums_collected") or 0.0
+    return (put_prem + cc_prem) * 100
+
+
+@st.fragment(run_every=60)
+def render_wheel_section():
+    """Wheel strategy section — auto-refreshes every 60 seconds (TR-04).
+
+    Displays:
+    - Cycle State metrics (state, total premium, cost basis)
+    - Active Positions table (OPEN options with DTE, Greeks, premium)
+    - Premium History chart + Cycle History table
+    - Fallback message when no active cycle
+    """
+    import pandas as pd
+
+    from src.database import get_database
+    from src.utils import get_et_now
+
+    db = get_database()
+
+    st.markdown("---")
+    st.subheader("Wheel Strategy")
+
+    cycle = db.get_active_cycle()
+    if cycle is None:
+        st.info("No active wheel cycle. Use /wheelmode to enable wheel strategy.")
+        # Still show cycle history if any exists
+        history = db.get_cycle_history(limit=20)
+        if history:
+            st.markdown("#### Cycle History")
+            hist_df = _build_cycle_history_df(history)
+            st.dataframe(hist_df, use_container_width=True, hide_index=True)
+        return
+
+    # Panel 1: Cycle State metrics
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Cycle State", cycle["state"])
+    with col2:
+        total_prem = _calc_total_premium(cycle)
+        st.metric("Total Premium", f"${total_prem:.2f}")
+    with col3:
+        cost_basis = cycle.get("cost_basis") or 0.0
+        st.metric("Cost Basis", f"${cost_basis:.2f}/sh")
+
+    # Panel 2: Active Positions table
+    positions = db.get_cycle_positions(cycle["id"])
+    now_date = get_et_now().date()
+    pos_df = _build_wheel_positions_df(positions, now_date)
+    if not pos_df.empty:
+        st.markdown("#### Active Positions")
+        st.dataframe(pos_df, use_container_width=True, hide_index=True)
+        st.caption("Greeks shown are entry values, not live.")
+    else:
+        st.info("No open positions in current cycle.")
+
+    # Panel 3: Premium History chart + Cycle History table
+    history = db.get_cycle_history(limit=20)
+    if history:
+        st.markdown("#### Premium History")
+        # Build premium-over-time bar chart
+        try:
+            chart_data = pd.DataFrame(
+                [
+                    {
+                        "Cycle": f"#{c['id']}",
+                        "Premium ($)": (
+                            (c.get("put_premium_received") or 0.0)
+                            + (c.get("covered_call_premiums_collected") or 0.0)
+                        )
+                        * 100,
+                    }
+                    for c in reversed(history)
+                ]
+            ).set_index("Cycle")
+            st.bar_chart(chart_data)
+        except Exception:
+            pass
+
+        st.markdown("#### Cycle History")
+        hist_df = _build_cycle_history_df(history)
+        st.dataframe(hist_df, use_container_width=True, hide_index=True)
+
+
 @st.fragment(run_every=45)
 def render_refresh_indicator():
     """Render the refresh indicator with auto-refresh every 45 seconds."""
-    st.session_state.last_refresh = datetime.now()
+    from src.utils import get_et_now
+
+    st.session_state.last_refresh = get_et_now()
     st.markdown(
         """
     <div class="refresh-indicator">
@@ -1116,7 +1322,9 @@ def main():
         st.error(f"🚨 Portfolio Error: {portfolio['error']}")
 
     # Auto-refresh every 45 seconds
-    st.session_state.last_refresh = datetime.now()
+    from src.utils import get_et_now
+
+    st.session_state.last_refresh = get_et_now()
 
     # Main content area - compact padding for single screen
     st.markdown(
@@ -1144,6 +1352,9 @@ def main():
 
     # Refresh indicator
     render_refresh_indicator()
+
+    # Wheel Strategy section (TR-04)
+    render_wheel_section()
 
     st.markdown("</div>", unsafe_allow_html=True)
 

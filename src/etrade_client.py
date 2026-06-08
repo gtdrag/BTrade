@@ -5,9 +5,12 @@ Handles OAuth authentication, quotes, orders, and account management.
 
 import json
 import logging
+import math
 import os
 import time
+import uuid
 import webbrowser
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -17,6 +20,20 @@ from requests_oauthlib import OAuth1Session
 from .utils import get_et_now
 
 logger = logging.getLogger(__name__)
+
+
+def _make_client_order_id(prefix: str) -> str:
+    """Build a collision-resistant clientOrderId.
+
+    Seconds-granularity timestamps alone collide when rapid-fire orders
+    fire inside the same second — notably the roll flow does BTC + STO
+    back-to-back. E*TRADE rejects duplicate clientOrderIds, so append a
+    6-hex-char random suffix from uuid4 to make collisions practically
+    impossible even for sub-second bursts (MD-04 fix).
+
+    Format: ``{prefix}_{YYYYMMDDHHMMSS}_{hex6}``
+    """
+    return f"{prefix}_{get_et_now().strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex[:6]}"
 
 
 # E*TRADE API endpoints
@@ -29,6 +46,8 @@ OAUTH_ACCESS_TOKEN = "/oauth/access_token"
 OAUTH_RENEW_TOKEN = "/oauth/renew_access_token"
 OAUTH_REVOKE_TOKEN = "/oauth/revoke_access_token"
 
+QUOTE_FRESHNESS_SECONDS = 60  # Hardcoded per user decision — reject options quotes older than this
+
 
 class ETradeAuthError(Exception):
     """Authentication error with E*TRADE API."""
@@ -40,6 +59,31 @@ class ETradeAPIError(Exception):
     """API error from E*TRADE."""
 
     pass
+
+
+def extract_order_id(response: Dict[str, Any]) -> Optional[str]:
+    """Extract the order ID from a place_options_order or place_order response.
+
+    E*TRADE returns the order ID under one of two keys depending on the
+    endpoint/version: ``"orderId"`` (flat) or ``"OrderIds": [{"orderId": ...}]``
+    (nested). This helper tries both.
+
+    Returns:
+        The order ID as a string, or None if neither shape contained one.
+    """
+    if not isinstance(response, dict):
+        return None
+    order_id = response.get("orderId")
+    if order_id is not None:
+        return str(order_id)
+    nested = response.get("OrderIds", [])
+    if isinstance(nested, list) and nested:
+        first = nested[0]
+        if isinstance(first, dict):
+            nested_id = first.get("orderId")
+            if nested_id is not None:
+                return str(nested_id)
+    return None
 
 
 class ETradeClient:
@@ -83,18 +127,38 @@ class ETradeClient:
         self._load_tokens()
 
     def _load_tokens(self):
-        """Load saved tokens from file."""
-        if self.token_file.exists():
-            try:
-                with open(self.token_file) as f:
-                    tokens = json.load(f)
-                    self.access_token = tokens.get("access_token")
-                    self.access_token_secret = tokens.get("access_token_secret")
-                    if self.access_token and self.access_token_secret:
-                        self._create_session()
-                        logger.info("Loaded saved OAuth tokens")
-            except Exception as e:
-                logger.warning(f"Failed to load tokens: {e}")
+        """Load saved tokens from file.
+
+        Verifies file permissions are 0o600 before reading. If the permissions
+        are loose, tightens them automatically (defense-in-depth). If tightening
+        fails, refuses to load to avoid exposing tokens further.
+        """
+        if not self.token_file.exists():
+            return
+
+        try:
+            # Verify/enforce secure permissions before reading
+            current_mode = self.token_file.stat().st_mode & 0o777
+            if current_mode != 0o600:
+                logger.warning(
+                    f"Token file {self.token_file} has insecure permissions "
+                    f"{oct(current_mode)} — expected 0o600. Tightening..."
+                )
+                try:
+                    os.chmod(self.token_file, 0o600)
+                except OSError as e:
+                    logger.error(f"Failed to secure token file permissions: {e}")
+                    return  # Refuse to load rather than proceed with loose perms
+
+            with open(self.token_file) as f:
+                tokens = json.load(f)
+                self.access_token = tokens.get("access_token")
+                self.access_token_secret = tokens.get("access_token_secret")
+                if self.access_token and self.access_token_secret:
+                    self._create_session()
+                    logger.info("Loaded saved OAuth tokens")
+        except Exception as e:
+            logger.warning(f"Failed to load tokens: {e}")
 
     def _save_tokens(self):
         """Save tokens to file."""
@@ -587,6 +651,237 @@ class ETradeClient:
             "change_pct": float(all_data.get("changeClose", 0)),
         }
 
+    # ==================== Options Chain Methods ====================
+
+    def get_ibit_options_chain(self) -> List[Dict[str, Any]]:
+        """Fetch IBIT options chain for 30-45 DTE expirations.
+
+        Raises ETradeAPIError if any quotes are stale (>60s).
+
+        Returns:
+            List of contract dicts, each with: symbol, option_type, strike,
+            expiry_date, dte, bid, ask, last, open_interest, delta, gamma,
+            theta, vega, iv, quote_timestamp.
+        """
+        now = get_et_now()
+        min_expiry = now + timedelta(days=30)
+        max_expiry = now + timedelta(days=45)
+
+        params = {
+            "symbol": "IBIT",
+            "chainType": "CALLPUT",
+            "includeWeekly": "false",
+            "skipAdjusted": "true",
+            "optionCategory": "STANDARD",
+        }
+
+        response = self._request("GET", "/v1/market/optionchains", params=params)
+
+        option_pairs = response.get("OptionChainResponse", {}).get("OptionPair", [])
+        if isinstance(option_pairs, dict):
+            option_pairs = [option_pairs]
+
+        contracts: List[Dict[str, Any]] = []
+
+        for pair in option_pairs:
+            for option_key, option_type in (("Call", "CALL"), ("Put", "PUT")):
+                option = pair.get(option_key)
+                if not option:
+                    continue
+
+                # Freshness check — T-01-02: reject stale quotes
+                timestamp_epoch = option.get("timeStamp", 0)
+                age_seconds = time.time() - timestamp_epoch
+                if age_seconds > QUOTE_FRESHNESS_SECONDS:
+                    raise ETradeAPIError(
+                        f"Stale options quote for {option.get('symbol', 'unknown')}: "
+                        f"{age_seconds:.0f}s old (max {QUOTE_FRESHNESS_SECONDS}s)"
+                    )
+
+                # Parse expiry — T-01-03: use .get() with defaults, skip bad data
+                expiry_year = int(option.get("expiryYear", 0))
+                expiry_month = int(option.get("expiryMonth", 0))
+                expiry_day = int(option.get("expiryDay", 0))
+                if not (expiry_year and expiry_month and expiry_day):
+                    continue
+
+                expiry_date = datetime(expiry_year, expiry_month, expiry_day)
+
+                # DTE filter: 30-45 days only
+                min_naive = min_expiry.replace(tzinfo=None)
+                max_naive = max_expiry.replace(tzinfo=None)
+                if not (min_naive <= expiry_date <= max_naive):
+                    continue
+
+                dte = (expiry_date - now.replace(tzinfo=None)).days
+
+                greeks = option.get("OptionGreeks", {})
+
+                contracts.append(
+                    {
+                        "symbol": option.get("symbol", ""),
+                        "option_type": option_type,
+                        "strike": float(option.get("strikePrice", 0)),
+                        "expiry_year": expiry_year,
+                        "expiry_month": expiry_month,
+                        "expiry_day": expiry_day,
+                        "expiry_date": expiry_date.date(),
+                        "dte": dte,
+                        "bid": float(option.get("bid", 0)),
+                        "ask": float(option.get("ask", 0)),
+                        "last": float(option.get("lastPrice", 0)),
+                        "open_interest": int(option.get("openInterest", 0)),
+                        "delta": float(greeks.get("delta", 0)),
+                        "gamma": float(greeks.get("gamma", 0)),
+                        "theta": float(greeks.get("theta", 0)),
+                        "vega": float(greeks.get("vega", 0)),
+                        "iv": float(greeks.get("iv", 0)),
+                        "quote_timestamp": int(timestamp_epoch),
+                    }
+                )
+
+        # Log only contract count — T-01-01: do not log raw API response
+        logger.info(f"get_ibit_options_chain: fetched {len(contracts)} contracts (30-45 DTE)")
+        return contracts
+
+    # ==================== Options Order Methods ====================
+
+    def _build_options_order_request(
+        self,
+        symbol: str,
+        option_type: str,
+        expiry_year: int,
+        expiry_month: int,
+        expiry_day: int,
+        strike_price: float,
+        order_action: str,
+        quantity: int,
+        limit_price: float,
+        preview: bool,
+    ) -> Dict[str, Any]:
+        """Build options order request payload (OPTN security type). Limit orders only."""
+        order = {
+            "allOrNone": "false",
+            "priceType": "LIMIT",
+            "limitPrice": limit_price,
+            "orderTerm": "GOOD_FOR_DAY",
+            "marketSession": "REGULAR",
+            "Instrument": [
+                {
+                    "Product": {
+                        "securityType": "OPTN",
+                        "symbol": symbol,
+                        "callPut": option_type,
+                        "expiryYear": str(expiry_year),
+                        "expiryMonth": str(expiry_month),
+                        "expiryDay": str(expiry_day),
+                        "strikePrice": str(strike_price),
+                    },
+                    "orderAction": order_action,
+                    "quantityType": "QUANTITY",
+                    "quantity": quantity,
+                }
+            ],
+        }
+
+        key = "PreviewOrderRequest" if preview else "PlaceOrderRequest"
+        return {
+            key: {
+                "orderType": "OPTN",
+                "clientOrderId": _make_client_order_id("OPTN"),
+                "Order": [order],
+            }
+        }
+
+    def preview_options_order(
+        self,
+        account_id_key: str,
+        symbol: str,
+        option_type: str,
+        expiry_year: int,
+        expiry_month: int,
+        expiry_day: int,
+        strike_price: float,
+        order_action: str,
+        quantity: int,
+        limit_price: float,
+    ) -> Dict[str, Any]:
+        """Preview an options order. Returns preview with estimated cost and PreviewIds."""
+        order_data = self._build_options_order_request(
+            symbol,
+            option_type,
+            expiry_year,
+            expiry_month,
+            expiry_day,
+            strike_price,
+            order_action,
+            quantity,
+            limit_price,
+            preview=True,
+        )
+        response = self._request(
+            "POST", f"/v1/accounts/{account_id_key}/orders/preview", json_data=order_data
+        )
+        return response.get("PreviewOrderResponse", {})
+
+    def place_options_order(
+        self,
+        account_id_key: str,
+        symbol: str,
+        option_type: str,
+        expiry_year: int,
+        expiry_month: int,
+        expiry_day: int,
+        strike_price: float,
+        order_action: str,
+        quantity: int,
+        limit_price: float,
+        preview_ids: Optional[List[Dict]] = None,
+    ) -> Dict[str, Any]:
+        """Place an options order. Limit orders only. Use preview_ids from preview_options_order() when available."""
+        order_data = self._build_options_order_request(
+            symbol,
+            option_type,
+            expiry_year,
+            expiry_month,
+            expiry_day,
+            strike_price,
+            order_action,
+            quantity,
+            limit_price,
+            preview=False,
+        )
+        if preview_ids:
+            order_data["PlaceOrderRequest"]["PreviewIds"] = preview_ids
+        response = self._request(
+            "POST", f"/v1/accounts/{account_id_key}/orders/place", json_data=order_data
+        )
+        return response.get("PlaceOrderResponse", {})
+
+    def get_options_positions(self, account_id_key: str) -> List[Dict[str, Any]]:
+        """Get current options positions from portfolio. Filters for OPTN securityType."""
+        all_positions = self.get_account_positions(account_id_key)
+        options = []
+        for pos in all_positions:
+            product = pos.get("Product", {})
+            if product.get("securityType") == "OPTN":
+                options.append(
+                    {
+                        "symbol": product.get("symbol"),
+                        "option_type": product.get("callPut"),
+                        "strike": float(product.get("strikePrice", 0)),
+                        "expiry_year": int(product.get("expiryYear", 0)),
+                        "expiry_month": int(product.get("expiryMonth", 0)),
+                        "expiry_day": int(product.get("expiryDay", 0)),
+                        "quantity": float(pos.get("quantity", 0)),
+                        "position_type": pos.get("positionType"),
+                        "market_value": float(pos.get("marketValue", 0)),
+                        "total_gain": float(pos.get("totalGain", 0)),
+                        "osi_key": product.get("osiKey"),
+                    }
+                )
+        return options
+
     # ==================== Order Methods ====================
 
     def preview_order(
@@ -684,7 +979,7 @@ class ETradeClient:
         return {
             key: {
                 "orderType": "EQ",
-                "clientOrderId": f"IBIT_{get_et_now().strftime('%Y%m%d%H%M%S')}",
+                "clientOrderId": _make_client_order_id("IBIT"),
                 "Order": [order],
             }
         }
@@ -719,6 +1014,7 @@ class MockETradeClient:
         self.positions: Dict[str, Dict] = {}
         self.orders: List[Dict] = []
         self._mock_prices: Dict[str, float] = {"IBIT": 50.0}
+        self._options_positions: Dict[str, Dict] = {}
 
     def is_authenticated(self) -> bool:
         return True
@@ -748,10 +1044,24 @@ class MockETradeClient:
         return self.cash
 
     def get_account_positions(self, account_id_key: str) -> List[Dict[str, Any]]:
+        """Return equity positions in the same shape as the real E*TRADE API.
+
+        Real E*TRADE returns positions with nested `Product` objects:
+          {"Product": {"symbol": "IBIT", "securityType": "EQ"}, "quantity": 100, ...}
+
+        The wheel strategy's assignment detection reads
+        `p["Product"]["symbol"]` and `p["Product"]["securityType"]`, so the
+        mock MUST use this same shape — otherwise paper mode assignment
+        detection fails silently (reports OTM expiry instead of assignment).
+        """
         positions = []
         for symbol, data in self.positions.items():
             positions.append(
                 {
+                    "Product": {
+                        "symbol": symbol,
+                        "securityType": "EQ",
+                    },
                     "symbolDescription": symbol,
                     "quantity": data["quantity"],
                     "costPerShare": data["cost_basis"],
@@ -786,6 +1096,116 @@ class MockETradeClient:
             "volume": 1000000,
             "change_pct": -0.5,
         }
+
+    # ==================== Options Chain Methods ====================
+
+    def _normal_cdf(self, x: float) -> float:
+        """Normal CDF approximation using Abramowitz & Stegun formula."""
+        t = 1.0 / (1.0 + 0.2316419 * abs(x))
+        d = 0.3989422804014327  # 1/sqrt(2*pi)
+        p = (
+            d
+            * math.exp(-x * x / 2.0)
+            * (
+                t
+                * (
+                    0.319381530
+                    + t * (-0.356563782 + t * (1.781477937 + t * (-1.821255978 + t * 1.330274429)))
+                )
+            )
+        )
+        return 1.0 - p if x >= 0 else p
+
+    def _simulate_greeks(
+        self, spot: float, strike: float, dte: int, option_type: str, iv: float = 0.40
+    ) -> Dict[str, float]:
+        """Simulate realistic Black-Scholes Greeks for a given option."""
+        t = max(dte, 1) / 365.0
+        d1 = (math.log(spot / strike) + (0.05 + iv**2 / 2) * t) / (iv * math.sqrt(t))
+
+        if option_type == "CALL":
+            delta = self._normal_cdf(d1)
+        else:  # PUT
+            delta = self._normal_cdf(d1) - 1.0
+
+        gamma = 0.3989422804014327 * math.exp(-(d1**2) / 2.0) / (spot * iv * math.sqrt(t))
+
+        premium = max(spot * iv * math.sqrt(t) * 0.4, 0.10)
+        theta = -(premium / max(dte, 1)) * 0.5
+        vega = spot * math.sqrt(t) * 0.3989422804014327 * math.exp(-(d1**2) / 2.0) / 100.0
+
+        return {
+            "delta": delta,
+            "gamma": gamma,
+            "theta": theta,
+            "vega": vega,
+            "iv": iv,
+        }
+
+    def get_ibit_options_chain(self) -> List[Dict[str, Any]]:
+        """Return simulated IBIT options chain for 30-45 DTE contracts.
+
+        Uses Black-Scholes approximation for realistic Greeks.
+        Raises ETradeAPIError if _force_stale_quotes is True.
+        """
+        spot = self._mock_prices.get("IBIT", 50.0)
+
+        if getattr(self, "_force_stale_quotes", False):
+            raise ETradeAPIError("Stale options quote for IBIT:MOCK: 120s old (max 60s)")
+
+        dte = 35  # Middle of 30-45 DTE range
+        now = get_et_now()
+        expiry_date = (now + timedelta(days=dte)).date()
+        quote_timestamp = int(time.time())
+
+        contracts: List[Dict[str, Any]] = []
+
+        # Generate strikes from spot-5 to spot+5 in $1 increments (11 strikes)
+        for strike_offset in range(-5, 6):
+            strike = round(spot + strike_offset, 2)
+
+            for option_type in ("PUT", "CALL"):
+                greeks = self._simulate_greeks(spot, strike, dte, option_type, iv=0.40)
+
+                # Build bid/ask from premium approximation
+                premium = abs(greeks["theta"]) * dte * 2
+                bid = round(max(premium - 0.05, 0.01), 2)
+                ask = round(premium + 0.05, 2)
+                last = round(premium, 2)
+
+                # Higher open interest near ATM
+                open_interest = max(100, int(1000 * (1 - abs(spot - strike) / spot)))
+
+                # OSI-style symbol: IBITyymmddX00000000 (strike * 1000, 8 digits)
+                symbol = (
+                    f"IBIT{expiry_date.strftime('%y%m%d')}"
+                    f"{option_type[0]}{int(strike * 1000):08d}"
+                )
+
+                contracts.append(
+                    {
+                        "symbol": symbol,
+                        "option_type": option_type,
+                        "strike": float(strike),
+                        "expiry_year": expiry_date.year,
+                        "expiry_month": expiry_date.month,
+                        "expiry_day": expiry_date.day,
+                        "expiry_date": expiry_date,
+                        "dte": dte,
+                        "bid": float(bid),
+                        "ask": float(ask),
+                        "last": float(last),
+                        "open_interest": open_interest,
+                        "delta": float(greeks["delta"]),
+                        "gamma": float(greeks["gamma"]),
+                        "theta": float(greeks["theta"]),
+                        "vega": float(greeks["vega"]),
+                        "iv": float(greeks["iv"]),
+                        "quote_timestamp": quote_timestamp,
+                    }
+                )
+
+        return contracts
 
     def preview_order(
         self,
@@ -860,6 +1280,156 @@ class MockETradeClient:
             "OrderIds": [{"orderId": order_id}],
             "Order": [{"orderId": order_id, "status": "EXECUTED"}],
         }
+
+    # ==================== Options Order Methods ====================
+
+    def _build_options_order_request(
+        self,
+        symbol: str,
+        option_type: str,
+        expiry_year: int,
+        expiry_month: int,
+        expiry_day: int,
+        strike_price: float,
+        order_action: str,
+        quantity: int,
+        limit_price: float,
+        preview: bool,
+    ) -> Dict[str, Any]:
+        """Build options order request payload (OPTN security type). Limit orders only."""
+        order = {
+            "allOrNone": "false",
+            "priceType": "LIMIT",
+            "limitPrice": limit_price,
+            "orderTerm": "GOOD_FOR_DAY",
+            "marketSession": "REGULAR",
+            "Instrument": [
+                {
+                    "Product": {
+                        "securityType": "OPTN",
+                        "symbol": symbol,
+                        "callPut": option_type,
+                        "expiryYear": str(expiry_year),
+                        "expiryMonth": str(expiry_month),
+                        "expiryDay": str(expiry_day),
+                        "strikePrice": str(strike_price),
+                    },
+                    "orderAction": order_action,
+                    "quantityType": "QUANTITY",
+                    "quantity": quantity,
+                }
+            ],
+        }
+
+        key = "PreviewOrderRequest" if preview else "PlaceOrderRequest"
+        return {
+            key: {
+                "orderType": "OPTN",
+                "clientOrderId": _make_client_order_id("OPTN"),
+                "Order": [order],
+            }
+        }
+
+    def preview_options_order(
+        self,
+        account_id_key: str,
+        symbol: str,
+        option_type: str,
+        expiry_year: int,
+        expiry_month: int,
+        expiry_day: int,
+        strike_price: float,
+        order_action: str,
+        quantity: int,
+        limit_price: float,
+    ) -> Dict[str, Any]:
+        """Preview an options order. Returns preview with estimated cost and PreviewIds."""
+        total = limit_price * quantity * 100
+        return {
+            "PreviewIds": [{"previewId": f"mock_optn_preview_{len(self.orders) + 1:03d}"}],
+            "Order": [{"estimatedTotalAmount": total, "estimatedCommission": 0}],
+        }
+
+    def place_options_order(
+        self,
+        account_id_key: str,
+        symbol: str,
+        option_type: str,
+        expiry_year: int,
+        expiry_month: int,
+        expiry_day: int,
+        strike_price: float,
+        order_action: str,
+        quantity: int,
+        limit_price: float,
+        preview_ids: Optional[List[Dict]] = None,
+    ) -> Dict[str, Any]:
+        """Place an options order. Limit orders only. Use preview_ids from preview_options_order() when available."""
+        order_id = f"MOCK_OPTN_{len(self.orders) + 1:06d}"
+        pos_key = (
+            f"{symbol}_{option_type}_{strike_price}_{expiry_year}{expiry_month:02d}{expiry_day:02d}"
+        )
+
+        if order_action == "SELL_OPEN":
+            premium_received = limit_price * quantity * 100
+            self.cash += premium_received
+            self._options_positions[pos_key] = {
+                "symbol": symbol,
+                "option_type": option_type,
+                "strike": float(strike_price),
+                "expiry_year": expiry_year,
+                "expiry_month": expiry_month,
+                "expiry_day": expiry_day,
+                "quantity": int(quantity),
+                "position_type": "SHORT",
+                "premium_received": float(premium_received),
+                "limit_price": float(limit_price),
+            }
+        elif order_action == "BUY_CLOSE":
+            cost = limit_price * quantity * 100
+            if pos_key not in self._options_positions:
+                raise ETradeAPIError("No position to close")
+            self.cash -= cost
+            del self._options_positions[pos_key]
+
+        order = {
+            "orderId": order_id,
+            "symbol": symbol,
+            "option_type": option_type,
+            "order_action": order_action,
+            "quantity": quantity,
+            "limit_price": limit_price,
+            "status": "EXECUTED",
+            "timestamp": get_et_now().isoformat(),
+        }
+        self.orders.append(order)
+
+        logger.info(
+            f"Mock options order executed: {order_action} {quantity} {symbol} {option_type} {strike_price} @ ${limit_price:.2f}"
+        )
+
+        return {
+            "OrderIds": [{"orderId": order_id}],
+            "Order": [{"orderId": order_id, "status": "EXECUTED"}],
+        }
+
+    def get_options_positions(self, account_id_key: str) -> List[Dict[str, Any]]:
+        """Get current options positions. Returns tracked mock options positions."""
+        return [
+            {
+                "symbol": pos["symbol"],
+                "option_type": pos["option_type"],
+                "strike": pos["strike"],
+                "expiry_year": pos["expiry_year"],
+                "expiry_month": pos["expiry_month"],
+                "expiry_day": pos["expiry_day"],
+                "quantity": pos["quantity"],
+                "position_type": pos["position_type"],
+                "market_value": pos["limit_price"] * pos["quantity"] * 100,
+                "total_gain": 0.0,
+            }
+            for pos in self._options_positions.values()
+        ]
 
 
 def create_etrade_client(

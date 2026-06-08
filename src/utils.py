@@ -59,9 +59,14 @@ def is_market_day(date: Optional[datetime.date] = None) -> bool:
 
 
 def is_market_open() -> bool:
-    """Check if market is currently open (9:30 AM - 4:00 PM ET on weekdays)."""
+    """Check if market is currently open (9:30 AM - 4:00 PM ET on trading days).
+
+    Uses is_trading_day() to reject weekends AND market holidays. Previously
+    used is_market_day() which only checked weekdays, causing the function
+    to report "market open" on holidays like Good Friday or Christmas.
+    """
     now = get_et_now()
-    if not is_market_day(now.date()):
+    if not is_trading_day(now.date()):
         return False
 
     times = get_market_times(now.date())
@@ -71,7 +76,7 @@ def is_market_open() -> bool:
 def is_in_dip_window() -> bool:
     """Check if current time is within the dip buying window (10:00-10:59 AM ET)."""
     now = get_et_now()
-    if not is_market_day(now.date()):
+    if not is_trading_day(now.date()):
         return False
 
     times = get_market_times(now.date())
@@ -97,6 +102,36 @@ def is_friday(date: Optional[datetime.date] = None) -> bool:
     if date is None:
         date = get_et_now().date()
     return date.weekday() == 4
+
+
+def normalize_expiry_date(expiry) -> str:
+    """Convert an expiry value (date, datetime, or string) to ISO string.
+
+    Useful when options chain contracts may return either a ``date`` object
+    (mock client) or a string (real E*TRADE API). Returns a canonical
+    ``YYYY-MM-DD`` string in both cases.
+    """
+    if hasattr(expiry, "isoformat"):
+        return expiry.isoformat()
+    return str(expiry)
+
+
+def parse_expiry_components(expiry_str) -> Tuple[int, int, int]:
+    """Parse an expiry value to ``(year, month, day)``.
+
+    Accepts either an ISO-format string or a ``date``-like object with
+    ``.year``/``.month``/``.day`` attributes.
+
+    Raises:
+        ValueError: If the input can't be parsed.
+    """
+    if isinstance(expiry_str, str) and expiry_str:
+        d = datetime.date.fromisoformat(expiry_str)
+    elif hasattr(expiry_str, "year") and hasattr(expiry_str, "month"):
+        d = expiry_str
+    else:
+        raise ValueError(f"Cannot parse expiry_date: {expiry_str!r}")
+    return d.year, d.month, d.day
 
 
 def calculate_dip_percentage(open_price: float, current_price: float) -> float:
@@ -245,11 +280,45 @@ MARKET_HOLIDAYS = {
 }
 
 
+# The hardcoded holiday set is valid through this year. Queries for dates in
+# later years will log a warning so the stale list is surfaced rather than
+# silently returning False for actual holidays (MD-06 fix).
+MARKET_HOLIDAYS_LAST_YEAR = 2028
+
+
 def is_market_holiday(date: Optional[datetime.date] = None) -> bool:
-    """Check if date is a market holiday."""
+    """Check if date is a market holiday.
+
+    Returns True if the date is in the hardcoded MARKET_HOLIDAYS set.
+    Logs a warning (once per year, not on every call) when queried for a
+    date in a year beyond MARKET_HOLIDAYS_LAST_YEAR — the answer may be
+    incorrect because the hardcoded list has not been refreshed.
+    """
     if date is None:
         date = get_et_now().date()
+
+    if date.year > MARKET_HOLIDAYS_LAST_YEAR:
+        _warn_holiday_list_stale(date.year)
+
     return date in MARKET_HOLIDAYS
+
+
+# Module-level cache so we only warn once per (process, year) combination
+_HOLIDAY_WARN_CACHE: set = set()
+
+
+def _warn_holiday_list_stale(year: int) -> None:
+    """Emit a one-time warning that the hardcoded holiday list is stale."""
+    if year in _HOLIDAY_WARN_CACHE:
+        return
+    _HOLIDAY_WARN_CACHE.add(year)
+    logger.warning(
+        "is_market_holiday queried for year %d but MARKET_HOLIDAYS only has "
+        "entries through %d — the answer may be incorrect. Please refresh "
+        "MARKET_HOLIDAYS in src/utils.py or integrate a market calendar package.",
+        year,
+        MARKET_HOLIDAYS_LAST_YEAR,
+    )
 
 
 def is_trading_day(date: Optional[datetime.date] = None) -> bool:

@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Optional, Tuple
 from telegram import Update
 from telegram.ext import ContextTypes
 
+from ..utils import get_et_now
 from .utils import escape_markdown
 
 if TYPE_CHECKING:
@@ -147,8 +148,8 @@ class BacktestCommandsMixin:
             return calendar.monthrange(year, month)[1]
 
         if not args:
-            # Default to current year
-            now = datetime.now()
+            # Default to current year (ET for consistency with trading calendar)
+            now = get_et_now()
             return (
                 datetime(now.year, 1, 1),
                 datetime(now.year, 12, 31),
@@ -214,7 +215,10 @@ class BacktestCommandsMixin:
         if match:
             num = int(match.group(1))
             unit = match.group(2)
-            end_date = datetime.now()
+            # Use ET for consistency with trading calendar; return naive datetime
+            # so the result matches the naive objects created elsewhere in this method
+            _et = get_et_now()
+            end_date = datetime(_et.year, _et.month, _et.day, _et.hour, _et.minute)
 
             if "year" in unit:
                 start_date = datetime(end_date.year - num, end_date.month, end_date.day)
@@ -230,7 +234,8 @@ class BacktestCommandsMixin:
         if shorthand:
             num = int(shorthand.group(1))
             unit = shorthand.group(2)
-            end_date = datetime.now()
+            _et = get_et_now()
+            end_date = datetime(_et.year, _et.month, _et.day, _et.hour, _et.minute)
 
             if unit == "y":
                 start_date = datetime(end_date.year - num, end_date.month, end_date.day)

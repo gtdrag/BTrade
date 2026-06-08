@@ -7,8 +7,7 @@ This is the entry point for the modular Telegram bot.
 import asyncio
 import logging
 import os
-from datetime import datetime
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
@@ -19,15 +18,19 @@ from telegram.ext import (
 )
 
 from ..async_utils import run_sync_in_executor
+from ..utils import get_et_now, normalize_expiry_date
 from .analysis_commands import AnalysisCommandsMixin
+from .approval_flow import ApprovalFlow
 from .auth_commands import AuthCommandsMixin
 from .backtest_commands import BacktestCommandsMixin
 from .trading_commands import TradingCommandsMixin
 from .utils import ApprovalResult, TradeApprovalRequest, escape_markdown
+from .wheel_commands import WheelCommandsMixin
 
 if TYPE_CHECKING:
     from ..smart_scheduler import SmartScheduler
     from ..trading_bot import TradingBot
+    from ..wheel_strategy import CallSignal, PutSignal
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +40,7 @@ class TelegramBot(
     AnalysisCommandsMixin,
     AuthCommandsMixin,
     BacktestCommandsMixin,
+    WheelCommandsMixin,
 ):
     """
     Telegram bot for trade notifications and approval.
@@ -83,6 +87,164 @@ class TelegramBot(
         self._approval_result: Optional[ApprovalResult] = None
         self._pending_sellall = None  # Stores pending sellall confirmation state
         self._is_running = False
+
+        # Options approval flows — each flow (put/call/btc/roll) has its own
+        # event/result/callback_id so multiple approvals can be pending without
+        # collision. See src/telegram/approval_flow.py for the container class.
+        # Replaces 16 loose instance attributes flagged by the adversarial
+        # architecture review as "approval state explosion".
+        self._put_approval = ApprovalFlow()
+        self._call_approval = ApprovalFlow()
+        self._btc_approval = ApprovalFlow()
+        self._roll_approval = ApprovalFlow()
+
+    @staticmethod
+    def _extract_callback_id(data: str, prefix: str) -> Optional[str]:
+        """Extract the callback_id suffix from a callback_data string.
+
+        Examples:
+            _extract_callback_id("put_approve_123456", "put_approve_") -> "123456"
+            _extract_callback_id("put_alt_48.0_123456", "put_alt_") -> last numeric token
+        """
+        if not data.startswith(prefix):
+            return None
+        suffix = data[len(prefix) :]
+        return suffix if suffix else None
+
+    def _is_stale_callback(self, data: str, expected_id: Optional[str]) -> bool:
+        """Return True if the callback data's trailing id does NOT match the
+        currently-pending approval's callback_id, or if no approval is pending.
+
+        Stale buttons are left over from timed-out or completed approval flows.
+        Tapping them must not trigger actions on newer approvals.
+        """
+        if expected_id is None:
+            return True  # no approval pending — any tap is stale
+        # Extract trailing id from the data — last underscore-separated token
+        tail = data.rsplit("_", 1)[-1]
+        return tail != expected_id
+
+    async def _wait_for_approval_result(
+        self,
+        flow: ApprovalFlow,
+        timeout_message: str,
+    ) -> Optional[str]:
+        """Wait for an approval flow's event with timeout.
+
+        Consolidates the set-event / wait_for / timeout / cleanup pattern
+        that was previously duplicated across request_put_approval,
+        request_call_approval, request_profit_take_approval, and
+        request_roll_approval.
+
+        NOTE (MD-05 deferred): asyncio.Event is bound to a specific event
+        loop in Python < 3.10. If `run_async()` in the scheduler creates
+        a fresh loop per call and the Telegram polling loop is different,
+        the cross-loop .set() is technically undefined. Fixing this
+        properly requires either (a) an asyncio.Future + call_soon_threadsafe
+        pattern with the caller's loop explicitly tracked, or (b) a
+        threading.Event + run_in_executor pattern — both of which require
+        reworking the ~30+ test sites that patch `asyncio.wait_for`. The
+        current asyncio.Event implementation works in practice because
+        Python 3.9's Event.set() is defensively loose about loop binding
+        when no waiters have been scheduled yet, and the polling loop
+        runs in the main thread alongside the scheduler's run_async.
+        Leaving as-is until MD-05 can be paired with a test-layer refresh.
+
+        Returns the flow's result string on success, or None if the wait
+        timed out (in which case a timeout notification is sent). In both
+        outcomes, the flow's callback_id is cleared so subsequent stale
+        button taps are rejected by _is_stale_callback.
+        """
+        flow.event = asyncio.Event()
+        flow.result = None
+
+        try:
+            await asyncio.wait_for(
+                flow.event.wait(),
+                timeout=self.approval_timeout,
+            )
+        except asyncio.TimeoutError:
+            flow.callback_id = None
+            await self.send_message(timeout_message)
+            return None
+
+        result = flow.result
+        flow.callback_id = None
+        return result
+
+    def _build_alt_signal_from_chain(
+        self,
+        chain: List[Dict],
+        option_type: str,
+        alt_strike: float,
+        original_signal: Any,
+    ) -> Optional[Any]:
+        """Rebuild a PutSignal or CallSignal from a chain entry at alt_strike.
+
+        Used when the user selects an alternative strike from the adjust
+        flow — we need to construct a fresh signal from the matching chain
+        entry, falling back to the original signal's values for any missing
+        fields.
+
+        Returns None if no matching chain entry is found (caller should
+        keep the original signal).
+
+        The fields shared by PutSignal and CallSignal (OptionSignal base)
+        are identical. Only the subclass-specific fields differ:
+          - PutSignal: max_risk, pullback_pct
+          - CallSignal: total_premium, cost_basis
+        """
+        matching = next(
+            (
+                c
+                for c in (chain or [])
+                if c.get("option_type") == option_type
+                and abs(float(c.get("strike", 0)) - alt_strike) < 0.01
+            ),
+            None,
+        )
+        if not matching:
+            return None
+
+        expiry_date = normalize_expiry_date(
+            matching.get("expiry_date", original_signal.expiry_date)
+        )
+
+        # Shared OptionSignal fields (kwargs)
+        common = dict(
+            strike=float(matching["strike"]),
+            expiry_date=expiry_date,
+            expiry_year=int(matching.get("expiry_year", original_signal.expiry_year)),
+            expiry_month=int(matching.get("expiry_month", original_signal.expiry_month)),
+            expiry_day=int(matching.get("expiry_day", original_signal.expiry_day)),
+            delta=float(matching.get("delta", original_signal.delta)),
+            premium=float(matching.get("bid", original_signal.premium)),
+            dte=int(matching.get("dte", original_signal.dte)),
+            symbol=str(matching.get("symbol", original_signal.symbol)),
+            iv=float(matching.get("iv", original_signal.iv)),
+            gamma=float(matching.get("gamma", original_signal.gamma)),
+            theta=float(matching.get("theta", original_signal.theta)),
+            vega=float(matching.get("vega", original_signal.vega)),
+        )
+
+        if option_type == "PUT":
+            from ..wheel_strategy import PutSignal  # local import — avoid circular
+
+            return PutSignal(
+                **common,
+                max_risk=float(matching["strike"]) * 100.0,
+                pullback_pct=original_signal.pullback_pct,
+            )
+        elif option_type == "CALL":
+            from ..wheel_strategy import CallSignal  # local import — avoid circular
+
+            return CallSignal(
+                **common,
+                total_premium=float(matching.get("bid", original_signal.premium)) * 100,
+                cost_basis=original_signal.cost_basis,
+            )
+        else:
+            raise ValueError(f"Unsupported option_type: {option_type!r}")
 
     def _is_authorized(self, update: Update) -> bool:
         """
@@ -157,6 +319,10 @@ class TelegramBot(
         self._app.add_handler(CommandHandler("backtest", self._cmd_backtest))
         self._app.add_handler(CommandHandler("simulate", self._cmd_simulate))
 
+        # Add command handlers - wheel strategy (from WheelCommandsMixin)
+        self._app.add_handler(CommandHandler("wheel", self._cmd_wheel))
+        self._app.add_handler(CommandHandler("wheelmode", self._cmd_wheelmode))
+
         # Add callback handler for inline buttons
         self._app.add_handler(CallbackQueryHandler(self._handle_callback))
 
@@ -168,7 +334,7 @@ class TelegramBot(
 
     async def _error_handler(self, update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle errors that occur during polling/updates."""
-        logger.error(f"Telegram bot error: {context.error}")
+        logger.error("Telegram bot error: %s", context.error)
 
         # Log the traceback for debugging
         if context.error:
@@ -179,7 +345,7 @@ class TelegramBot(
                     type(context.error), context.error, context.error.__traceback__
                 )
             )
-            logger.error(f"Telegram error traceback:\n{tb_string}")
+            logger.error("Telegram error traceback:\n%s", tb_string)
 
         # Try to notify about the error (but don't fail if this also fails)
         try:
@@ -193,7 +359,7 @@ class TelegramBot(
                     parse_mode="Markdown",
                 )
         except Exception as e:
-            logger.warning(f"Could not send error notification: {e}")
+            logger.warning("Could not send error notification: %s", e)
 
     async def start_polling(self):
         """Start the bot in polling mode (for development/testing)."""
@@ -219,11 +385,17 @@ class TelegramBot(
     # =========================================================================
 
     async def _cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /start command - shows chat_id for setup (available to anyone)."""
-        chat_id = update.effective_chat.id
+        """Handle /start command.
+
+        Authorized users see their chat_id and command list. Unauthorized
+        users get a generic "not authorized" message — we no longer echo
+        their chat_id or the TELEGRAM_CHAT_ID setup instructions to strangers
+        (LO-02 fix).
+        """
         is_authorized = self._is_authorized(update)
 
         if is_authorized:
+            chat_id = update.effective_chat.id
             await update.message.reply_text(
                 f"🤖 *IBIT Trading Bot*\n\n"
                 f"✅ You are authorized\n"
@@ -234,14 +406,14 @@ class TelegramBot(
                 parse_mode="Markdown",
             )
         else:
-            # Show chat_id for setup purposes, but indicate not authorized
+            # Generic response to strangers — no chat_id echo, no setup hints
             await update.message.reply_text(
-                f"🤖 *IBIT Trading Bot*\n\n"
-                f"🚫 Not authorized for this bot\n\n"
-                f"Your Chat ID: `{chat_id}`\n\n"
-                f"If you are the owner, add this to your environment:\n"
-                f"`TELEGRAM_CHAT_ID={chat_id}`",
+                "🚫 Not authorized.",
                 parse_mode="Markdown",
+            )
+            logger.warning(
+                "Unauthorized /start attempt from chat_id=%s",
+                update.effective_chat.id,
             )
 
     async def _cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -354,7 +526,7 @@ class TelegramBot(
             await self._send_unauthorized_response(update)
             return
 
-        callback_id = f"test_{datetime.now().strftime('%H%M%S')}"
+        callback_id = f"test_{get_et_now().strftime('%H%M%S')}"
 
         message = (
             "🧪 TEST APPROVAL REQUEST\n\n"
@@ -381,20 +553,78 @@ class TelegramBot(
             parse_mode="Markdown",
             reply_markup=reply_markup,
         )
-        logger.info(f"Test approval request sent with callback_id: {callback_id}")
+        logger.info("Test approval request sent with callback_id: %s", callback_id)
 
     # =========================================================================
     # Callback Handlers
     # =========================================================================
 
+    # Dispatch table for callback prefixes. Order matters: longer / more
+    # specific prefixes MUST come before shorter prefixes of the same family
+    # (e.g. `put_alt_reject_` before `put_alt_`, otherwise the shorter prefix
+    # would swallow rejection callbacks). A sanity assertion in _handle_callback
+    # enforces this invariant at runtime so accidental reorderings fail loudly
+    # instead of silently routing to the wrong handler.
+    _CALLBACK_DISPATCH: Tuple[Tuple[str, str], ...] = (
+        ("sellall_confirm_", "_cb_sellall"),
+        ("sellall_cancel_", "_cb_sellall"),
+        # Put flow — put_alt_reject_ before put_alt_, put_alt_ before put_*
+        ("put_alt_reject_", "_cb_put_alt_reject"),
+        ("put_approve_", "_cb_put_approve"),
+        ("put_adjust_", "_cb_put_adjust"),
+        ("put_reject_", "_cb_put_reject"),
+        ("put_alt_", "_cb_put_alt"),
+        # Call flow — same ordering as put
+        ("call_alt_reject_", "_cb_call_alt_reject"),
+        ("call_approve_", "_cb_call_approve"),
+        ("call_adjust_", "_cb_call_adjust"),
+        ("call_reject_", "_cb_call_reject"),
+        ("call_alt_", "_cb_call_alt"),
+        # BTC / roll profit management
+        ("btc_approve_", "_cb_btc_approve"),
+        ("btc_reject_", "_cb_btc_reject"),
+        ("roll_approve_", "_cb_roll_approve"),
+        ("roll_reject_", "_cb_roll_reject"),
+        # Parameter recommendation
+        ("apply_param_", "_cb_param"),
+        ("reject_param_", "_cb_param"),
+        # Intraday (generic, must be LAST — matches by bare approve_/reject_)
+        ("approve_", "_cb_intraday_approve"),
+        ("reject_", "_cb_intraday_reject"),
+    )
+
+    @classmethod
+    def _validate_dispatch_order(cls) -> None:
+        """Enforce that overlapping callback prefixes are ordered correctly.
+
+        Specifically, if prefix A is a strict prefix of prefix B, B must come
+        first. Otherwise A would always match first and swallow B's callbacks.
+        Runs once on class load via a module-level call.
+        """
+        entries = cls._CALLBACK_DISPATCH
+        for i, (prefix_a, _) in enumerate(entries):
+            for j in range(i + 1, len(entries)):
+                prefix_b, _ = entries[j]
+                if prefix_b.startswith(prefix_a) and prefix_b != prefix_a:
+                    raise AssertionError(
+                        f"_CALLBACK_DISPATCH ordering bug: '{prefix_b}' must come "
+                        f"before '{prefix_a}' (shorter prefix matches first and "
+                        f"would swallow longer-prefix callbacks)"
+                    )
+
     async def _handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle inline button callbacks."""
+        """Handle inline button callbacks via a dispatch table.
+
+        Routes the callback data to the first matching handler in
+        _CALLBACK_DISPATCH. See the table definition for ordering rules.
+        """
         # Security: Verify the callback is from an authorized user
         if not self._is_authorized(update):
             query = update.callback_query
             await query.answer("🚫 Unauthorized", show_alert=True)
             logger.warning(
-                f"Unauthorized callback attempt from chat_id: {update.effective_chat.id}"
+                "Unauthorized callback attempt from chat_id: %s",
+                update.effective_chat.id,
             )
             return
 
@@ -402,65 +632,1149 @@ class TelegramBot(
         await query.answer()
 
         data = query.data
-        logger.info(f"Received callback: {data}")
+        logger.info("Received callback: %s", data)
 
-        # Handle sellall confirmation/cancellation
-        if data.startswith("sellall_confirm_") or data.startswith("sellall_cancel_"):
-            await self._handle_sellall_callback(query, data)
+        for prefix, handler_name in self._CALLBACK_DISPATCH:
+            if data.startswith(prefix):
+                handler = getattr(self, handler_name)
+                await handler(query, data)
+                return
+
+        logger.warning("No callback handler matched for data: %s", data)
+
+    # -------------------------------------------------------------
+    # Callback handlers — one per dispatch entry. Each receives the
+    # query object and the raw data string.
+    # -------------------------------------------------------------
+
+    async def _cb_sellall(self, query: Any, data: str) -> None:
+        """Handle sellall_confirm_ and sellall_cancel_."""
+        await self._handle_sellall_callback(query, data)
+
+    # -------------------- Put flow --------------------
+
+    async def _cb_put_approve(self, query: Any, data: str) -> None:
+        if self._is_stale_callback(data, self._put_approval.callback_id):
+            logger.warning("Ignoring stale put_approve callback: %s", data)
+            await query.edit_message_text(
+                text="⏱ *EXPIRED* — This button is from an older approval request.",
+                parse_mode="Markdown",
+            )
             return
+        self._put_approval.result = "approved"
+        await query.edit_message_text(
+            text=query.message.text + "\n\n✅ *APPROVED* — Executing put order...",
+            parse_mode="Markdown",
+        )
+        if self._put_approval.event:
+            self._put_approval.event.set()
 
-        # Check if this is a test callback
+    async def _cb_put_adjust(self, query: Any, data: str) -> None:
+        if self._is_stale_callback(data, self._put_approval.callback_id):
+            logger.warning("Ignoring stale put_adjust callback: %s", data)
+            await query.edit_message_text(
+                text="⏱ *EXPIRED* — This button is from an older approval request.",
+                parse_mode="Markdown",
+            )
+            return
+        await self._handle_put_adjust(query, data)
+
+    async def _cb_put_alt_reject(self, query: Any, data: str) -> None:
+        if self._is_stale_callback(data, self._put_approval.callback_id):
+            logger.warning("Ignoring stale put_alt_reject callback: %s", data)
+            return
+        self._put_approval.result = "rejected"
+        await query.edit_message_text(
+            text="❌ All alternatives rejected. Put suggestion cancelled.",
+            parse_mode="Markdown",
+        )
+        if self._put_approval.event:
+            self._put_approval.event.set()
+
+    async def _cb_put_alt(self, query: Any, data: str) -> None:
+        # User selected an alternative strike: put_alt_{strike}_{callback_id}
+        parts = data.split("_")
+        try:
+            selected_strike = float(parts[2])
+            self._put_approval.result = str(selected_strike)
+            await query.edit_message_text(
+                text=f"✅ *APPROVED* — Executing put at strike ${selected_strike}...",
+                parse_mode="Markdown",
+            )
+            if self._put_approval.event:
+                self._put_approval.event.set()
+        except (IndexError, ValueError) as e:
+            logger.error("Failed to parse put_alt callback data '%s': %s", data, e)
+            await query.edit_message_text(
+                text="❌ Error parsing selection. Put suggestion cancelled.",
+                parse_mode="Markdown",
+            )
+            self._put_approval.result = "rejected"
+            if self._put_approval.event:
+                self._put_approval.event.set()
+
+    async def _cb_put_reject(self, query: Any, data: str) -> None:
+        if self._is_stale_callback(data, self._put_approval.callback_id):
+            logger.warning("Ignoring stale put_reject callback: %s", data)
+            return
+        self._put_approval.result = "rejected"
+        await query.edit_message_text(
+            text=query.message.text + "\n\n❌ *REJECTED* — Put suggestion cancelled.",
+            parse_mode="Markdown",
+        )
+        if self._put_approval.event:
+            self._put_approval.event.set()
+
+    # -------------------- Call flow --------------------
+
+    async def _cb_call_approve(self, query: Any, data: str) -> None:
+        if self._is_stale_callback(data, self._call_approval.callback_id):
+            logger.warning("Ignoring stale call_approve callback: %s", data)
+            await query.edit_message_text(
+                text="⏱ EXPIRED — This button is from an older approval request.",
+                parse_mode="Markdown",
+            )
+            return
+        self._call_approval.result = "approved"
+        await query.edit_message_text(
+            text=query.message.text + "\n\n--- Approved --- Executing call order...",
+            parse_mode="Markdown",
+        )
+        if self._call_approval.event:
+            self._call_approval.event.set()
+
+    async def _cb_call_adjust(self, query: Any, data: str) -> None:
+        if self._is_stale_callback(data, self._call_approval.callback_id):
+            logger.warning("Ignoring stale call_adjust callback: %s", data)
+            return
+        await self._handle_call_adjust(query, data)
+
+    async def _cb_call_alt_reject(self, query: Any, data: str) -> None:
+        if self._is_stale_callback(data, self._call_approval.callback_id):
+            logger.warning("Ignoring stale call_alt_reject callback: %s", data)
+            return
+        self._call_approval.result = "rejected"
+        await query.edit_message_text(
+            text="All alternatives rejected. Call suggestion cancelled.",
+            parse_mode="Markdown",
+        )
+        if self._call_approval.event:
+            self._call_approval.event.set()
+
+    async def _cb_call_alt(self, query: Any, data: str) -> None:
+        # User selected an alternative strike: call_alt_{strike}_{callback_id}
+        parts = data.split("_")
+        try:
+            selected_strike = float(parts[2])
+            self._call_approval.result = str(selected_strike)
+            await query.edit_message_text(
+                text=f"--- Approved --- Executing call at strike ${selected_strike}...",
+                parse_mode="Markdown",
+            )
+            if self._call_approval.event:
+                self._call_approval.event.set()
+        except (IndexError, ValueError) as e:
+            logger.error("Failed to parse call_alt callback data '%s': %s", data, e)
+            await query.edit_message_text(
+                text="Error parsing selection. Call suggestion cancelled.",
+                parse_mode="Markdown",
+            )
+            self._call_approval.result = "rejected"
+            if self._call_approval.event:
+                self._call_approval.event.set()
+
+    async def _cb_call_reject(self, query: Any, data: str) -> None:
+        if self._is_stale_callback(data, self._call_approval.callback_id):
+            logger.warning("Ignoring stale call_reject callback: %s", data)
+            return
+        self._call_approval.result = "rejected"
+        await query.edit_message_text(
+            text=query.message.text + "\n\n--- Rejected --- Call suggestion cancelled.",
+            parse_mode="Markdown",
+        )
+        if self._call_approval.event:
+            self._call_approval.event.set()
+
+    # -------------------- BTC flow --------------------
+
+    async def _cb_btc_approve(self, query: Any, data: str) -> None:
+        if self._is_stale_callback(data, self._btc_approval.callback_id):
+            logger.warning("Ignoring stale btc_approve callback: %s", data)
+            await query.answer("Expired — newer BTC request is active")
+            return
+        self._btc_approval.result = "approved"
+        if self._btc_approval.event:
+            self._btc_approval.event.set()
+        await query.answer("Buy-to-close approved")
+
+    async def _cb_btc_reject(self, query: Any, data: str) -> None:
+        if self._is_stale_callback(data, self._btc_approval.callback_id):
+            logger.warning("Ignoring stale btc_reject callback: %s", data)
+            await query.answer("Expired — newer BTC request is active")
+            return
+        self._btc_approval.result = "rejected"
+        if self._btc_approval.event:
+            self._btc_approval.event.set()
+        await query.answer("Buy-to-close rejected")
+
+    # -------------------- Roll flow --------------------
+
+    async def _cb_roll_approve(self, query: Any, data: str) -> None:
+        if self._is_stale_callback(data, self._roll_approval.callback_id):
+            logger.warning("Ignoring stale roll_approve callback: %s", data)
+            await query.answer("Expired — newer roll request is active")
+            return
+        self._roll_approval.result = "approved"
+        if self._roll_approval.event:
+            self._roll_approval.event.set()
+        await query.answer("Roll approved")
+
+    async def _cb_roll_reject(self, query: Any, data: str) -> None:
+        if self._is_stale_callback(data, self._roll_approval.callback_id):
+            logger.warning("Ignoring stale roll_reject callback: %s", data)
+            await query.answer("Expired — newer roll request is active")
+            return
+        self._roll_approval.result = "rejected"
+        if self._roll_approval.event:
+            self._roll_approval.event.set()
+        await query.answer("Roll rejected")
+
+    # -------------------- Parameter recommendation --------------------
+
+    async def _cb_param(self, query: Any, data: str) -> None:
+        """Handle apply_param_ and reject_param_ callbacks."""
+        await self._handle_param_recommendation(query, data)
+
+    # -------------------- Intraday (generic) --------------------
+
+    async def _cb_intraday_approve(self, query: Any, data: str) -> None:
         is_test = "_test_" in data
-
-        # Handle parameter recommendation approval/rejection
-        if data.startswith("apply_param_") or data.startswith("reject_param_"):
-            await self._handle_param_recommendation(query, data)
-            return
-
-        if data.startswith("approve_"):
-            self._approval_result = ApprovalResult.APPROVED
-            if is_test:
-                await query.edit_message_text(
-                    text=(
-                        "✅ *TEST APPROVED*\n\n"
-                        "🎉 *Full loop confirmed!*\n\n"
-                        "The approval workflow is working:\n"
-                        "1. ✓ Railway sent the message\n"
-                        "2. ✓ You tapped APPROVE\n"
-                        "3. ✓ Railway received your response\n\n"
-                        "_In production, the trade would execute now._"
-                    ),
-                    parse_mode="Markdown",
-                )
-            else:
-                await query.edit_message_text(
-                    text=query.message.text + "\n\n✅ *APPROVED* - Executing trade...",
-                    parse_mode="Markdown",
-                )
-        elif data.startswith("reject_"):
-            self._approval_result = ApprovalResult.REJECTED
-            if is_test:
-                await query.edit_message_text(
-                    text=(
-                        "❌ *TEST REJECTED*\n\n"
-                        "🎉 *Full loop confirmed!*\n\n"
-                        "The rejection workflow is working:\n"
-                        "1. ✓ Railway sent the message\n"
-                        "2. ✓ You tapped REJECT\n"
-                        "3. ✓ Railway received your response\n\n"
-                        "_In production, the trade would be cancelled._"
-                    ),
-                    parse_mode="Markdown",
-                )
-            else:
-                await query.edit_message_text(
-                    text=query.message.text + "\n\n❌ *REJECTED* - Trade cancelled.",
-                    parse_mode="Markdown",
-                )
-
-        # Signal that we got a response
+        self._approval_result = ApprovalResult.APPROVED
+        if is_test:
+            await query.edit_message_text(
+                text=(
+                    "✅ *TEST APPROVED*\n\n"
+                    "🎉 *Full loop confirmed!*\n\n"
+                    "The approval workflow is working:\n"
+                    "1. ✓ Railway sent the message\n"
+                    "2. ✓ You tapped APPROVE\n"
+                    "3. ✓ Railway received your response\n\n"
+                    "_In production, the trade would execute now._"
+                ),
+                parse_mode="Markdown",
+            )
+        else:
+            await query.edit_message_text(
+                text=query.message.text + "\n\n✅ *APPROVED* - Executing trade...",
+                parse_mode="Markdown",
+            )
         if self._approval_event:
             self._approval_event.set()
+
+    async def _cb_intraday_reject(self, query: Any, data: str) -> None:
+        is_test = "_test_" in data
+        self._approval_result = ApprovalResult.REJECTED
+        if is_test:
+            await query.edit_message_text(
+                text=(
+                    "❌ *TEST REJECTED*\n\n"
+                    "🎉 *Full loop confirmed!*\n\n"
+                    "The rejection workflow is working:\n"
+                    "1. ✓ Railway sent the message\n"
+                    "2. ✓ You tapped REJECT\n"
+                    "3. ✓ Railway received your response\n\n"
+                    "_In production, the trade would be cancelled._"
+                ),
+                parse_mode="Markdown",
+            )
+        else:
+            await query.edit_message_text(
+                text=query.message.text + "\n\n❌ *REJECTED* - Trade cancelled.",
+                parse_mode="Markdown",
+            )
+        if self._approval_event:
+            self._approval_event.set()
+
+    # =========================================================================
+    # Put Options Approval Flow
+    # =========================================================================
+
+    async def request_put_approval(
+        self,
+        signal: "PutSignal",
+        chain: List[Dict],
+        client: Any,
+        db: Any,
+        account_id_key: str = "default",
+    ) -> ApprovalResult:
+        """Send a put options approval request and wait for user response.
+
+        Sends a Telegram message with strike/expiry/greeks details and 3 inline
+        buttons: Approve, Adjust (show alternatives), Reject.  Uses a separate
+        _put_approval.event so it cannot collide with the intraday _approval_event.
+
+        Returns ApprovalResult indicating the user's decision or timeout.
+        """
+        if not self.chat_id:
+            logger.error("No chat_id configured, cannot request put approval")
+            return ApprovalResult.ERROR
+
+        try:
+            if not self._app:
+                await self.initialize()
+
+            callback_id = f"put_{get_et_now().strftime('%H%M%S')}"
+
+            # Store for use in callback handlers
+            self._put_approval.signal = signal
+            self._put_approval.chain = chain
+            self._put_approval.callback_id = callback_id
+
+            # Build message
+            message = (
+                "📉 *CASH-SECURED PUT SIGNAL*\n\n"
+                f"• Symbol: {escape_markdown(signal.symbol)}\n"
+                f"• Strike: ${signal.strike:.2f}\n"
+                f"• Expiry: {escape_markdown(signal.expiry_date)} ({signal.dte} DTE)\n"
+                f"• Delta: {signal.delta:.3f}\n"
+                f"• Premium (bid): ${signal.premium:.2f}/share\n"
+                f"• Max Risk: ${signal.max_risk:,.0f} (1 contract)\n"
+                f"• IV: {signal.iv:.1%}\n"
+                f"• Pullback: {signal.pullback_pct:.1f}%\n\n"
+                f"⏱ Timeout: {self.approval_timeout // 60} minutes"
+            )
+
+            keyboard = [
+                [
+                    InlineKeyboardButton("✅ Approve", callback_data=f"put_approve_{callback_id}"),
+                    InlineKeyboardButton("🔄 Adjust", callback_data=f"put_adjust_{callback_id}"),
+                    InlineKeyboardButton("❌ Reject", callback_data=f"put_reject_{callback_id}"),
+                ]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+
+            await self._app.bot.send_message(
+                chat_id=self.chat_id,
+                text=message,
+                parse_mode="Markdown",
+                reply_markup=reply_markup,
+            )
+
+            # T-03-05: put flow uses its own ApprovalFlow so it cannot collide
+            # with intraday, call, btc, or roll approvals.
+            result = await self._wait_for_approval_result(
+                self._put_approval,
+                f"⏰ *TIMEOUT*\n\nNo response received for put signal at ${signal.strike:.2f}. "
+                "Suggestion cancelled.",
+            )
+            if result is None:
+                return ApprovalResult.TIMEOUT
+
+            if result == "rejected":
+                return ApprovalResult.REJECTED
+
+            # result is either "approved" or a numeric string (alternative strike selected)
+            if result is not None and result != "approved":
+                try:
+                    alt_strike = float(result)
+                    alt_signal = self._build_alt_signal_from_chain(chain, "PUT", alt_strike, signal)
+                    if alt_signal is not None:
+                        signal = alt_signal
+                    else:
+                        logger.warning(
+                            "Could not find chain entry for alt_strike=%.2f; using original signal",
+                            alt_strike,
+                        )
+                except ValueError:
+                    logger.error("Could not parse put approval result as float: %s", result)
+
+            success = await self._execute_put_order(signal, client, db, account_id_key)
+            return ApprovalResult.APPROVED if success else ApprovalResult.ERROR
+
+        except Exception as e:
+            logger.error("Failed to request put approval: %s", e, exc_info=True)
+            return ApprovalResult.ERROR
+        finally:
+            # Release chain reference to avoid memory retention between cycles
+            self._put_approval.signal = None
+            self._put_approval.chain = None
+
+    async def _execute_put_order(
+        self,
+        signal: "PutSignal",
+        client: Any,
+        db: Any,
+        account_id_key: str,
+    ) -> bool:
+        """Preview, place a put sell-to-open order, then record it in the DB.
+
+        Thin wrapper over WheelExecutor.execute_put_sell. This method exists
+        only to format and send the Telegram notification based on the
+        executor's structured result.
+        """
+        from ..wheel_executor import WheelExecutor
+
+        executor = WheelExecutor(client, db, account_id_key)
+        result = executor.execute_put_sell(signal)
+
+        if result.success:
+            cycle_id = result.data["cycle_id"]
+            order_id = result.data.get("order_id")
+            await self._app.bot.send_message(
+                chat_id=self.chat_id,
+                text=(
+                    "✅ *PUT ORDER PLACED*\n\n"
+                    f"• Strike: ${signal.strike:.2f}\n"
+                    f"• Expiry: {escape_markdown(signal.expiry_date)}\n"
+                    f"• Premium: ${signal.premium:.2f}/share (${signal.premium * 100:.2f} total)\n"
+                    f"• Order ID: {escape_markdown(str(order_id) if order_id else 'pending')}\n"
+                    f"• Cycle ID: {cycle_id}"
+                ),
+                parse_mode="Markdown",
+            )
+            return True
+
+        # Failure: format notification based on failure_kind
+        try:
+            await self._app.bot.send_message(
+                chat_id=self.chat_id,
+                text=f"⚠️ *PUT ORDER FAILED*\n\n{escape_markdown(result.error or 'Unknown error')}",
+                parse_mode="Markdown",
+            )
+        except Exception as notify_err:
+            logger.warning("Put order failure notification failed: %s", notify_err)
+        return False
+
+    async def _handle_put_adjust(self, query: Any, data: str) -> None:
+        """Show 3-5 nearby alternative put strikes for user selection."""
+        await self._handle_option_adjust(query, data, option_type="PUT")
+
+    async def _handle_option_adjust(self, query: Any, data: str, option_type: str) -> None:
+        """Show 3-5 nearby alternative strikes for put or call adjust flow.
+
+        Filters the stored chain to the adjust delta range for the given
+        option type, sorts by strike, picks 2 below and 2 above the
+        originally suggested strike, and renders the results as inline
+        buttons. Call flows additionally hard-filter strikes below
+        cost_basis (T-04-10).
+
+        Args:
+            query: Telegram callback query.
+            data: Full callback_data string starting with
+                  ``"put_adjust_"`` or ``"call_adjust_"``.
+            option_type: ``"PUT"`` or ``"CALL"``.
+        """
+        from ..wheel_strategy import WheelStrategy  # local — avoid circular
+
+        if option_type == "PUT":
+            chain = self._put_approval.chain or []
+            signal = self._put_approval.signal
+            prefix = "put_adjust_"
+            alt_prefix = "put_alt_"
+            reject_prefix = "put_alt_reject_"
+            delta_min = WheelStrategy.PUT_ADJUST_DELTA_MIN
+            delta_max = WheelStrategy.PUT_ADJUST_DELTA_MAX
+            cost_basis = 0.0
+            section_title = "SELECT ALTERNATIVE STRIKE"
+            section_line = "Choose a put strike or reject all:"
+            empty_range_msg = (
+                f"⚠️ No alternative strikes available in the "
+                f"{delta_min:.2f}–{delta_max:.2f} delta range."
+            )
+            empty_alt_msg = "⚠️ No alternative strikes different from the suggested strike."
+        elif option_type == "CALL":
+            chain = self._call_approval.chain or []
+            signal = self._call_approval.signal
+            prefix = "call_adjust_"
+            alt_prefix = "call_alt_"
+            reject_prefix = "call_alt_reject_"
+            delta_min = WheelStrategy.CALL_ADJUST_DELTA_MIN
+            delta_max = WheelStrategy.CALL_ADJUST_DELTA_MAX
+            cost_basis = signal.cost_basis if signal else 0.0
+            section_title = "SELECT ALTERNATIVE CALL STRIKE"
+            section_line = "Choose a call strike or reject all:"
+            empty_range_msg = (
+                f"⚠️ No profitable call strikes above cost basis ${cost_basis:.2f}. "
+                "Consider waiting for price recovery."
+            )
+            empty_alt_msg = "⚠️ No alternative call strikes different from the suggested strike."
+        else:
+            raise ValueError(f"Unsupported option_type: {option_type!r}")
+
+        # Extract callback_id suffix from the adjust prefix
+        callback_id = data[len(prefix) :]
+
+        # Filter candidates — cost basis floor applied for calls only
+        candidates = [
+            c
+            for c in chain
+            if c.get("option_type") == option_type
+            and delta_min <= abs(float(c.get("delta", 0))) <= delta_max
+            and (option_type != "CALL" or float(c.get("strike", 0)) >= cost_basis)
+        ]
+        candidates.sort(key=lambda c: float(c.get("strike", 0)))
+
+        if not candidates:
+            await query.edit_message_text(text=empty_range_msg, parse_mode="Markdown")
+            return
+
+        # Pick 2 below and 2 above the suggested strike
+        suggested_strike = signal.strike if signal else None
+        if suggested_strike is not None:
+            strikes = [float(c.get("strike", 0)) for c in candidates]
+            nearest_idx = min(range(len(strikes)), key=lambda i: abs(strikes[i] - suggested_strike))
+            start = max(0, nearest_idx - 2)
+            end = min(len(candidates), nearest_idx + 3)
+            alternatives = [
+                c
+                for c in candidates[start:end]
+                if abs(float(c.get("strike", 0)) - suggested_strike) > 0.01
+            ]
+        else:
+            alternatives = candidates[:5]
+
+        if not alternatives:
+            await query.edit_message_text(text=empty_alt_msg, parse_mode="Markdown")
+            return
+
+        # Build buttons: one per alternative strike
+        keyboard = []
+        for c in alternatives:
+            alt_strike = float(c.get("strike", 0))
+            alt_delta = abs(float(c.get("delta", 0)))
+            alt_bid = float(c.get("bid", 0))
+            alt_dte = int(c.get("dte", 0))
+            label = f"${alt_strike:.2f} | δ={alt_delta:.2f} | ${alt_bid:.2f}bid | {alt_dte}DTE"
+            keyboard.append(
+                [
+                    InlineKeyboardButton(
+                        label, callback_data=f"{alt_prefix}{alt_strike}_{callback_id}"
+                    )
+                ]
+            )
+
+        # Reject all button
+        keyboard.append(
+            [InlineKeyboardButton("❌ Reject All", callback_data=f"{reject_prefix}{callback_id}")]
+        )
+
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(
+            text=f"🔄 *{section_title}*\n\n{section_line}",
+            parse_mode="Markdown",
+            reply_markup=reply_markup,
+        )
+
+    # =========================================================================
+    # Covered Call Approval Flow
+    # =========================================================================
+
+    async def request_call_approval(
+        self,
+        signal: "CallSignal",
+        chain: List[Dict],
+        client: Any,
+        db: Any,
+        account_id_key: str = "default",
+    ) -> ApprovalResult:
+        """Send a covered call approval request and wait for user response.
+
+        Sends a Telegram message with strike/expiry/greeks/cost_basis details and 3 inline
+        buttons: Approve, Adjust (show alternatives above cost basis), Reject. Uses a separate
+        _call_approval.event so it cannot collide with the intraday or put _approval_events.
+
+        Returns ApprovalResult indicating the user's decision or timeout.
+        """
+        if not self.chat_id:
+            logger.error("No chat_id configured, cannot request call approval")
+            return ApprovalResult.ERROR
+
+        try:
+            if not self._app:
+                await self.initialize()
+
+            callback_id = f"call_{get_et_now().strftime('%H%M%S')}"
+
+            # Store for use in callback handlers
+            self._call_approval.signal = signal
+            self._call_approval.chain = chain
+            self._call_approval.callback_id = callback_id
+
+            # Build message
+            message = (
+                "📈 *COVERED CALL SIGNAL*\n\n"
+                f"• Symbol: {escape_markdown(signal.symbol)}\n"
+                f"• Strike: ${signal.strike:.2f}\n"
+                f"• Expiry: {escape_markdown(signal.expiry_date)} ({signal.dte} DTE)\n"
+                f"• Delta: {signal.delta:.3f}\n"
+                f"• Premium (bid): ${signal.premium:.2f}/share\n"
+                f"• Total Premium: ${signal.total_premium:.2f} (1 contract)\n"
+                f"• Cost Basis: ${signal.cost_basis:.2f}/share\n"
+                f"• IV: {signal.iv:.1%}\n\n"
+                f"⏱ Timeout: {self.approval_timeout // 60} minutes"
+            )
+
+            keyboard = [
+                [
+                    InlineKeyboardButton("✅ Approve", callback_data=f"call_approve_{callback_id}"),
+                    InlineKeyboardButton("🔄 Adjust", callback_data=f"call_adjust_{callback_id}"),
+                    InlineKeyboardButton("❌ Reject", callback_data=f"call_reject_{callback_id}"),
+                ]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+
+            await self._app.bot.send_message(
+                chat_id=self.chat_id,
+                text=message,
+                parse_mode="Markdown",
+                reply_markup=reply_markup,
+            )
+
+            result = await self._wait_for_approval_result(
+                self._call_approval,
+                f"⏰ *TIMEOUT*\n\nNo response received for call signal at ${signal.strike:.2f}. "
+                "Suggestion cancelled.",
+            )
+            if result is None:
+                return ApprovalResult.TIMEOUT
+
+            if result == "rejected":
+                return ApprovalResult.REJECTED
+
+            # result is either "approved" or a numeric string (alternative strike selected)
+            if result is not None and result != "approved":
+                try:
+                    alt_strike = float(result)
+                    alt_signal = self._build_alt_signal_from_chain(
+                        chain, "CALL", alt_strike, signal
+                    )
+                    if alt_signal is not None:
+                        signal = alt_signal
+                    else:
+                        logger.warning(
+                            "Could not find chain entry for call_alt_strike=%.2f; using original signal",
+                            alt_strike,
+                        )
+                except ValueError:
+                    logger.error("Could not parse call approval result as float: %s", result)
+
+            success = await self._execute_call_order(signal, client, db, account_id_key)
+            return ApprovalResult.APPROVED if success else ApprovalResult.ERROR
+
+        except Exception as e:
+            logger.error("Failed to request call approval: %s", e, exc_info=True)
+            return ApprovalResult.ERROR
+        finally:
+            # Release chain reference to avoid memory retention between cycles
+            self._call_approval.signal = None
+            self._call_approval.chain = None
+
+    async def _execute_call_order(
+        self,
+        signal: "CallSignal",
+        client: Any,
+        db: Any,
+        account_id_key: str,
+    ) -> bool:
+        """Preview, place a covered call sell-to-open order, then record it in the DB.
+
+        Thin wrapper over WheelExecutor.execute_call_sell. The executor enforces
+        the T-04-08 stale signal guard (cost basis floor) and returns a
+        structured result; this method renders the appropriate Telegram notification.
+        """
+        from ..wheel_executor import WheelExecutor
+
+        executor = WheelExecutor(client, db, account_id_key)
+        result = executor.execute_call_sell(signal)
+
+        if result.success:
+            cycle_id = result.data["cycle_id"]
+            order_id = result.data.get("order_id")
+            new_cost_basis = result.data["new_cost_basis"]
+            await self._app.bot.send_message(
+                chat_id=self.chat_id,
+                text=(
+                    "✅ *CALL ORDER PLACED*\n\n"
+                    f"• Strike: ${signal.strike:.2f}\n"
+                    f"• Expiry: {escape_markdown(signal.expiry_date)}\n"
+                    f"• Premium: ${signal.premium:.2f}/share (${signal.premium * 100:.2f} total)\n"
+                    f"• New Cost Basis: ${new_cost_basis:.2f}/share\n"
+                    f"• Order ID: {escape_markdown(str(order_id) if order_id else 'pending')}\n"
+                    f"• Cycle ID: {cycle_id}"
+                ),
+                parse_mode="Markdown",
+            )
+            return True
+
+        # Stale-signal / no-cycle rejections get a different heading than
+        # E*TRADE failures (the order was never attempted).
+        if result.failure_kind in ("stale_signal", "no_cycle"):
+            await self._app.bot.send_message(
+                chat_id=self.chat_id,
+                text=f"⚠️ *CALL ORDER REJECTED*\n\n{escape_markdown(result.error or '')}",
+                parse_mode="Markdown",
+            )
+            return False
+
+        # E*TRADE API/auth failure
+        try:
+            await self._app.bot.send_message(
+                chat_id=self.chat_id,
+                text=f"⚠️ *CALL ORDER FAILED*\n\n{escape_markdown(result.error or 'Unknown error')}",
+                parse_mode="Markdown",
+            )
+        except Exception as notify_err:
+            logger.warning("Call order failure notification failed: %s", notify_err)
+        return False
+
+    async def _handle_call_adjust(self, query: Any, data: str) -> None:
+        """Show 3-5 nearby alternative call strikes for user selection.
+
+        Delegates to _handle_option_adjust which applies the HARD COST BASIS
+        FILTER (T-04-10) for calls.
+        """
+        await self._handle_option_adjust(query, data, option_type="CALL")
+
+    # =========================================================================
+    # Profit-Take (BTC) Approval Flow
+    # =========================================================================
+
+    async def request_profit_take_approval(
+        self,
+        position: dict,
+        chain: list,
+        cycle: dict,
+        client: Any,
+        db: Any,
+        account_id_key: str = "default",
+    ) -> "ApprovalResult":
+        """Send a buy-to-close approval request and wait for user response.
+
+        Sends a Telegram message with option symbol, entry premium, current ask,
+        profit %, and dollar savings from closing early. Uses Approve/Reject buttons.
+        Uses a separate _btc_approval.event to avoid collision with put/call/intraday.
+
+        Returns ApprovalResult indicating the user's decision or timeout.
+        """
+        if not self.chat_id:
+            logger.error("No chat_id configured, cannot request BTC approval")
+            return ApprovalResult.ERROR
+
+        try:
+            if not self._app:
+                await self.initialize()
+
+            # Find current ask price in chain
+            symbol = position["symbol"]
+            matching = next(
+                (c for c in chain if c.get("symbol") == symbol),
+                None,
+            )
+            if matching is None:
+                logger.warning("BTC approval: symbol %s not found in chain", symbol)
+                return ApprovalResult.ERROR
+
+            current_ask = float(matching.get("ask", 0))
+            premium_received = float(position.get("premium_received", 0))
+            quantity = int(position.get("quantity", 1))
+
+            profit_pct = (
+                (premium_received - current_ask) / premium_received * 100
+                if premium_received > 0
+                else 0.0
+            )
+            savings = (premium_received - current_ask) * quantity * 100
+
+            position_id = position["id"]
+            callback_id = f"btc_{position_id}"
+
+            # Store for callback use
+            self._btc_approval.position = position
+            self._btc_approval.chain = chain
+            self._btc_approval.callback_id = callback_id
+
+            message = (
+                "*PROFIT TARGET HIT - 50% Reached*\n\n"
+                f"Option: {escape_markdown(symbol)}\n"
+                f"Type: {position.get('option_type', 'N/A')}\n"
+                f"Strike: ${float(position.get('strike', 0)):.2f}\n"
+                f"Entry premium: ${premium_received:.2f}/share\n"
+                f"Current ask: ${current_ask:.2f}/share\n"
+                f"Profit: {profit_pct:.1f}%\n"
+                f"Savings from closing early: ${savings:.2f}\n\n"
+                f"Suggest: Buy-to-close at ${current_ask:.2f}"
+            )
+
+            keyboard = [
+                [
+                    InlineKeyboardButton("Approve BTC", callback_data=f"btc_approve_{callback_id}"),
+                    InlineKeyboardButton("Reject", callback_data=f"btc_reject_{callback_id}"),
+                ]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+
+            await self._app.bot.send_message(
+                chat_id=self.chat_id,
+                text=message,
+                parse_mode="Markdown",
+                reply_markup=reply_markup,
+            )
+
+            result = await self._wait_for_approval_result(
+                self._btc_approval,
+                f"*TIMEOUT*\n\nNo response received for BTC at ${current_ask:.2f}. "
+                "Suggestion cancelled.",
+            )
+            if result is None:
+                return ApprovalResult.TIMEOUT
+
+            if result == "rejected":
+                logger.info("BTC approval rejected for position_id=%d", position_id)
+                return ApprovalResult.REJECTED
+
+            # result == "approved"
+            success = await self._execute_btc_order(
+                position, cycle, client, db, account_id_key, current_ask
+            )
+            return ApprovalResult.APPROVED if success else ApprovalResult.ERROR
+
+        except Exception as e:
+            logger.error("Failed to request BTC approval: %s", e, exc_info=True)
+            return ApprovalResult.ERROR
+        finally:
+            # Release chain/position references to avoid memory retention
+            self._btc_approval.position = None
+            self._btc_approval.chain = None
+
+    async def _execute_btc_order(
+        self,
+        position: dict,
+        cycle: dict,
+        client: Any,
+        db: Any,
+        account_id_key: str,
+        close_price: float,
+    ) -> bool:
+        """Preview and place a buy-to-close order, then update DB state.
+
+        Thin wrapper over WheelExecutor.execute_btc. The executor handles
+        T-05-06 (no DB mutation on failure) and T-05-09 (audit log).
+        """
+        from ..wheel_executor import WheelExecutor
+
+        executor = WheelExecutor(client, db, account_id_key)
+        result = executor.execute_btc(position, cycle, close_price)
+
+        if result.success:
+            symbol = position["symbol"]
+            order_id = result.data.get("order_id")
+            next_state_value = result.data["next_state"]
+            await self._app.bot.send_message(
+                chat_id=self.chat_id,
+                text=(
+                    "*BTC ORDER PLACED*\n\n"
+                    f"Symbol: {escape_markdown(symbol)}\n"
+                    f"Close price: ${close_price:.2f}/share\n"
+                    f"Order ID: {escape_markdown(str(order_id) if order_id else 'pending')}\n"
+                    f"Cycle transitioned to: {next_state_value}"
+                ),
+                parse_mode="Markdown",
+            )
+            return True
+
+        # E*TRADE failure — notify and return False
+        try:
+            await self._app.bot.send_message(
+                chat_id=self.chat_id,
+                text=f"*BTC ORDER FAILED*\n\n{escape_markdown(result.error or 'Unknown error')}",
+                parse_mode="Markdown",
+            )
+        except Exception as notify_err:
+            logger.warning("BTC order failure notification failed: %s", notify_err)
+        return False
+
+    async def send_dte_alert(self, position: dict, cycle: dict, db: Any) -> None:
+        """Send an informational DTE warning message (no action buttons).
+
+        Called when a position reaches 21 DTE and dte_alert_sent is False.
+        Marks dte_alert_sent after sending to prevent duplicates (PM-04).
+
+        Args:
+            position: options_positions row dict.
+            cycle: wheel_cycles row dict.
+            db: Database instance for mark_dte_alert_sent call.
+        """
+        if not self.chat_id:
+            logger.warning("send_dte_alert: no chat_id configured")
+            return
+
+        try:
+            if not self._app:
+                await self.initialize()
+
+            option_type = position.get("option_type", "N/A")
+            strike = float(position.get("strike", 0))
+            expiry_date = position.get("expiry_date", "N/A")
+
+            # Calculate DTE from expiry_date
+            try:
+                from datetime import date as date_cls
+
+                expiry = date_cls.fromisoformat(str(expiry_date))
+                today = get_et_now().date()
+                dte = (expiry - today).days
+            except Exception:
+                dte = "N/A"
+
+            message = (
+                "*DTE WARNING - 21 Days to Expiration*\n\n"
+                f"Option type: {option_type}\n"
+                f"Strike: ${strike:.2f}\n"
+                f"Expiry: {escape_markdown(str(expiry_date))}\n"
+                f"Days remaining: {dte}\n\n"
+                "Consider your next action: close for profit, let expire, or prepare for assignment."
+            )
+
+            await self._app.bot.send_message(
+                chat_id=self.chat_id,
+                text=message,
+                parse_mode="Markdown",
+            )
+
+            # Mark alert sent to prevent duplicate sends
+            db.mark_dte_alert_sent(position["id"])
+            logger.info("DTE alert sent for position_id=%d dte=%s", position["id"], dte)
+
+        except Exception as e:
+            logger.error("Failed to send DTE alert: %s", e, exc_info=True)
+
+    # =========================================================================
+    # Defensive Roll Approval Flow
+    # =========================================================================
+
+    async def request_roll_approval(
+        self,
+        position: dict,
+        new_contract: dict,
+        cycle: dict,
+        chain: list,
+        client: Any,
+        db: Any,
+        account_id_key: str = "default",
+    ) -> "ApprovalResult":
+        """Send a defensive roll approval request and wait for user response.
+
+        Guards:
+        - roll_count >= 2: sends warning, returns None (no approval dialog)
+        - net debit (new_bid <= current_ask): sends warning, returns None
+
+        Returns ApprovalResult or None if blocked by guards.
+        """
+        if not self.chat_id:
+            logger.error("No chat_id configured, cannot request roll approval")
+            return ApprovalResult.ERROR
+
+        try:
+            if not self._app:
+                await self.initialize()
+
+            roll_count = position.get("roll_count", 0)
+
+            # Guard: max rolls reached
+            if roll_count >= 2:
+                await self._app.bot.send_message(
+                    chat_id=self.chat_id,
+                    text=(
+                        "*ROLL BLOCKED*\n\n"
+                        f"Max rolls reached ({roll_count}/2). Manual intervention may be needed."
+                    ),
+                    parse_mode="Markdown",
+                )
+                logger.info(
+                    "Roll blocked: max rolls reached for position_id=%d roll_count=%d",
+                    position["id"],
+                    roll_count,
+                )
+                return None
+
+            # Find current option ask price in chain
+            symbol = position["symbol"]
+            matching_current = next(
+                (c for c in chain if c.get("symbol") == symbol),
+                None,
+            )
+            current_ask = float(matching_current.get("ask", 0)) if matching_current else 0.0
+
+            new_bid = float(new_contract.get("bid", 0))
+            net = new_bid - current_ask
+
+            # Guard: net debit
+            if net <= 0:
+                await self._app.bot.send_message(
+                    chat_id=self.chat_id,
+                    text=(
+                        "*ROLL BLOCKED*\n\n"
+                        f"Roll would result in net debit of ${abs(net):.2f}/share. "
+                        "Cannot roll for a debit."
+                    ),
+                    parse_mode="Markdown",
+                )
+                logger.info(
+                    "Roll blocked: net debit for position_id=%d net=%.2f",
+                    position["id"],
+                    net,
+                )
+                return None
+
+            position_id = position["id"]
+            callback_id = f"roll_{position_id}"
+
+            current_strike = float(position.get("strike", 0))
+            current_dte = position.get("dte_at_entry", "N/A")
+            new_strike = float(new_contract.get("strike", 0))
+            new_expiry = new_contract.get("expiry_date", "N/A")
+            new_delta = float(new_contract.get("delta", 0))
+            new_dte = int(new_contract.get("dte", 0))
+
+            # Store for callback use
+            self._roll_approval.position = position
+            self._roll_approval.new_contract = new_contract
+            self._roll_approval.callback_id = callback_id
+
+            message = (
+                "*DEFENSIVE ROLL SUGGESTED*\n\n"
+                "Current position:\n"
+                f"  Strike: ${current_strike:.2f}\n"
+                f"  DTE: {current_dte} days\n"
+                f"  Roll count: {roll_count}/2\n\n"
+                "Suggested new position:\n"
+                f"  Strike: ${new_strike:.2f}\n"
+                f"  Expiry: {escape_markdown(str(new_expiry))}\n"
+                f"  Delta: {new_delta:.3f}\n"
+                f"  DTE: {new_dte} days\n\n"
+                f"Estimated BTC cost: ${current_ask:.2f}/share\n"
+                f"New STO premium: ${new_bid:.2f}/share\n"
+                f"Net credit: ${net:.2f}/share (${net * 100:.2f} total)"
+            )
+
+            keyboard = [
+                [
+                    InlineKeyboardButton(
+                        "Approve Roll", callback_data=f"roll_approve_{callback_id}"
+                    ),
+                    InlineKeyboardButton("Reject", callback_data=f"roll_reject_{callback_id}"),
+                ]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+
+            await self._app.bot.send_message(
+                chat_id=self.chat_id,
+                text=message,
+                parse_mode="Markdown",
+                reply_markup=reply_markup,
+            )
+
+            result = await self._wait_for_approval_result(
+                self._roll_approval,
+                "*TIMEOUT*\n\nNo response received for roll suggestion. Suggestion cancelled.",
+            )
+            if result is None:
+                return ApprovalResult.TIMEOUT
+
+            if result == "rejected":
+                logger.info("Roll rejected for position_id=%d", position_id)
+                return ApprovalResult.REJECTED
+
+            # result == "approved"
+            success = await self._execute_roll(
+                position, new_contract, cycle, client, db, account_id_key, current_ask
+            )
+            return ApprovalResult.APPROVED if success else ApprovalResult.ERROR
+
+        except Exception as e:
+            logger.error("Failed to request roll approval: %s", e, exc_info=True)
+            return ApprovalResult.ERROR
+        finally:
+            # Release position/contract references to avoid memory retention
+            self._roll_approval.position = None
+            self._roll_approval.new_contract = None
+
+    async def _execute_roll(
+        self,
+        position: dict,
+        new_contract: dict,
+        cycle: dict,
+        client: Any,
+        db: Any,
+        account_id_key: str,
+        btc_price: float,
+    ) -> bool:
+        """Execute a two-step roll: BTC current position, then STO new position.
+
+        Thin wrapper over WheelExecutor.execute_roll. The executor handles all
+        partial-failure recovery and returns a structured result that carries
+        enough information to render the appropriate notification.
+        """
+        from ..wheel_executor import WheelExecutor
+
+        executor = WheelExecutor(client, db, account_id_key)
+        result = executor.execute_roll(position, new_contract, cycle, btc_price)
+
+        if result.success:
+            old_strike = result.data["old_strike"]
+            new_strike = result.data["new_strike"]
+            net_credit = result.data["net_credit"]
+            roll_count = result.data["roll_count"]
+            try:
+                await self._app.bot.send_message(
+                    chat_id=self.chat_id,
+                    text=(
+                        "*ROLL COMPLETE*\n\n"
+                        f"Closed: ${old_strike:.2f} strike\n"
+                        f"Opened: ${new_strike:.2f} strike\n"
+                        f"Net credit: ${net_credit:.2f}/share\n"
+                        f"Roll count: {roll_count}/2"
+                    ),
+                    parse_mode="Markdown",
+                )
+            except Exception:
+                pass
+            return True
+
+        # BTC step failed — no DB changes were made
+        if result.failure_kind == "roll_btc_failed":
+            try:
+                await self._app.bot.send_message(
+                    chat_id=self.chat_id,
+                    text=(
+                        f"*ROLL FAILED*\n\nBTC step failed: "
+                        f"{escape_markdown(result.error or '')}\nNo changes made."
+                    ),
+                    parse_mode="Markdown",
+                )
+            except Exception:
+                pass
+            return False
+
+        # STO step failed after BTC succeeded — partial failure
+        if result.failure_kind == "roll_sto_failed":
+            btc_order_id = result.data.get("btc_order_id")
+            try:
+                await self._app.bot.send_message(
+                    chat_id=self.chat_id,
+                    text=(
+                        f"*ROLL PARTIAL FAILURE*\n\n"
+                        f"BTC executed but STO failed: {escape_markdown(result.error or '')}\n"
+                        f"Position closed. You may need to manually open a new position.\n"
+                        f"BTC order: {escape_markdown(str(btc_order_id) if btc_order_id else 'N/A')}"
+                    ),
+                    parse_mode="Markdown",
+                )
+            except Exception:
+                pass
+            return False
+
+        return False
 
     async def _handle_param_recommendation(self, query, data: str):
         """Handle parameter recommendation approval/rejection."""
@@ -619,7 +1933,7 @@ class TelegramBot(
             )
 
         except Exception as e:
-            logger.error(f"Error executing sell all: {e}")
+            logger.error("Error executing sell all: %s", e)
             await self._app.bot.send_message(
                 chat_id=self.chat_id,
                 text=f"Error executing sell all: {str(e)}",
@@ -652,7 +1966,7 @@ class TelegramBot(
             )
             return True
         except Exception as e:
-            logger.error(f"Failed to send message: {e}")
+            logger.error("Failed to send message: %s", e)
             return False
 
     async def request_trade_approval(
@@ -678,7 +1992,7 @@ class TelegramBot(
                 await self.initialize()
 
             # Generate unique callback ID
-            callback_id = f"{signal_type}_{datetime.now().strftime('%H%M%S')}"
+            callback_id = f"{signal_type}_{get_et_now().strftime('%H%M%S')}"
 
             # Create message - escape dynamic content
             emoji = self._get_signal_emoji(signal_type)
@@ -729,7 +2043,7 @@ class TelegramBot(
                 return ApprovalResult.TIMEOUT
 
         except Exception as e:
-            logger.error(f"Failed to request approval: {e}")
+            logger.error("Failed to request approval: %s", e)
             return ApprovalResult.ERROR
 
     async def send_trade_executed(
@@ -825,3 +2139,10 @@ class TelegramBot(
             "pump_day": "🚀",
         }
         return emojis.get(signal_type.lower(), "📊")
+
+
+# Runtime invariant: _CALLBACK_DISPATCH must be ordered so that longer,
+# more-specific prefixes come before any prefix they contain. E.g.
+# `put_alt_reject_` must come before `put_alt_`. The check runs at import
+# time so accidental reorderings fail loudly.
+TelegramBot._validate_dispatch_order()

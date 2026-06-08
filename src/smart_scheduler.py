@@ -4,10 +4,11 @@ Smart Scheduler - Automated execution of trading strategy.
 Runs the smart strategy at market open and close.
 """
 
+import functools
 import logging
 from datetime import datetime
 from enum import Enum
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_EXECUTED, JobExecutionEvent
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -18,8 +19,73 @@ from .smart_strategy import Signal, TodaySignal
 from .telegram_bot import TelegramBot, escape_markdown
 from .trading_bot import TradeResult, TradingBot
 from .utils import ET, get_et_now, is_trading_day, run_async
+from .wheel_notifications import (
+    compute_called_away_metrics,
+    format_assignment_message,
+    format_call_expired_otm_message,
+    format_called_away_message,
+    format_put_expired_otm_message,
+)
+from .wheel_strategy import WheelStrategy
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Job guard decorators
+# ---------------------------------------------------------------------------
+# The scheduler has ~15 job methods that share the same preamble guards:
+#   1. Bail out on non-trading days (weekends / market holidays)
+#   2. Bail out if WheelStrategy is not initialized (wheel-specific jobs)
+#   3. Bail out if wheel_mode is enabled (intraday jobs that should sleep
+#      while the wheel strategy is active)
+# These decorators consolidate those guards. They preserve the wrapped
+# function's name via functools.wraps so APScheduler still sees the original
+# _job_X names in its logs.
+#
+# Note: `is_trading_day` and `get_et_now` are referenced through the module
+# namespace, not captured at decoration time, so tests that monkey-patch
+# `src.smart_scheduler.is_trading_day` still work.
+
+
+def requires_trading_day(func: Callable) -> Callable:
+    """Skip the job if today is not a trading day (weekend or market holiday)."""
+
+    @functools.wraps(func)
+    def wrapper(self, *args, **kwargs):
+        if not is_trading_day(get_et_now().date()):
+            logger.debug("Not a trading day, skipping %s", func.__name__)
+            return None
+        return func(self, *args, **kwargs)
+
+    return wrapper
+
+
+def requires_wheel_strategy(func: Callable) -> Callable:
+    """Skip the job if WheelStrategy is not initialized on the scheduler."""
+
+    @functools.wraps(func)
+    def wrapper(self, *args, **kwargs):
+        if not self.wheel_strategy:
+            logger.warning("WheelStrategy not initialized, skipping %s", func.__name__)
+            return None
+        return func(self, *args, **kwargs)
+
+    return wrapper
+
+
+def skip_if_wheel_mode(func: Callable) -> Callable:
+    """Skip the intraday job when wheel_mode_enabled=1 (TR-01)."""
+
+    @functools.wraps(func)
+    def wrapper(self, *args, **kwargs):
+        wheel_mode = self.db.get_bot_state().get("wheel_mode_enabled", 1)
+        if wheel_mode:
+            logger.info("Wheel mode enabled - skipping %s", func.__name__)
+            return None
+        return func(self, *args, **kwargs)
+
+    return wrapper
 
 
 class BotStatus(Enum):
@@ -53,6 +119,20 @@ class SmartScheduler:
         # Add event listeners
         self.scheduler.add_listener(self._on_job_event, EVENT_JOB_ERROR | EVENT_JOB_EXECUTED)
 
+        # Wheel strategy — constructed with bot's client and database
+        self.wheel_strategy: Optional[WheelStrategy] = None
+        if self.bot.client:
+            self.wheel_strategy = WheelStrategy(
+                client=self.bot.client,
+                db=self.db,
+                account_id_key=getattr(self.bot.config, "account_id_key", "default"),
+            )
+
+        # Guard flag: prevents overlapping monitoring approval requests.
+        # Set to True while a Telegram approval for profit-take or roll is in flight.
+        # Plan 02 will set/clear this around request_profit_take_approval / request_roll_approval.
+        self._monitoring_approval_pending: bool = False
+
     def _send_notification(self, message: str, parse_mode: Optional[str] = "Markdown") -> None:
         """Send a notification via the shared Telegram bot instance."""
         if not self.telegram_bot:
@@ -63,7 +143,7 @@ class SmartScheduler:
             try:
                 await self.telegram_bot.send_message(message, parse_mode=parse_mode)
             except Exception as e:
-                logger.error(f"Failed to send Telegram notification: {e}")
+                logger.error("Failed to send Telegram notification: %s", e)
 
         run_async(_send())
 
@@ -71,7 +151,7 @@ class SmartScheduler:
         """Handle job events."""
         if event.exception:
             self._error_count += 1
-            logger.error(f"Job failed: {event.exception}")
+            logger.error("Job failed: %s", event.exception)
             self.db.log_event("SCHEDULER_ERROR", str(event.exception))
 
     def _log_signal_check(self, job_type: str, signal: TodaySignal, now: datetime) -> None:
@@ -120,7 +200,7 @@ class SmartScheduler:
             }
 
         self.db.log_event("SIGNAL_CHECK", f"{job_type}: {signal.signal.value}", details)
-        logger.info(f"Signal check logged: {job_type} -> {signal.signal.value}")
+        logger.info("Signal check logged: %s -> %s", job_type, signal.signal.value)
 
     def setup_jobs(self) -> None:
         """Set up scheduled jobs."""
@@ -232,6 +312,15 @@ class SmartScheduler:
             misfire_grace_time=600,
         )
 
+        # Wheel daily summary - 4:30 PM ET (TR-05)
+        self.scheduler.add_job(
+            self._job_wheel_daily_summary,
+            CronTrigger(day_of_week="mon-fri", hour=16, minute=30, timezone=ET),
+            id="wheel_daily_summary",
+            name="Wheel Daily Position Summary",
+            misfire_grace_time=600,
+        )
+
         # Pre-market reminder - 9:15 AM ET
         self.scheduler.add_job(
             self._job_premarket_reminder,
@@ -289,14 +378,378 @@ class SmartScheduler:
             misfire_grace_time=3600,
         )
 
+        # Wheel strategy: Put signal check — 10:00 AM ET daily
+        self.scheduler.add_job(
+            self._job_put_signal_check,
+            CronTrigger(day_of_week="mon-fri", hour=10, minute=0, timezone=ET),
+            id="put_signal_check",
+            name="Wheel Put Signal Check",
+            misfire_grace_time=300,
+        )
+
+        # Wheel strategy: Assignment detection — 8:30 AM ET daily
+        # Runs after overnight settlement to detect put assignment or OTM expiry.
+        self.scheduler.add_job(
+            self._job_assignment_detection,
+            CronTrigger(day_of_week="mon-fri", hour=8, minute=30, timezone=ET),
+            id="assignment_detection",
+            name="Assignment Detection",
+            misfire_grace_time=600,
+        )
+
+        # Wheel strategy: Options monitoring — every 30 min during market hours
+        # Checks profit target, position tested, and DTE warning for open options.
+        self.scheduler.add_job(
+            self._job_wheel_monitoring,
+            CronTrigger(
+                day_of_week="mon-fri",
+                hour="9-15",
+                minute="0,30",
+                timezone=ET,
+            ),
+            id="wheel_monitoring",
+            name="Wheel Options Monitoring",
+            misfire_grace_time=120,
+        )
+
         logger.info("Scheduler jobs configured")
 
+    @requires_trading_day
+    @requires_wheel_strategy
+    def _job_put_signal_check(self) -> None:
+        """Check for put entry signal and send Telegram approval if signal fires.
+
+        Runs at 10:00 AM ET on trading days. Calls WheelStrategy.get_put_signal()
+        and, if a signal fires, bridges to the async Telegram approval flow via
+        run_async() (CLAUDE.md async/sync bridge pattern).
+        """
+        try:
+            signal = self.wheel_strategy.get_put_signal()
+            if signal is None:
+                logger.info("No put signal — conditions not met")
+                self.db.log_event("INFO", "put_signal_check", {"result": "no_signal"})
+                return
+
+            logger.info(
+                "Put signal fired: strike=%.2f delta=%.3f premium=%.2f",
+                signal.strike,
+                signal.delta,
+                signal.premium,
+            )
+            self.db.log_event(
+                "INFO",
+                "put_signal_fired",
+                {
+                    "strike": signal.strike,
+                    "delta": signal.delta,
+                    "premium": signal.premium,
+                    "dte": signal.dte,
+                    "pullback_pct": signal.pullback_pct,
+                },
+            )
+
+            if not self.telegram_bot:
+                logger.warning("Telegram bot not configured, cannot request put approval")
+                return
+
+            # Get full chain for adjust flow
+            chain = self.wheel_strategy.client.get_ibit_options_chain()
+
+            # Bridge sync scheduler -> async Telegram (CLAUDE.md pattern)
+            result = run_async(
+                self.telegram_bot.request_put_approval(
+                    signal=signal,
+                    chain=chain,
+                    client=self.wheel_strategy.client,
+                    db=self.db,
+                    account_id_key=self.wheel_strategy.account_id_key,
+                )
+            )
+
+            self.db.log_event(
+                "INFO",
+                "put_approval_result",
+                {"result": result.value if result else "unknown"},
+            )
+
+        except Exception as e:
+            logger.error("Put signal check failed: %s", e, exc_info=True)
+            self.db.log_event("ERROR", "put_signal_check_error", {"error": str(e)})
+            # LO-03: send a generic message to Telegram; full exception is
+            # in the server log above for post-mortem.
+            self._send_notification("⚠️ Put signal check error. See server logs for details.")
+
+    @requires_trading_day
+    @requires_wheel_strategy
+    def _job_assignment_detection(self) -> None:
+        """Check for put assignment or OTM expiry after the expiry date passes.
+
+        Runs at 8:30 AM ET on weekdays. Delegates to WheelStrategy.detect_and_process_expiry()
+        which reconciles live E*TRADE positions against the database record to determine
+        whether the sold put was assigned (shares delivered) or expired worthless.
+
+        On assignment: sends Telegram notification with cost basis and covered call hint.
+        On OTM expiry: sends Telegram notification with realized P&L.
+        No active cycle / not expired yet / API error: silently logs and returns.
+        """
+
+        try:
+            result = self.wheel_strategy.detect_and_process_expiry()
+
+            if result is None:
+                logger.info("Assignment detection: no action needed")
+                return
+
+            if result == "assigned":
+                self._handle_assignment()
+            elif result == "called_away":
+                self._handle_called_away()
+            elif result == "call_expired_otm":
+                self._handle_call_expired_otm()
+            elif result == "expired_otm":
+                self._handle_put_expired_otm()
+
+        except Exception as e:
+            logger.error("Assignment detection failed: %s", e, exc_info=True)
+            self.db.log_event("ERROR", "assignment_detection_error", {"error": str(e)})
+            self._send_notification("Assignment detection error. See server logs for details.")
+
+    def _handle_assignment(self) -> None:
+        """Notify on put assignment and optionally request a covered call."""
+        cycle = self.wheel_strategy.db.get_active_cycle()
+        cost_basis = cycle["cost_basis"] if cycle else 0.0
+        strike = cycle["put_strike"] if cycle else 0.0
+
+        # Call signal may be None if no profitable strikes above cost basis
+        call_signal = self.wheel_strategy.get_call_signal()
+
+        message = format_assignment_message(cost_basis, strike, call_signal)
+        self._send_notification(message)
+
+        # If a profitable call exists, trigger the Telegram approval flow
+        if call_signal is not None:
+            chain = self.wheel_strategy.client.get_ibit_options_chain()
+            run_async(
+                self.telegram_bot.request_call_approval(
+                    signal=call_signal,
+                    chain=chain,
+                    client=self.wheel_strategy.client,
+                    db=self.db,
+                    account_id_key=self.wheel_strategy.account_id_key,
+                )
+            )
+
+        self.db.log_event(
+            "INFO",
+            "assignment_notified",
+            {
+                "cost_basis": cost_basis,
+                "strike": strike,
+                "call_signal": call_signal is not None,
+            },
+        )
+
+    def _handle_called_away(self) -> None:
+        """Notify on full-cycle completion after shares were called away."""
+        history = self.db.get_cycle_history(limit=1)
+        last_cycle = history[0] if history else {}
+
+        message = format_called_away_message(last_cycle)
+        self._send_notification(message)
+
+        metrics = compute_called_away_metrics(last_cycle)
+        self.db.log_event("INFO", "called_away_notified", metrics)
+
+    def _handle_call_expired_otm(self) -> None:
+        """Notify on OTM call expiry and optionally request a new covered call."""
+        cycle = self.wheel_strategy.db.get_active_cycle()
+        cost_basis = cycle["cost_basis"] if cycle else 0.0
+
+        call_signal = self.wheel_strategy.get_call_signal()
+
+        message = format_call_expired_otm_message(cost_basis, call_signal)
+        self._send_notification(message)
+
+        if call_signal is not None:
+            chain = self.wheel_strategy.client.get_ibit_options_chain()
+            run_async(
+                self.telegram_bot.request_call_approval(
+                    signal=call_signal,
+                    chain=chain,
+                    client=self.wheel_strategy.client,
+                    db=self.db,
+                    account_id_key=self.wheel_strategy.account_id_key,
+                )
+            )
+
+        self.db.log_event(
+            "INFO",
+            "call_otm_expiry_notified",
+            {
+                "cost_basis": cost_basis,
+                "call_signal": call_signal is not None,
+            },
+        )
+
+    def _handle_put_expired_otm(self) -> None:
+        """Notify on put expiring worthless (OTM) — cycle is now CASH (closed)."""
+        history = self.db.get_cycle_history(limit=1)
+        last_cycle = history[0] if history else {}
+        pnl = last_cycle.get("realized_pnl", 0.0) or 0.0
+
+        message = format_put_expired_otm_message(pnl)
+        self._send_notification(message)
+
+        self.db.log_event("INFO", "otm_expiry_notified", {"realized_pnl": pnl})
+
+    @requires_trading_day
+    @requires_wheel_strategy
+    def _job_wheel_monitoring(self) -> None:
+        """Monitor open options positions for profit target, tested, and DTE warning.
+
+        Runs every 30 min on trading days (9:00 AM – 3:30 PM ET). Delegates to
+        WheelStrategy.run_monitoring_checks() which returns a dict of boolean flags.
+        Plan 02 will wire the Telegram notification flows based on these flags.
+
+        Guards (in order):
+        - Non-trading day: skip (decorator)
+        - No WheelStrategy (client not configured): skip (decorator)
+        - _monitoring_approval_pending: skip (approval already in flight)
+        - No active cycle: skip
+        - Cycle state not SHORT_PUT or COVERED_CALL: skip (no open option to monitor)
+        """
+        if self._monitoring_approval_pending:
+            logger.info("Monitoring approval pending, skipping wheel monitoring")
+            return
+
+        try:
+            cycle = self.db.get_active_cycle()
+            if cycle is None:
+                logger.debug("wheel_monitoring: no active cycle, skipping")
+                return
+
+            state = cycle["state"]
+            from .wheel_state import WheelState
+
+            if state not in (WheelState.SHORT_PUT.value, WheelState.COVERED_CALL.value):
+                logger.debug("wheel_monitoring: cycle state=%s has no open option, skipping", state)
+                return
+
+            result = run_async(self.wheel_strategy.run_monitoring_checks(cycle))
+            logger.info(
+                "wheel_monitoring: profit_target=%s tested=%s dte_warning=%s",
+                result["profit_target_hit"],
+                result["position_tested"],
+                result["dte_warning"],
+            )
+
+            # T-05-03: Log only cycle_id, state, and boolean flags — no premium amounts or raw API
+            self.db.log_event(
+                "INFO",
+                "wheel_monitoring_check",
+                {
+                    "cycle_id": cycle["id"],
+                    "state": state,
+                    "profit_target_hit": result["profit_target_hit"],
+                    "position_tested": result["position_tested"],
+                    "dte_warning": result["dte_warning"],
+                },
+            )
+
+            position = result.get("position")
+            chain = result.get("chain")
+
+            # DTE alert (informational, no approval needed) — send before profit-take check
+            if result["dte_warning"] and position and self.telegram_bot:
+                run_async(self.telegram_bot.send_dte_alert(position, cycle, self.db))
+                self.db.log_event(
+                    "INFO",
+                    "dte_alert_sent",
+                    {"position_id": position["id"], "dte": "<=21"},
+                )
+
+            # Profit-take approval (blocks until user responds or times out)
+            if result["profit_target_hit"] and position and chain and self.telegram_bot:
+                self._monitoring_approval_pending = True
+                try:
+                    approval = run_async(
+                        self.telegram_bot.request_profit_take_approval(
+                            position=position,
+                            chain=chain,
+                            cycle=cycle,
+                            client=self.wheel_strategy.client,
+                            db=self.db,
+                            account_id_key=self.wheel_strategy.account_id_key,
+                        )
+                    )
+                    self.db.log_event(
+                        "INFO",
+                        "profit_take_result",
+                        {"result": approval.value if approval else "unknown"},
+                    )
+                finally:
+                    self._monitoring_approval_pending = False
+
+            # Roll suggestion (only if profit target NOT hit — profit takes priority)
+            elif result["position_tested"] and position and chain and self.telegram_bot:
+                if position.get("roll_count", 0) >= 2:
+                    self._send_notification(
+                        f"Position tested but max rolls reached "
+                        f"({position.get('roll_count', 0)}/2). "
+                        f"Manual intervention may be needed."
+                    )
+                    self.db.log_event(
+                        "INFO",
+                        "roll_blocked_max_rolls",
+                        {
+                            "position_id": position["id"],
+                            "roll_count": position.get("roll_count", 0),
+                        },
+                    )
+                else:
+                    new_contract = self.wheel_strategy.select_roll_strike(
+                        float(position["strike"]), position["option_type"]
+                    )
+                    if new_contract is None:
+                        self._send_notification(
+                            "Position tested but no suitable roll strike found in chain."
+                        )
+                        self.db.log_event(
+                            "INFO",
+                            "roll_no_strike_found",
+                            {"position_id": position["id"]},
+                        )
+                    else:
+                        self._monitoring_approval_pending = True
+                        try:
+                            approval = run_async(
+                                self.telegram_bot.request_roll_approval(
+                                    position=position,
+                                    new_contract=new_contract,
+                                    cycle=cycle,
+                                    chain=chain,
+                                    client=self.wheel_strategy.client,
+                                    db=self.db,
+                                    account_id_key=self.wheel_strategy.account_id_key,
+                                )
+                            )
+                            self.db.log_event(
+                                "INFO",
+                                "roll_approval_result",
+                                {"result": approval.value if approval else "unknown"},
+                            )
+                        finally:
+                            self._monitoring_approval_pending = False
+
+        except Exception as e:
+            logger.error("Wheel monitoring failed: %s", e, exc_info=True)
+            self.db.log_event("ERROR", "wheel_monitoring_error", {"error": str(e)})
+            self._send_notification(f"Wheel monitoring error: {str(e)[:200]}")
+
+    @requires_trading_day
     def _job_auth_reminder(self) -> None:
         """Send daily authentication reminder at 8:00 AM ET."""
         now = get_et_now()
-
-        if not is_trading_day(now.date()):
-            return
 
         # Check if E*TRADE is authenticated
         is_authenticated = False
@@ -337,16 +790,13 @@ class SmartScheduler:
             f"Daily auth check: {auth_status}",
             {"is_authenticated": is_authenticated, "mode": self.bot.config.mode.value},
         )
-        logger.info(f"Auth reminder sent: {auth_status}")
+        logger.info("Auth reminder sent: %s", auth_status)
 
+    @requires_trading_day
+    @skip_if_wheel_mode
     def _job_morning_signal(self) -> None:
         """Execute morning trading signal."""
         now = get_et_now()
-
-        if not is_trading_day(now.date()):
-            logger.info("Not a trading day, skipping")
-            return
-
         logger.info("Executing morning signal check")
 
         try:
@@ -360,7 +810,9 @@ class SmartScheduler:
 
             if result.success:
                 if result.signal != Signal.CASH:
-                    logger.info(f"Trade executed: {result.action} {result.shares} {result.etf}")
+                    logger.info(
+                        "Trade executed: %s %s %s", result.action, result.shares, result.etf
+                    )
                     # Trade notification is handled by execute_signal via approval flow
 
                     # Mark 10 AM dump position if that's what we entered
@@ -372,11 +824,11 @@ class SmartScheduler:
                     logger.info("No trade signal today")
                     self._send_no_signal_notification(now)
             else:
-                logger.error(f"Trade failed: {result.error}")
+                logger.error("Trade failed: %s", result.error)
                 self._send_error_notification(f"Trade failed: {result.error}")
 
         except Exception as e:
-            logger.error(f"Morning signal job failed: {e}")
+            logger.error("Morning signal job failed: %s", e)
             self._error_count += 1
             self._send_error_notification(f"Morning signal check failed: {e}")
 
@@ -418,186 +870,162 @@ class SmartScheduler:
         )
         logger.info("Error notification sent")
 
+    def _get_bitu_sbit_positions(self) -> Tuple[bool, bool]:
+        """Return (has_bitu, has_sbit) across paper/live modes.
+
+        Used by intraday momentum jobs to decide whether to close a conflicting
+        position before flipping to the opposite ETF.
+        """
+        has_bitu = False
+        has_sbit = False
+
+        if self.bot.is_paper_mode:
+            has_bitu = "BITU" in self.bot._paper_positions
+            has_sbit = "SBIT" in self.bot._paper_positions
+        elif self.bot.client:
+            try:
+                positions = self.bot.client.get_account_positions(self.bot.config.account_id_key)
+                for pos in positions:
+                    symbol = pos.get("Product", {}).get("symbol", "")
+                    qty = pos.get("quantity", 0)
+                    if symbol == "BITU" and qty > 0:
+                        has_bitu = True
+                    elif symbol == "SBIT" and qty > 0:
+                        has_sbit = True
+            except Exception as e:
+                logger.warning("Could not check positions: %s", e)
+
+        return has_bitu, has_sbit
+
+    def _job_momentum_signal_check(
+        self,
+        *,
+        label: str,
+        signal_kwargs: Dict[str, bool],
+        expected_signal: Signal,
+        direction: str,
+        status_attr: str,
+        status_pct_attr: str,
+        threshold_attr: str,
+        close_symbol: str,
+        keep_symbol: str,
+        mark_traded: Any,
+    ) -> None:
+        """Shared crash/pump day check.
+
+        Thread-safe: Uses position lock to prevent TOCTOU race conditions.
+        Crash and pump day flows are mirror images parameterized by:
+        - signal_kwargs / expected_signal: which signal to request and expect
+        - status_attr / status_pct_attr: where to read the trigger percent
+        - close_symbol / keep_symbol: ETF to close vs ETF to flip into
+        - mark_traded: strategy method to call on success
+
+        Trading-day and wheel-mode guards are handled by the wrapper decorators
+        on _job_crash_day_check / _job_pump_day_check.
+        """
+        now = get_et_now()
+
+        try:
+            signal = self.bot.strategy.get_today_signal(**signal_kwargs)
+            self._log_signal_check(label, signal, now)
+
+            if signal.signal == expected_signal:
+                status = getattr(signal, status_attr)
+                pct = getattr(status, status_pct_attr)
+                logger.info(
+                    f"{label.replace('_', ' ')} TRIGGERED: IBIT {direction} {abs(pct):.1f}%"
+                )
+
+                # Acquire lock for atomic position check + modification
+                with self.bot._position_lock:
+                    has_bitu, has_sbit = self._get_bitu_sbit_positions()
+                    has_close = has_bitu if close_symbol == "BITU" else has_sbit
+                    has_keep = has_sbit if close_symbol == "BITU" else has_bitu
+
+                    # If holding the wrong ETF, close it first
+                    if has_close:
+                        logger.warning(
+                            f"{direction.upper()} move during {close_symbol} position! "
+                            f"Closing {close_symbol} first..."
+                        )
+                        close_result = self.bot.close_position(close_symbol)
+                        if close_result.success:
+                            logger.info(
+                                f"Emergency close: Sold {close_symbol} @ ${close_result.price:.2f}"
+                            )
+                        else:
+                            logger.error("Failed to close %s: %s", close_symbol, close_result.error)
+                            return  # Don't proceed if we can't close
+
+                    # If already holding the right ETF, we're correctly positioned
+                    elif has_keep:
+                        logger.info("Already holding %s - correctly positioned", keep_symbol)
+                        return
+
+                    # Now execute the momentum trade (still under lock)
+                    # skip_approval=True for time-sensitive emergency trades
+                    result = self.bot.execute_signal(signal, skip_approval=True)
+                    self._last_result = result
+
+                    if result.success:
+                        mark_traded()
+                        logger.info(
+                            f"{label} AUTO-EXECUTED: {result.shares} {keep_symbol} "
+                            f"@ ${result.price:.2f}"
+                        )
+                    else:
+                        logger.error("%s trade failed: %s", label, result.error)
+            else:
+                status = getattr(signal, status_attr, None)
+                if status:
+                    pct = getattr(status, status_pct_attr)
+                    threshold = getattr(self.bot.config.strategy, threshold_attr)
+                    logger.debug("%s check: IBIT %+.1f% (threshold: %+.1f%)", label, pct, threshold)
+
+        except Exception as e:
+            logger.error("%s failed: %s", label, e)
+            self._error_count += 1
+            self._send_error_notification(f"{label} failed: {e}")
+
+    @requires_trading_day
+    @skip_if_wheel_mode
     def _job_crash_day_check(self) -> None:
-        """Check for intraday crash signal and execute if triggered.
+        """Check for intraday crash signal and execute if triggered."""
+        self._job_momentum_signal_check(
+            label="CRASH_DAY_CHECK",
+            signal_kwargs={"check_crash_day": True},
+            expected_signal=Signal.CRASH_DAY,
+            direction="down",
+            status_attr="crash_day_status",
+            status_pct_attr="current_drop_pct",
+            threshold_attr="crash_day_threshold",
+            close_symbol="BITU",
+            keep_symbol="SBIT",
+            mark_traded=self.bot.strategy.mark_crash_day_traded,
+        )
 
-        Thread-safe: Uses position lock to prevent TOCTOU race conditions.
-        """
-        now = get_et_now()
-
-        if not is_trading_day(now.date()):
-            return
-
-        try:
-            # Get fresh signal with crash day check
-            signal = self.bot.strategy.get_today_signal(check_crash_day=True)
-
-            # Log every crash day check for analytics
-            self._log_signal_check("CRASH_DAY_CHECK", signal, now)
-
-            if signal.signal == Signal.CRASH_DAY:
-                logger.info(
-                    f"CRASH DAY TRIGGERED: IBIT down {signal.crash_day_status.current_drop_pct:.1f}%"
-                )
-
-                # Acquire lock for atomic position check + modification
-                # Prevents race with other jobs (reversal, hedge, pump_day)
-                with self.bot._position_lock:
-                    # Check if we have an existing position that conflicts
-                    has_bitu = False
-                    has_sbit = False
-
-                    if self.bot.is_paper_mode:
-                        has_bitu = "BITU" in self.bot._paper_positions
-                        has_sbit = "SBIT" in self.bot._paper_positions
-                    elif self.bot.client:
-                        # For live trading, check actual positions
-                        try:
-                            positions = self.bot.client.get_account_positions(
-                                self.bot.config.account_id_key
-                            )
-                            for pos in positions:
-                                symbol = pos.get("Product", {}).get("symbol", "")
-                                qty = pos.get("quantity", 0)
-                                if symbol == "BITU" and qty > 0:
-                                    has_bitu = True
-                                elif symbol == "SBIT" and qty > 0:
-                                    has_sbit = True
-                        except Exception as e:
-                            logger.warning(f"Could not check positions: {e}")
-
-                    # If holding BITU (long), we MUST close it - holding long during crash is disaster
-                    if has_bitu:
-                        logger.warning("CRASH during BITU position! Closing BITU first...")
-                        close_result = self.bot.close_position("BITU")
-                        if close_result.success:
-                            logger.info(f"Emergency close: Sold BITU @ ${close_result.price:.2f}")
-                        else:
-                            logger.error(f"Failed to close BITU: {close_result.error}")
-                            return  # Don't proceed if we can't close
-
-                    # If already holding SBIT, we're already positioned correctly
-                    elif has_sbit:
-                        logger.info("Already holding SBIT - correctly positioned for crash")
-                        return
-
-                    # Now execute the crash day trade (still under lock)
-                    # skip_approval=True for time-sensitive emergency trades
-                    result = self.bot.execute_signal(signal, skip_approval=True)
-                    self._last_result = result
-
-                    if result.success:
-                        # Mark that we've traded the crash day
-                        self.bot.strategy.mark_crash_day_traded()
-                        logger.info(
-                            f"Crash day trade AUTO-EXECUTED: {result.shares} SBIT @ ${result.price:.2f}"
-                        )
-                    else:
-                        logger.error(f"Crash day trade failed: {result.error}")
-            else:
-                if signal.crash_day_status:
-                    drop = signal.crash_day_status.current_drop_pct
-                    threshold = self.bot.config.strategy.crash_day_threshold
-                    logger.debug(f"Crash day check: IBIT {drop:+.1f}% (threshold: {threshold}%)")
-
-        except Exception as e:
-            logger.error(f"Crash day check failed: {e}")
-            self._error_count += 1
-            self._send_error_notification(f"Crash day check failed: {e}")
-
+    @requires_trading_day
+    @skip_if_wheel_mode
     def _job_pump_day_check(self) -> None:
-        """Check for intraday pump signal and execute if triggered.
+        """Check for intraday pump signal and execute if triggered."""
+        self._job_momentum_signal_check(
+            label="PUMP_DAY_CHECK",
+            signal_kwargs={"check_crash_day": False, "check_pump_day": True},
+            expected_signal=Signal.PUMP_DAY,
+            direction="up",
+            status_attr="pump_day_status",
+            status_pct_attr="current_gain_pct",
+            threshold_attr="pump_day_threshold",
+            close_symbol="SBIT",
+            keep_symbol="BITU",
+            mark_traded=self.bot.strategy.mark_pump_day_traded,
+        )
 
-        Thread-safe: Uses position lock to prevent TOCTOU race conditions.
-        """
-        now = get_et_now()
-
-        if not is_trading_day(now.date()):
-            return
-
-        try:
-            # Get fresh signal with pump day check
-            signal = self.bot.strategy.get_today_signal(check_crash_day=False, check_pump_day=True)
-
-            # Log every pump day check for analytics
-            self._log_signal_check("PUMP_DAY_CHECK", signal, now)
-
-            if signal.signal == Signal.PUMP_DAY:
-                logger.info(
-                    f"PUMP DAY TRIGGERED: IBIT up {signal.pump_day_status.current_gain_pct:.1f}%"
-                )
-
-                # Acquire lock for atomic position check + modification
-                # Prevents race with other jobs (reversal, hedge, crash_day)
-                with self.bot._position_lock:
-                    # Check if we have an existing position that conflicts
-                    has_bitu = False
-                    has_sbit = False
-
-                    if self.bot.is_paper_mode:
-                        has_bitu = "BITU" in self.bot._paper_positions
-                        has_sbit = "SBIT" in self.bot._paper_positions
-                    elif self.bot.client:
-                        # For live trading, check actual positions
-                        try:
-                            positions = self.bot.client.get_account_positions(
-                                self.bot.config.account_id_key
-                            )
-                            for pos in positions:
-                                symbol = pos.get("Product", {}).get("symbol", "")
-                                qty = pos.get("quantity", 0)
-                                if symbol == "BITU" and qty > 0:
-                                    has_bitu = True
-                                elif symbol == "SBIT" and qty > 0:
-                                    has_sbit = True
-                        except Exception as e:
-                            logger.warning(f"Could not check positions: {e}")
-
-                    # If holding SBIT (inverse), we MUST close it - holding inverse during pump is disaster
-                    if has_sbit:
-                        logger.warning("PUMP during SBIT position! Closing SBIT first...")
-                        close_result = self.bot.close_position("SBIT")
-                        if close_result.success:
-                            logger.info(f"Emergency close: Sold SBIT @ ${close_result.price:.2f}")
-                        else:
-                            logger.error(f"Failed to close SBIT: {close_result.error}")
-                            return  # Don't proceed if we can't close
-
-                    # If already holding BITU, we're already positioned correctly
-                    elif has_bitu:
-                        logger.info("Already holding BITU - correctly positioned for pump")
-                        return
-
-                    # Now execute the pump day trade (still under lock)
-                    # skip_approval=True for time-sensitive emergency trades
-                    result = self.bot.execute_signal(signal, skip_approval=True)
-                    self._last_result = result
-
-                    if result.success:
-                        # Mark that we've traded the pump day
-                        self.bot.strategy.mark_pump_day_traded()
-                        logger.info(
-                            f"Pump day trade AUTO-EXECUTED: {result.shares} BITU @ ${result.price:.2f}"
-                        )
-                    else:
-                        logger.error(f"Pump day trade failed: {result.error}")
-            else:
-                if signal.pump_day_status:
-                    gain = signal.pump_day_status.current_gain_pct
-                    threshold = self.bot.config.strategy.pump_day_threshold
-                    logger.debug(f"Pump day check: IBIT {gain:+.1f}% (threshold: +{threshold}%)")
-
-        except Exception as e:
-            logger.error(f"Pump day check failed: {e}")
-            self._error_count += 1
-            self._send_error_notification(f"Pump day check failed: {e}")
-
+    @requires_trading_day
+    @skip_if_wheel_mode
     def _job_ten_am_dump_exit(self) -> None:
         """Exit 10 AM dump position at 10:30 AM ET."""
         now = get_et_now()
-
-        if not is_trading_day(now.date()):
-            return
 
         # Check if we have a 10 AM dump position open
         if not self.bot.strategy._ten_am_dump_position_open:
@@ -627,7 +1055,7 @@ class SmartScheduler:
                     "Strategy: Captured 10 AM weakness window"
                 )
 
-                logger.info(f"10 AM dump exit: Sold {result.shares} SBIT @ ${result.price:.2f}")
+                logger.info("10 AM dump exit: Sold %s SBIT @ $%.2f", result.shares, result.price)
 
                 self.db.log_event(
                     "TEN_AM_DUMP_EXIT",
@@ -644,10 +1072,10 @@ class SmartScheduler:
                 logger.info("No SBIT position to close for 10 AM dump")
                 self.bot.strategy.mark_ten_am_dump_exited()
             else:
-                logger.error(f"Failed to close 10 AM dump position: {result.error}")
+                logger.error("Failed to close 10 AM dump position: %s", result.error)
 
         except Exception as e:
-            logger.error(f"10 AM dump exit failed: {e}")
+            logger.error("10 AM dump exit failed: %s", e)
             self._error_count += 1
             self._send_error_notification(f"10 AM dump exit failed: {e}")
 
@@ -682,7 +1110,7 @@ class SmartScheduler:
 
                 elif "No position found" in (result.error or ""):
                     # No position to close - not a failure, don't retry
-                    logger.info(f"No {etf} position to close")
+                    logger.info("No %s position to close", etf)
                     return (True, None)
 
                 else:
@@ -692,36 +1120,34 @@ class SmartScheduler:
                     )
                     if attempt < max_retries - 1:
                         wait_time = 2**attempt  # 1s, 2s, 4s
-                        logger.info(f"Retrying in {wait_time}s...")
+                        logger.info("Retrying in %ss...", wait_time)
                         time.sleep(wait_time)
                     else:
                         return (False, result.error)
 
             except Exception as e:
-                logger.error(f"EXCEPTION closing {etf} (attempt {attempt + 1}/{max_retries}): {e}")
+                logger.error(
+                    "EXCEPTION closing %s (attempt %s/%s): %s", etf, attempt + 1, max_retries, e
+                )
                 if attempt < max_retries - 1:
                     wait_time = 2**attempt
-                    logger.info(f"Retrying in {wait_time}s...")
+                    logger.info("Retrying in %ss...", wait_time)
                     time.sleep(wait_time)
                 else:
                     return (False, f"Exception after {max_retries} attempts: {e}")
 
         return (False, None)
 
+    @requires_trading_day
     def _job_close_positions(self) -> None:
         """Close any open positions before market close with retry logic."""
-        now = get_et_now()
-
-        if not is_trading_day(now.date()):
-            return
-
         logger.info("Closing positions before market close")
 
         # First, log what positions E*TRADE sees
         portfolio = self.bot.get_portfolio_value()
-        logger.info(f"EOD close - portfolio check: {portfolio}")
+        logger.info("EOD close - portfolio check: %s", portfolio)
         if "error" in portfolio:
-            logger.error(f"EOD close - E*TRADE error: {portfolio.get('error')}")
+            logger.error("EOD close - E*TRADE error: %s", portfolio.get("error"))
 
         close_failures = []
         close_successes = []
@@ -787,14 +1213,12 @@ class SmartScheduler:
             self._send_notification(message)
 
         except Exception as e:
-            logger.error(f"Failed to send close notification: {e}")
+            logger.error("Failed to send close notification: %s", e)
 
+    @requires_trading_day
     def _job_hedge_check(self) -> None:
         """Check and execute trailing hedges if position has gained enough."""
         now = get_et_now()
-
-        if not is_trading_day(now.date()):
-            return
 
         # Only run during market hours (9:40 AM - 3:50 PM ET)
         if now.hour < 9 or (now.hour == 9 and now.minute < 40):
@@ -830,7 +1254,7 @@ class SmartScheduler:
                 )
 
         except Exception as e:
-            logger.error(f"Hedge check job failed: {e}")
+            logger.error("Hedge check job failed: %s", e)
             self._error_count += 1
             self._send_error_notification(f"Hedge check failed: {e}")
 
@@ -854,14 +1278,12 @@ class SmartScheduler:
             self._send_notification(message)
 
         except Exception as e:
-            logger.warning(f"Failed to send hedge notification: {e}")
+            logger.warning("Failed to send hedge notification: %s", e)
 
+    @requires_trading_day
     def _job_reversal_check(self) -> None:
         """Check and execute position reversal if BITU is down enough."""
         now = get_et_now()
-
-        if not is_trading_day(now.date()):
-            return
 
         # Only run during market hours (9:40 AM - 3:50 PM ET)
         if now.hour < 9 or (now.hour == 9 and now.minute < 40):
@@ -898,7 +1320,7 @@ class SmartScheduler:
                 )
 
         except Exception as e:
-            logger.error(f"Reversal check job failed: {e}")
+            logger.error("Reversal check job failed: %s", e)
             self._error_count += 1
             self._send_error_notification(f"Reversal check failed: {e}")
 
@@ -920,7 +1342,7 @@ class SmartScheduler:
             self._send_notification(message)
 
         except Exception as e:
-            logger.warning(f"Failed to send reversal notification: {e}")
+            logger.warning("Failed to send reversal notification: %s", e)
 
     def _job_renew_token(self) -> None:
         """Renew E*TRADE token."""
@@ -929,15 +1351,13 @@ class SmartScheduler:
                 self.bot.client.renew_token()
                 logger.info("E*TRADE token renewed")
             except Exception as e:
-                logger.error(f"Token renewal failed: {e}")
+                logger.error("Token renewal failed: %s", e)
 
+    @requires_trading_day
+    @skip_if_wheel_mode
     def _job_daily_summary(self) -> None:
         """Send daily summary via Telegram at 4:00 PM ET."""
         now = get_et_now()
-
-        if not is_trading_day(now.date()):
-            return
-
         logger.info("Sending daily summary")
 
         try:
@@ -976,14 +1396,54 @@ class SmartScheduler:
                             ending_cash=ending_cash,
                         )
                     except Exception as e:
-                        logger.error(f"Failed to send daily summary: {e}")
+                        logger.error("Failed to send daily summary: %s", e)
 
                 run_async(_send_summary())
 
-            logger.info(f"Daily summary sent: {trades_today} trades, P/L: ${total_pnl:.2f}")
+            logger.info("Daily summary sent: %s trades, P/L: $%.2f", trades_today, total_pnl)
 
         except Exception as e:
-            logger.error(f"Daily summary failed: {e}")
+            logger.error("Daily summary failed: %s", e)
+            self._error_count += 1
+
+    @requires_trading_day
+    def _job_wheel_daily_summary(self) -> None:
+        """Send wheel position summary at 4:30 PM ET (TR-05)."""
+        now = get_et_now()
+
+        try:
+            cycle = self.db.get_active_cycle()
+            if not cycle:
+                self._send_notification("No active wheel positions today.")
+                return
+
+            positions = self.db.get_cycle_positions(cycle["id"])
+            from .wheel_notifications import compute_wheel_cycle_status
+
+            status = compute_wheel_cycle_status(cycle, positions, now.date())
+
+            lines = ["*WHEEL DAILY SUMMARY*\n"]
+            lines.append(f"Cycle State: {status['state']}")
+            lines.append(f"Cost Basis: ${status['cost_basis']:.2f}/share")
+            lines.append(f"Total Premium: ${status['total_premium']:.2f}")
+
+            if status["open_positions"]:
+                lines.append("\n*Positions:*")
+                for p in status["open_positions"]:
+                    max_risk = p["strike"] * 100
+                    premium = p.get("premium_received") or 0.0
+                    lines.append(
+                        f"  {p['option_type']} ${p['strike']:.0f} "
+                        f"({p['dte']} DTE) | max risk: ${max_risk:,.0f} | "
+                        f"premium: ${premium:.2f}"
+                    )
+            else:
+                lines.append("\nNo open positions.")
+
+            self._send_notification("\n".join(lines))
+
+        except Exception as e:
+            logger.error("Wheel daily summary failed: %s", e)
             self._error_count += 1
 
     def _job_premarket_reminder(self) -> None:
@@ -1023,20 +1483,18 @@ class SmartScheduler:
         )
         logger.info("Pre-market reminder sent")
 
+    @requires_trading_day
     def _job_position_update(self) -> None:
         """Send hourly position update if holding a position."""
         now = get_et_now()
 
-        if not is_trading_day(now.date()):
-            return
-
         # Check if we have any positions
         portfolio = self.bot.get_portfolio_value()
-        logger.info(f"Position update - portfolio result: {portfolio}")
+        logger.info("Position update - portfolio result: %s", portfolio)
 
         # Check for error response
         if "error" in portfolio:
-            logger.error(f"Position update failed - E*TRADE error: {portfolio.get('error')}")
+            logger.error("Position update failed - E*TRADE error: %s", portfolio.get("error"))
             self._send_notification(
                 f"⚠️ Position Update Failed\n\nE*TRADE error: {portfolio.get('error')}",
                 parse_mode=None,
@@ -1075,13 +1533,9 @@ class SmartScheduler:
         )
         logger.info("Position update sent")
 
+    @requires_trading_day
     def _job_health_check(self) -> None:
         """Morning health check - verify account, data feeds, etc."""
-        now = get_et_now()
-
-        if not is_trading_day(now.date()):
-            return
-
         issues = []
         status_lines = []
 
@@ -1133,7 +1587,7 @@ class SmartScheduler:
 
         # Don't use Markdown - message may contain error strings
         self._send_notification(message, parse_mode=None)
-        logger.info(f"Health check sent: {len(issues)} issues found")
+        logger.info("Health check sent: %d issues found", len(issues))
 
     def _job_pattern_analysis(self) -> None:
         """Monthly pattern analysis - runs LLM to discover new trading patterns."""
@@ -1193,11 +1647,11 @@ class SmartScheduler:
                     try:
                         await self.telegram_bot.send_message(message)
                     except Exception as notify_err:
-                        logger.error(f"Failed to send pattern analysis notification: {notify_err}")
-                logger.info(f"Pattern analysis complete: {len(new_patterns)} new patterns")
+                        logger.error("Failed to send pattern analysis notification: %s", notify_err)
+                logger.info("Pattern analysis complete: %d new patterns", len(new_patterns))
 
             except Exception as e:
-                logger.error(f"Pattern analysis failed: {e}")
+                logger.error("Pattern analysis failed: %s", e)
                 # Send error notification
                 if self.telegram_bot:
                     try:
@@ -1238,14 +1692,14 @@ class SmartScheduler:
                     try:
                         await self.telegram_bot.send_message(message, parse_mode="Markdown")
                     except Exception as notify_err:
-                        logger.error(f"Failed to send strategy review notification: {notify_err}")
+                        logger.error("Failed to send strategy review notification: %s", notify_err)
 
                 logger.info(
                     f"Strategy review complete: recommendations={recommendation.has_recommendations}"
                 )
 
             except Exception as e:
-                logger.error(f"Strategy review failed: {e}")
+                logger.error("Strategy review failed: %s", e)
                 # Send error notification
                 if self.telegram_bot:
                     try:
